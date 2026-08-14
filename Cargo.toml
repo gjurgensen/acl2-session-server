@@ -1,0 +1,25 @@
+# Workspace root.
+#
+# The split is deliberate and is expected to outlive the MCP interface:
+#
+#   acl2-session      the core. Owns the ACL2 process, the file-prefix
+#                     invariant, form splitting, and structured extraction.
+#                     Knows nothing about MCP, JSON, or any transport.
+#
+#   acl2-session-mcp  the MCP server (arrives with its implementation). A thin
+#                     mapping from tool calls onto the core, owning its own
+#                     wire types.
+#
+# An editor-facing interface is a plausible third crate. The core must stay
+# usable by one without dragging in the other's dependencies.
+
+[workspace]
+resolver = "3"
+members = ["crates/acl2-session"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.85"
+license = "BSD-3-Clause"
+repository = "https://github.com/gjurgensen/acl2-session-server"

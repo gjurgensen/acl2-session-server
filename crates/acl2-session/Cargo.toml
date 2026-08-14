@@ -1,0 +1,15 @@
+[package]
+name = "acl2-session"
+description = "Drive a live ACL2 session anchored to a file on disk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+libc = "0.2"
+
+[[bin]]
+name = "acl2-session-smoke"
+path = "src/bin/smoke.rs"
