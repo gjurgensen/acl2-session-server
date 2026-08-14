@@ -642,3 +642,75 @@ fn a_certification_that_outruns_its_deadline_is_resumed_by_calling_again() {
     // And it is over: nothing is left in flight to report.
     assert!(b.build_progress(5).is_none(), "a finished build is not progress");
 }
+
+/// The handle a timed-out form hands out is the one its output lands in.
+///
+/// It used to be allocated, left empty, and abandoned: the output went to a
+/// fresh handle when the form finished, so a caller holding the first ref read
+/// an empty file and concluded the form printed nothing. A successful read
+/// giving a wrong answer is the same failure class as the handle collision.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_timed_out_forms_handle_is_filled_when_it_finishes() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("handle-fill");
+    let file = dir.join("h.lisp");
+    std::fs::write(&file, "(in-package \"ACL2\")\n").unwrap();
+    let mut b = Book::open(&acl2, &file).unwrap();
+    b.sync(None, Duration::from_secs(60)).unwrap();
+
+    // Prints for a while, so it certainly outruns the deadline.
+    let noisy = "(ld (make-list 60 :initial-element '(cw \"~x0~%\" (make-list 200))))";
+    let r = b.eval(noisy, Duration::from_millis(1)).unwrap();
+    assert_eq!(r.outcome, acl2_session::Outcome::StillRunning);
+    let handed_out = r.output_ref.clone();
+
+    let mut done = None;
+    for _ in 0..60 {
+        match b.resume(Duration::from_secs(5)).unwrap() {
+            Some(Resumed::StillRunning { .. }) => continue,
+            other => { done = other; break; }
+        }
+    }
+    let Some(Resumed::Evaluated(fin)) = done else { panic!("the eval must finish") };
+
+    // The same handle, and it has the output in it.
+    assert_eq!(fin.output_ref, handed_out,
+               "the finished form must land under the handle already handed out");
+    let got = b.output(&handed_out, Slice::All).expect("readable");
+    assert!(got.total_lines > 10, "the handle must hold the output, not nothing");
+    assert!(got.text.contains("("), "expected the form's printing: {:?}", &got.text[..got.text.len().min(80)]);
+}
+
+/// An interrupted form's output stays readable.
+///
+/// The capture was only written on completion, so a form that was interrupted
+/// lost everything it had printed -- exactly the output you want, since you
+/// interrupted because it was going badly.
+#[test]
+#[ignore = "needs ACL2"]
+fn an_interrupted_forms_output_survives() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("interrupt-capture");
+    let file = dir.join("i.lisp");
+    std::fs::write(&file, "(in-package \"ACL2\")\n").unwrap();
+    let mut b = Book::open(&acl2, &file).unwrap();
+    b.sync(None, Duration::from_secs(60)).unwrap();
+
+    let noisy = "(ld (make-list 4000 :initial-element '(cw \"~x0~%\" (make-list 200))))";
+    let r = b.eval(noisy, Duration::from_millis(400)).unwrap();
+    assert_eq!(r.outcome, acl2_session::Outcome::StillRunning);
+    let handed_out = r.output_ref.clone();
+
+    assert!(b.interrupt().expect("interrupt"), "the form must be interruptible");
+
+    let got = b.output(&handed_out, Slice::All).expect("still readable after interrupt");
+    assert!(got.total_lines > 0,
+            "what the form printed before the interrupt must survive");
+    assert!(got.superseded,
+            "it describes an abandoned form, not the current world");
+
+    // And the session is usable.
+    let ev = b.eval("(+ 1 1)", Duration::from_secs(30)).unwrap();
+    assert_eq!(ev.outcome, acl2_session::Outcome::Ok);
+}

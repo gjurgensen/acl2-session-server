@@ -162,6 +162,25 @@ impl OutputStore {
         Ok(OutputRef(key))
     }
 
+    /// Write content into a handle already handed out.
+    ///
+    /// A form that outruns its deadline gets a handle immediately, so the
+    /// reply can name one, but nothing to put in it yet. When the form finally
+    /// finishes, its output belongs under *that* handle: a caller who kept the
+    /// ref from the timed-out call and reads it later must see the form's
+    /// output, not an empty file that says it printed nothing.
+    pub fn fill(&mut self, r: &OutputRef, text: &str) -> io::Result<()> {
+        let Some(e) = self.index.get_mut(&r.0) else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no output {}", r.0),
+            ));
+        };
+        std::fs::write(&e.path, text)?;
+        e.lines = if text.is_empty() { 0 } else { text.lines().count() };
+        Ok(())
+    }
+
     pub fn lines(&self, r: &OutputRef) -> Option<usize> {
         self.index.get(&r.0).map(|e| e.lines)
     }

@@ -390,6 +390,13 @@ const OWN_OUTPUT: &str = "(acl2::prog2$ \
 /// fixed number of slots is read for the same reason as the checkpoints:
 /// iterating would need a recursive helper, and defining one would put it in
 /// the world.
+/// Note the `true-list-fix` around `event-data-fal`. That global is a fast
+/// alist whose final cdr is the symbol naming it, so it is never `alistp` --
+/// and `CLEAR_STALE` blanks it to that bare symbol, so it is sometimes not a
+/// cons at all. `strip-cars` needs `alistp`, and an unguarded call is a guard
+/// violation that fails the *unit* the probe is spliced into, not just the
+/// probe. Measured: `(alistp (@ event-data-fal))` is `nil` after two events,
+/// while `(strip-cars (true-list-fix ...))` gives both names.
 const INNER_EVENTS_PROBE: &str = r#"(acl2::let*
   ((acl2::f0 (acl2::@ acl2::event-data-fal))
    (acl2::e0 (acl2::and (acl2::consp acl2::f0) (acl2::car acl2::f0)))
@@ -397,19 +404,14 @@ const INNER_EVENTS_PROBE: &str = r#"(acl2::let*
    (acl2::e1 (acl2::and (acl2::consp acl2::f1) (acl2::car acl2::f1)))
    (acl2::f2 (acl2::and (acl2::consp acl2::f1) (acl2::cdr acl2::f1)))
    (acl2::e2 (acl2::and (acl2::consp acl2::f2) (acl2::car acl2::f2)))
-   (acl2::f3 (acl2::and (acl2::consp acl2::f2) (acl2::cdr acl2::f2)))
    (acl2::d0 (acl2::and (acl2::consp acl2::e0) (acl2::car (acl2::cdr acl2::e0))))
    (acl2::d1 (acl2::and (acl2::consp acl2::e1) (acl2::car (acl2::cdr acl2::e1))))
    (acl2::d2 (acl2::and (acl2::consp acl2::e2) (acl2::car (acl2::cdr acl2::e2)))))
   (acl2::prog2$
-    (acl2::cw "~%<<<ASS-BEGIN inner>>>~%more ~x0~%n0 ~x1~%a0 ~x2~%n1 ~x3~%a1 ~x4~%n2 ~x5~%a2 ~x6~%"
-      (acl2::if (acl2::consp acl2::f3) acl2::t acl2::nil)
-      (acl2::and (acl2::consp acl2::e0) (acl2::car acl2::e0))
-      (acl2::cdr (acl2::assoc-eq 'acl2::abort-causes acl2::d0))
-      (acl2::and (acl2::consp acl2::e1) (acl2::car acl2::e1))
-      (acl2::cdr (acl2::assoc-eq 'acl2::abort-causes acl2::d1))
-      (acl2::and (acl2::consp acl2::e2) (acl2::car acl2::e2))
-      (acl2::cdr (acl2::assoc-eq 'acl2::abort-causes acl2::d2)))
+    (acl2::cw "~%<<<ASS-BEGIN inner>>>~%")
+    (acl2::prog2$
+      (acl2::cw "~*0" (acl2::list "" "iname ~x*~%" "iname ~x*~%" "iname ~x*~%"
+                        (acl2::strip-cars (acl2::true-list-fix acl2::f0))))
     (acl2::prog2$
       (acl2::cw "~*0" (acl2::list "" "r0rune ~x*~%" "r0rune ~x*~%" "r0rune ~x*~%"
                         (acl2::cdr (acl2::assoc-eq 'acl2::rules acl2::d0))))
@@ -420,8 +422,11 @@ const INNER_EVENTS_PROBE: &str = r#"(acl2::let*
           (acl2::cw "~*0" (acl2::list "" "r2rune ~x*~%" "r2rune ~x*~%" "r2rune ~x*~%"
                             (acl2::cdr (acl2::assoc-eq 'acl2::rules acl2::d2))))
           (acl2::prog2$
-            (acl2::cw "<<<ASS-END inner>>>~%")
-            (acl2::value :invisible)))))))"#;
+            (acl2::cw "a0 ~x0~%a1 ~x1~%a2 ~x2~%<<<ASS-END inner>>>~%"
+              (acl2::cdr (acl2::assoc-eq 'acl2::abort-causes acl2::d0))
+              (acl2::cdr (acl2::assoc-eq 'acl2::abort-causes acl2::d1))
+              (acl2::cdr (acl2::assoc-eq 'acl2::abort-causes acl2::d2)))
+            (acl2::value :invisible))))))))"#;
 
 /// ACL2 prints a string with `~x` in quotes; the value is the text inside.
 fn unquote(v: &str) -> Option<String> {
@@ -448,20 +453,28 @@ fn items(pairs: &[(String, String)], key: &str) -> Vec<String> {
 
 fn parse_inner(sub: &crate::session::Submission) -> (Vec<InnerEvent>, usize) {
     let Some(body) = sub.block("inner") else { return (Vec::new(), 0) };
-    let pairs = keyed_block(body, &["more", "n0", "a0", "n1", "a1", "n2", "a2",
+    let pairs = keyed_block(body, &["iname", "a0", "a1", "a2",
                                     "r0rune", "r1rune", "r2rune"]);
     let get = |k: &str| pairs.iter().find(|(pk, _)| pk == k)
         .map(|(_, v)| v.trim().to_string()).filter(|v| !is_nil(v));
+    // Every name, not a sample of them. A `defines` clique introduces far more
+    // than three events, and a list of three that looks complete is worse than
+    // a long one: the reporter found two of a clique's own functions in the
+    // world and absent from this list, with nothing to say it was truncated.
+    let names = items(&pairs, "iname");
+    let detail = [("a0", "r0rune"), ("a1", "r1rune"), ("a2", "r2rune")];
     let mut out = Vec::new();
-    for (n, a, r) in [("n0", "a0", "r0rune"), ("n1", "a1", "r1rune"),
-                      ("n2", "a2", "r2rune")] {
-        if let Some(name) = get(n) {
-            out.push(InnerEvent { name, abort_causes: get(a), rules: items(&pairs, r) });
-        }
+    for (i, name) in names.iter().enumerate() {
+        // Names are cheap and complete; the per-event detail is not, and is
+        // read for the first few only.
+        let (a, r) = detail.get(i).copied().unwrap_or(("", ""));
+        out.push(InnerEvent {
+            name: name.clone(),
+            abort_causes: if a.is_empty() { None } else { get(a) },
+            rules: if r.is_empty() { Vec::new() } else { items(&pairs, r) },
+        });
     }
-    // Only a fixed number of slots is read; say when there were more rather
-    // than let a client mistake a truncation for the whole story.
-    let total = out.len() + usize::from(get("more").is_some());
+    let total = out.len();
     (out, total)
 }
 
@@ -651,6 +664,12 @@ pub struct Book {
     dirty: bool,
     /// `inhibit-output-lst` as inherited, before the server removed PROVE.
     inherited_inhibit: Option<String>,
+    /// The handle handed out for a form that outran its deadline.
+    ///
+    /// Held so the form's output lands under the handle the caller already
+    /// has, rather than under a fresh one while the original stays empty
+    /// forever. Cleared once filled.
+    in_flight_output: Option<OutputRef>,
     /// Where this image keeps its books, as ACL2 itself reports it.
     ///
     /// Asked rather than inferred. Walking up from the image looking for
@@ -705,6 +724,7 @@ impl Book {
             dirty: false,
             inherited_inhibit: None,
             books_dir: None,
+            in_flight_output: None,
             build: None,
         };
         // A baseline label, so "roll back to the empty prefix" is the same
@@ -819,7 +839,7 @@ impl Book {
         sub: crate::session::Submission,
         deadline: Duration,
     ) -> Result<EvalResult, SyncError> {
-        let output_ref = self.outputs.put(&sub.output)?;
+        let output_ref = self.record_output(&sub)?;
         let output_lines = self.outputs.lines(&output_ref).unwrap_or(0);
         let after: Option<i64> = sub.get("cmd").and_then(|v| v.parse().ok());
 
@@ -996,6 +1016,36 @@ impl Book {
         Ok(out)
     }
 
+    /// File a form's output under the handle a timed-out call already handed
+    /// out for it.
+    ///
+    /// A form that outruns its deadline has printed nothing we can file yet,
+    /// but the reply must still name a handle. That handle used to be
+    /// allocated, left empty, and then abandoned: when the form finished, its
+    /// output went to a *fresh* handle, so a caller holding the first one read
+    /// an empty file and concluded the form printed nothing. The handle is
+    /// remembered instead, and filled when the output arrives.
+    fn record_output(&mut self, sub: &crate::session::Submission) -> Result<OutputRef, SyncError> {
+        if sub.outcome == Outcome::StillRunning {
+            let r = match self.in_flight_output.clone() {
+                Some(r) => r,
+                None => {
+                    let fresh = self.outputs.put("")?;
+                    self.in_flight_output = Some(fresh.clone());
+                    fresh
+                }
+            };
+            return Ok(r);
+        }
+        match self.in_flight_output.take() {
+            Some(r) => {
+                self.outputs.fill(&r, &sub.output)?;
+                Ok(r)
+            }
+            None => Ok(self.outputs.put(&sub.output)?),
+        }
+    }
+
     /// After a failed unit, recover what ACL2 recorded about it.
     ///
     /// Best effort by design: this runs when something has already gone wrong,
@@ -1060,7 +1110,7 @@ impl Book {
                 label,
             });
         }
-        let output_ref = self.outputs.put(&sub.output)?;
+        let output_ref = self.record_output(&sub)?;
         if sub.outcome == Outcome::Ok {
             self.admitted.push(Admitted {
                 hash: u.hash,
@@ -1104,7 +1154,7 @@ impl Book {
             let r = self.finish_eval(sub, deadline)?;
             return Ok(Some(Resumed::Evaluated(r)));
         };
-        let output_ref = self.outputs.put(&sub.output)?;
+        let output_ref = self.record_output(&sub)?;
         let output_lines = self.outputs.lines(&output_ref).unwrap_or(0);
         if sub.outcome == Outcome::Ok {
             self.admitted.push(Admitted {
@@ -1180,9 +1230,19 @@ impl Book {
         if let Some(mut b) = self.build.take() {
             let _ = b.kill();
         }
+        // Capture before interrupting: the form will never report, so this is
+        // the only chance to keep what it printed, and the interrupt handshake
+        // reads more that would otherwise be mixed in.
+        let partial = self.session.captured_so_far();
         let ok = self.session.interrupt()?;
         if ok {
             self.pending = None;
+            if let Some(r) = self.in_flight_output.take() {
+                let _ = self.outputs.fill(&r, &partial);
+                // It describes a form that was abandoned rather than the world
+                // as it now stands, which is what `superseded` is for.
+                self.outputs.mark_superseded(&r);
+            }
         }
         Ok(ok)
     }

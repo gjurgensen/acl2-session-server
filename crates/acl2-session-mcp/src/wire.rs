@@ -115,11 +115,10 @@ pub struct Failed {
     /// `rejected` -- ACL2 declined the form before any proof: a translate
     /// error, a redefinition, a guard violation, a failed `include-book`. No
     /// checkpoints exist for it.
-    /// `deadline_exceeded` -- your deadline expired; ACL2 is still working.
-    /// Call `acl2_resume` to wait longer, or `acl2_interrupt` to stop it.
     ///
-    /// The first two call for completely different responses, which is why
-    /// they are distinguished rather than both reported as "failed".
+    /// These call for completely different responses, which is why they are
+    /// distinguished rather than both reported as "failed". A deadline is
+    /// neither, and is reported under `in_flight`.
     pub status: String,
     /// Why the prover gave up. `empty-clause` means the conjecture is **false**
     /// rather than merely unproven -- stop trying hints and fix the statement.
@@ -153,9 +152,14 @@ pub struct Failed {
 /// information does not exist.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct SyncReply {
-    /// Index of the last form the target resolved to.
+    /// The form this sync was *aiming* at: the file's last form, or the one
+    /// `through_line` selected.
+    ///
+    /// This is the target, not the progress -- it does not move as a long book
+    /// is worked through. How far the run actually got is `admitted` and
+    /// `reused`, and the form left running is `in_flight`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub resolved_through: Option<usize>,
+    pub target_form: Option<usize>,
     /// Forms left untouched because the file had not changed under them.
     pub reused: usize,
     /// Forms undone because the file had changed under them.
@@ -166,19 +170,50 @@ pub struct SyncReply {
     pub rebuilt: bool,
     pub admitted: Vec<Admitted>,
     /// Sync stops at the first failure, since later forms usually depend on it.
+    ///
+    /// Present only for a form ACL2 actually rejected. A form still running
+    /// when the deadline expired is **not** a failure and appears under
+    /// `in_flight`, so testing for this key is a sound way to ask "did
+    /// anything break?".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failed: Option<Failed>,
+    /// The form still running when the deadline expired. Nothing is wrong:
+    /// ACL2 is still working. Call `acl2_resume` to wait for it, or
+    /// `acl2_interrupt` to stop it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub in_flight: Option<InFlight>,
+}
+
+/// A form ACL2 is still working on.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct InFlight {
+    pub index: usize,
+    pub line_start: usize,
+    pub line_end: usize,
+    /// Handle to this form's output. It fills in when the form finishes; until
+    /// then it is there so you can hold on to it, not because it has content.
+    pub output_ref: String,
 }
 
 impl From<core::SyncOutcome> for SyncReply {
     fn from(o: core::SyncOutcome) -> Self {
+        // A deadline is not a failure. Reporting it under `failed` made a
+        // clean book look broken to anyone keying on that field, which is the
+        // obvious thing to key on.
+        let running = o.failed.as_ref().is_some_and(|f| f.still_running);
         SyncReply {
-            resolved_through: o.resolved_through,
+            target_form: o.resolved_through,
             reused: o.reused,
             rolled_back: o.rolled_back,
             rebuilt: o.rebuilt,
             admitted: o.admitted.iter().map(admitted).collect(),
-            failed: o.failed.as_ref().map(failed),
+            failed: o.failed.as_ref().filter(|_| !running).map(failed),
+            in_flight: o.failed.as_ref().filter(|_| running).map(|f| InFlight {
+                index: f.index,
+                line_start: f.line_start,
+                line_end: f.line_end,
+                output_ref: f.output_ref.to_string(),
+            }),
         }
     }
 }

@@ -369,6 +369,19 @@ impl Session {
     /// what produces the "interrupt twice" ritual users complain about.
     ///
     /// Verified to behave identically on ACL2 images built on SBCL and CCL.
+    /// Everything read for the form in flight, so far.
+    ///
+    /// A form that is interrupted never reports, so its output would otherwise
+    /// be unreachable -- and a proof interrupted because it was going badly is
+    /// exactly the one whose partial output you want. Call before interrupting:
+    /// the interrupt handshake reads more, which would be mixed in.
+    pub fn captured_so_far(&mut self) -> String {
+        if let Ok(more) = self.read_until(|_| false, Duration::from_millis(50)) {
+            self.pending = more;
+        }
+        self.pending.clone()
+    }
+
     pub fn interrupt(&mut self) -> io::Result<bool> {
         for _ in 0..INTERRUPT_TRIES {
             if let Some(pid) = rustix::process::Pid::from_raw(self.child.id() as i32) {

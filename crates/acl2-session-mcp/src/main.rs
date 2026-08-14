@@ -286,7 +286,11 @@ impl Acl2Mcp {
 
     #[tool(description = "Keep waiting for a form whose deadline expired. The \
         deadline bounds the call, not the proof, so this is how a long proof \
-        finishes rather than being abandoned.")]
+        finishes rather than being abandoned.\n\n\
+        Finishes that one form and stops -- it does not carry on through the \
+        rest of the file. Call acl2_sync again to continue; the forms already \
+        admitted are reused, so nothing is re-proved. For a certification, use \
+        acl2_certify again instead.")]
     async fn acl2_resume(
         &self,
         Parameters(a): Parameters<ResumeArgs>,

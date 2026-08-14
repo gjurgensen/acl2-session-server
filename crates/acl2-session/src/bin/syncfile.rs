@@ -64,7 +64,14 @@ fn main() {
         }
         if let Some(w) = &e.warnings { wrap("warnings", w, 4, 70); }
         for ev in &u.inner {
-            wrap(&format!("  {}", ev.name), &ev.rules.join(" "), 4, 70);
+            // Print the name even with no rules: a clique introduces plenty
+            // of events that have none, and skipping them made the list look
+            // truncated when it was complete.
+            if ev.rules.is_empty() {
+                println!("    {:<14}{}", "", ev.name);
+            } else {
+                wrap(&format!("  {}", ev.name), &ev.rules.join(" "), 4, 70);
+            }
         }
         if u.inner_total > u.inner.len() {
             println!("    {:<14}({} shown of {}+)", "", u.inner.len(), u.inner_total);
