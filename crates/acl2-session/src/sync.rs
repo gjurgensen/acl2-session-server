@@ -44,13 +44,25 @@ pub struct EventData {
     /// Runes the proof used.
     pub rules: Option<String>,
     pub warnings: Option<String>,
-    /// Why the prover gave up: `empty-clause` means the conjecture is false,
-    /// `induction-depth-limit-exceeded` means it ran out of depth, and so on.
-    /// These imply completely different next moves.
-    pub abort_causes: Option<String>,
     /// `(prove print proof-tree other)`, in seconds.
     pub time: Option<String>,
 }
+
+// NOTE on compound forms -- `progn`, `encapsulate`, and every macro that
+// expands to one, which is most of a real book: `define`, `defrule`, and
+// friends.
+//
+// `get-event-data` describes the *outer* event, and for compound forms ACL2
+// populates it only partially. Measured on a failing `progn`: no `ABORT-CAUSES`
+// key at all, no `NAMEX`, and `RULES` empty -- against `(ABORT-CAUSES
+// EMPTY-CLAUSE)` and a full rune list for the equivalent bare `defthm`. `TIME`
+// and `PROVER-STEPS-COUNTED` do survive and are aggregates over the whole form.
+//
+// So `rules` is frequently absent on exactly the forms real code is made of.
+// That is ACL2's reporting, not a loss in transit, and it is why the two fields
+// that matter most are read from the prover instead: checkpoints and the abort
+// cause both come from `gag-state-saved`, which is populated at proof level and
+// is completely indifferent to how deeply the failing event was nested.
 
 /// Key checkpoints from the most recent failed proof.
 ///
@@ -68,6 +80,16 @@ pub struct Checkpoints {
     /// than letting the client mistake a truncation for the whole story.
     pub n_top: usize,
     pub n_sub: usize,
+    /// Why the prover gave up: `empty-clause` means the conjecture is false,
+    /// `induction-depth-limit-exceeded` that it ran out of depth, and so on --
+    /// distinctions that imply completely different next moves.
+    ///
+    /// Read from `gag-state-saved`'s `abort-info` rather than from
+    /// `get-event-data`, because the latter reports nothing for compound forms
+    /// (see the note above `EventData`). Measured: a failing `defthm`, a
+    /// failing `progn` and a failing `encapsulate` all report `EMPTY-CLAUSE`
+    /// here, where `get-event-data` reports it only for the bare `defthm`.
+    pub abort_cause: Option<String>,
     /// Non-nil when forcing took place, in which case the checkpoints are
     /// probably not the full story.
     pub forced: bool,
@@ -201,7 +223,7 @@ const CHECKPOINT_PROBE: &str = r#"(acl2::let*
    (acl2::sb (acl2::access acl2::gag-state acl2::gs :sub-stack))
    (acl2::wr (acl2::w acl2::state)))
   (acl2::prog2$
-    (acl2::cw "~%<<<ASS-BEGIN ckpt>>>~%ntop ~x0~%nsub ~x1~%forced ~x2~%top0 ~x3~%top1 ~x4~%top2 ~x5~%sub0 ~x6~%sub1 ~x7~%sub2 ~x8~%<<<ASS-END ckpt>>>~%"
+    (acl2::cw "~%<<<ASS-BEGIN ckpt>>>~%ntop ~x0~%nsub ~x1~%forced ~x2~%abort ~x9~%top0 ~x3~%top1 ~x4~%top2 ~x5~%sub0 ~x6~%sub1 ~x7~%sub2 ~x8~%<<<ASS-END ckpt>>>~%"
       (acl2::len acl2::tp)
       (acl2::len acl2::sb)
       (acl2::access acl2::gag-state acl2::gs :forcep)
@@ -210,7 +232,11 @@ const CHECKPOINT_PROBE: &str = r#"(acl2::let*
       (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 2 acl2::tp) :clause) acl2::nil acl2::wr)
       (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 0 acl2::sb) :clause) acl2::nil acl2::wr)
       (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 1 acl2::sb) :clause) acl2::nil acl2::wr)
-      (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 2 acl2::sb) :clause) acl2::nil acl2::wr))
+      (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 2 acl2::sb) :clause) acl2::nil acl2::wr)
+      (acl2::let ((acl2::ai (acl2::access acl2::gag-state acl2::gs :abort-info)))
+        (acl2::if (acl2::consp acl2::ai)
+                  (acl2::and (acl2::symbolp (acl2::car acl2::ai)) (acl2::car acl2::ai))
+                  acl2::ai)))
     (acl2::value :invisible)))"#;
 
 /// Split a `key value` block into pairs, tolerating values that ACL2 wrapped
@@ -245,12 +271,14 @@ fn is_nil(v: &str) -> bool {
 fn parse_checkpoints(sub: &crate::session::Submission) -> Checkpoints {
     let mut c = Checkpoints::default();
     let Some(body) = sub.block("ckpt") else { return c };
-    let keys = ["ntop", "nsub", "forced", "top0", "top1", "top2", "sub0", "sub1", "sub2"];
+    let keys = ["ntop", "nsub", "forced", "abort",
+                "top0", "top1", "top2", "sub0", "sub1", "sub2"];
     let pairs = keyed_block(body, &keys);
     let get = |k: &str| pairs.iter().find(|(pk, _)| pk == k).map(|(_, v)| v.trim().to_string());
     c.n_top = get("ntop").and_then(|v| v.parse().ok()).unwrap_or(0);
     c.n_sub = get("nsub").and_then(|v| v.parse().ok()).unwrap_or(0);
     c.forced = get("forced").map_or(false, |v| !is_nil(&v));
+    c.abort_cause = get("abort").filter(|v| !is_nil(v));
     for k in ["top0", "top1", "top2"] {
         if let Some(v) = get(k).filter(|v| !is_nil(v)) {
             c.top.push(v);
@@ -269,7 +297,7 @@ fn parse_event_data(sub: &crate::session::Submission) -> EventData {
     let Some(body) = sub.block("evd") else { return e };
     // ACL2 wraps long values at its right margin, so a value runs until the
     // next known key rather than to end of line.
-    let done = keyed_block(body, &["steps", "rules", "warnings", "abort", "time"]);
+    let done = keyed_block(body, &["steps", "rules", "warnings", "time"]);
     let pick = |k: &str| -> Option<String> {
         done.iter()
             .find(|(dk, _)| dk == k)
@@ -279,7 +307,6 @@ fn parse_event_data(sub: &crate::session::Submission) -> EventData {
     e.prover_steps = pick("steps").and_then(|v| v.parse().ok());
     e.rules = pick("rules");
     e.warnings = pick("warnings");
-    e.abort_causes = pick("abort");
     e.time = pick("time");
     e
 }

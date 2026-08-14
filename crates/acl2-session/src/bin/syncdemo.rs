@@ -42,8 +42,8 @@ fn report(b: &Book, label: &str, o: &SyncOutcome) -> bool {
                  f.index, f.line_start, f.line_end,
                  if f.still_running { " [deadline]" } else { "" },
                  f.output_ref, f.output_lines);
-        if let Some(a) = &f.event_data.abort_causes {
-            println!("         abort-causes : {}", one_line(a, 60));
+        if let Some(a) = &f.checkpoints.abort_cause {
+            println!("         abort-cause  : {}", one_line(a, 60));
         }
         if let Some(s) = f.event_data.prover_steps {
             println!("         prover steps : {s}");
@@ -157,7 +157,7 @@ fn main() {
     expect(o.admitted.is_empty(), "nothing new admitted before the failure", &mut fails);
     expect(o.failed.as_ref().map(|f| f.index) == Some(4), "failure is unit 4", &mut fails);
     let f = o.failed.as_ref().unwrap();
-    expect(f.event_data.abort_causes.is_some(), "an abort cause is reported", &mut fails);
+    expect(f.checkpoints.abort_cause.is_some(), "an abort cause is reported", &mut fails);
     expect(!f.checkpoints.top.is_empty() || !f.checkpoints.sub.is_empty(),
            "at least one key checkpoint is reported", &mut fails);
 
@@ -176,6 +176,22 @@ fn main() {
     report(&b, "sync through line 3 only", &o);
     expect(o.resolved_through == Some(1), "resolves to unit 1", &mut fails);
 
+    // A compound form: an encapsulate with a local helper, which is the shape
+    // define/defrule expand into. get-event-data reports almost nothing for
+    // these, so this checks that the fields read from the prover survive.
+    write(&book, &["(in-package \"ACL2\")", f_alpha,
+                   "(defun beta (x) (cons x (cons x x)))", f_thm,
+                   "(defthm now-true (equal (alpha nil) nil))",
+                   "(defun never-reached (x) x)",
+                   "(encapsulate ()\n  (local (defthm cmp-helper (equal (alpha nil) nil)))\n                       (defthm cmp-bad (equal (alpha x) x)))"]);
+    let o = b.sync(None, DEADLINE).expect("sync 8");
+    report(&b, "a failing encapsulate: prover-level fields must survive", &o);
+    let f = o.failed.as_ref().expect("the encapsulate fails");
+    expect(f.checkpoints.abort_cause.is_some(),
+           "abort cause survives nesting (gag-state, not get-event-data)", &mut fails);
+    expect(!f.checkpoints.sub.is_empty() || !f.checkpoints.top.is_empty(),
+           "checkpoints survive nesting", &mut fails);
+
     // Exercise rebuild-by-replay directly. Its real trigger -- a rollback that
     // cannot be verified -- is not reproducible on demand, so drive the
     // mechanism explicitly and check the world it leaves behind.
@@ -191,8 +207,11 @@ fn main() {
     );
     expect(b.rebuilds() == 1, "one rebuild recorded", &mut fails);
     expect(o.reused == 4, "the replayed prefix is recognised as reusable", &mut fails);
-    expect(o.admitted.len() == 2 && o.failed.is_none(),
-           "the remaining 2 units are admitted on top", &mut fails);
+    // The file now ends with the deliberately failing encapsulate, so the two
+    // good units go on top and the run stops at it -- same as before rebuild.
+    expect(o.admitted.len() == 2, "the two good units are admitted on top", &mut fails);
+    expect(o.failed.as_ref().map(|f| f.index) == Some(6),
+           "and the run stops at the failing encapsulate", &mut fails);
 
     let _ = std::fs::remove_dir_all(&dir);
     if fails > 0 {
