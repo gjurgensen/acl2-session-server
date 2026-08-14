@@ -1018,6 +1018,11 @@ impl Book {
         Ok(ok)
     }
 
+    /// The file this session is anchored to.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     /// The unit currently in flight, if any.
     pub fn running_unit(&self) -> Option<usize> {
         self.pending.as_ref().map(|p| p.index)

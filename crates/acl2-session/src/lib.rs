@@ -11,12 +11,14 @@
 
 pub mod output;
 pub mod pty;
+pub mod registry;
 pub mod session;
 pub mod split;
 pub mod sync;
 
 pub use session::{Outcome, Session, Submission};
 pub use split::{split, split_str, Form, SplitError};
+pub use registry::{Registry, RegistryError, SessionId};
 pub use output::{OutputRef, OutputSlice, OutputStore, Slice};
 pub use session::Progress;
 pub use sync::{
