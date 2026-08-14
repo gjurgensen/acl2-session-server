@@ -71,6 +71,9 @@ pub struct EventData {
 /// is. Flattening them buries the informative one.
 #[derive(Debug, Clone, Default)]
 pub struct Checkpoints {
+    /// Whether `gag-state-saved` was populated at all -- i.e. whether a proof
+    /// actually ran. This is what separates `ProofFailure` from `Rejected`.
+    pub proof_ran: bool,
     /// Goals at the top level, prettified as ACL2 would print them.
     pub top: Vec<String>,
     /// Goals under a top-level induction.
@@ -109,13 +112,46 @@ pub struct UnitReport {
     pub output_lines: usize,
 }
 
+/// Why a unit did not go in.
+///
+/// Every arm is derived from ACL2 *state*, never from its prose. That bounds
+/// how fine the taxonomy can be: ACL2 does classify its own errors -- the
+/// bracketed `[Failure]`, `[Translate]`, `[Evaluation]` labels -- but
+/// `error1` only prints the summary and never records it, so those labels
+/// exist solely in the output stream.
+///
+/// The distinction that survives is the one that matters most, because the two
+/// call for completely different responses: the prover tried and could not
+/// finish, versus ACL2 declined the form before any proof began.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Status {
+    /// A proof ran and did not succeed. Checkpoints and an abort cause are
+    /// available. Covers plain theorem failures and guard verification.
+    ProofFailure,
+    /// ACL2 rejected the form without a proof failing: a translate error, a
+    /// redefinition, a guard violation, an unreadable form, a failed
+    /// `include-book`, a termination it would not even attempt. No
+    /// checkpoints exist, and inventing some would be a lie.
+    Rejected,
+    /// The deadline expired. The form may still be running.
+    DeadlineExceeded,
+}
+
 #[derive(Debug, Clone)]
 pub struct FailureReport {
     pub index: usize,
     pub line_start: usize,
     pub line_end: usize,
+    pub status: Status,
     /// True when the deadline expired rather than ACL2 rejecting the unit.
     pub still_running: bool,
+    /// The first `ACL2 Error` line of the log, verbatim.
+    ///
+    /// A convenience slice of output the client could fetch itself, not a
+    /// classification: nothing in this crate branches on it. It matters most
+    /// for `Rejected`, where the structured envelope is otherwise empty
+    /// because no proof ran to describe.
+    pub error_line: Option<String>,
     pub output_ref: OutputRef,
     pub output_lines: usize,
     pub event_data: EventData,
@@ -222,6 +258,10 @@ const EVENT_DATA_PROBE: &str = r#"(acl2::prog2$
 /// session. Nothing would ever have mentioned those functions, but "would
 /// never" is not a guarantee, and the names were a real collision surface.
 ///
+/// Split across two `cw` calls because ACL2's fmt directives index arguments
+/// `~x0` to `~x9` only -- eleven values do not fit in one call, and `~xa` is
+/// not an argument reference at all.
+///
 /// A fixed number of slots is read rather than mapping over the stacks,
 /// because `state` is not available inside a `loop$` body and defining a
 /// recursive helper would reintroduce exactly the world modification being
@@ -234,21 +274,24 @@ const CHECKPOINT_PROBE: &str = r#"(acl2::let*
    (acl2::sb (acl2::access acl2::gag-state acl2::gs :sub-stack))
    (acl2::wr (acl2::w acl2::state)))
   (acl2::prog2$
-    (acl2::cw "~%<<<ASS-BEGIN ckpt>>>~%ntop ~x0~%nsub ~x1~%forced ~x2~%abort ~x9~%top0 ~x3~%top1 ~x4~%top2 ~x5~%sub0 ~x6~%sub1 ~x7~%sub2 ~x8~%<<<ASS-END ckpt>>>~%"
+    (acl2::cw "~%<<<ASS-BEGIN ckpt>>>~%gag ~x0~%ntop ~x1~%nsub ~x2~%forced ~x3~%abort ~x4~%"
+      (acl2::if acl2::gs acl2::t acl2::nil)
       (acl2::len acl2::tp)
       (acl2::len acl2::sb)
       (acl2::access acl2::gag-state acl2::gs :forcep)
-      (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 0 acl2::tp) :clause) acl2::nil acl2::wr)
-      (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 1 acl2::tp) :clause) acl2::nil acl2::wr)
-      (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 2 acl2::tp) :clause) acl2::nil acl2::wr)
-      (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 0 acl2::sb) :clause) acl2::nil acl2::wr)
-      (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 1 acl2::sb) :clause) acl2::nil acl2::wr)
-      (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 2 acl2::sb) :clause) acl2::nil acl2::wr)
       (acl2::let ((acl2::ai (acl2::access acl2::gag-state acl2::gs :abort-info)))
         (acl2::if (acl2::consp acl2::ai)
                   (acl2::and (acl2::symbolp (acl2::car acl2::ai)) (acl2::car acl2::ai))
                   acl2::ai)))
-    (acl2::value :invisible)))"#;
+    (acl2::prog2$
+      (acl2::cw "top0 ~x0~%top1 ~x1~%top2 ~x2~%sub0 ~x3~%sub1 ~x4~%sub2 ~x5~%<<<ASS-END ckpt>>>~%"
+        (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 0 acl2::tp) :clause) acl2::nil acl2::wr)
+        (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 1 acl2::tp) :clause) acl2::nil acl2::wr)
+        (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 2 acl2::tp) :clause) acl2::nil acl2::wr)
+        (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 0 acl2::sb) :clause) acl2::nil acl2::wr)
+        (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 1 acl2::sb) :clause) acl2::nil acl2::wr)
+        (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 2 acl2::sb) :clause) acl2::nil acl2::wr))
+      (acl2::value :invisible))))"#;
 
 /// Split a `key value` block into pairs, tolerating values that ACL2 wrapped
 /// across lines.
@@ -282,10 +325,11 @@ fn is_nil(v: &str) -> bool {
 fn parse_checkpoints(sub: &crate::session::Submission) -> Checkpoints {
     let mut c = Checkpoints::default();
     let Some(body) = sub.block("ckpt") else { return c };
-    let keys = ["ntop", "nsub", "forced", "abort",
+    let keys = ["gag", "ntop", "nsub", "forced", "abort",
                 "top0", "top1", "top2", "sub0", "sub1", "sub2"];
     let pairs = keyed_block(body, &keys);
     let get = |k: &str| pairs.iter().find(|(pk, _)| pk == k).map(|(_, v)| v.trim().to_string());
+    c.proof_ran = get("gag").map_or(false, |v| !is_nil(&v));
     c.n_top = get("ntop").and_then(|v| v.parse().ok()).unwrap_or(0);
     c.n_sub = get("nsub").and_then(|v| v.parse().ok()).unwrap_or(0);
     c.forced = get("forced").map_or(false, |v| !is_nil(&v));
@@ -448,6 +492,18 @@ impl Book {
                     // `gag-state-saved` and `last-event-data` are state
                     // globals and survive the failure.
                     let (ed, cp) = self.probe_after_failure(deadline);
+                    let status = if sub.outcome == Outcome::StillRunning {
+                        Status::DeadlineExceeded
+                    } else if cp.proof_ran {
+                        Status::ProofFailure
+                    } else {
+                        Status::Rejected
+                    };
+                    let error_line = sub
+                        .output
+                        .lines()
+                        .find(|l| l.contains("ACL2 Error"))
+                        .map(|l| l.trim().to_string());
                     // Stop here. The world is sequential, so later units almost
                     // always depend on this one and continuing produces
                     // cascading noise rather than information.
@@ -455,7 +511,9 @@ impl Book {
                         index: i,
                         line_start: u.line_start,
                         line_end: u.line_end,
+                        status,
                         still_running: sub.outcome == Outcome::StillRunning,
+                        error_line,
                         output_ref,
                         output_lines,
                         event_data: ed,

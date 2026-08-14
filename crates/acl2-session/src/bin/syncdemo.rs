@@ -38,10 +38,12 @@ fn report(b: &Book, label: &str, o: &SyncOutcome) -> bool {
         }
     }
     if let Some(f) = &o.failed {
-        println!("     ! unit {} (lines {}-{}) failed{}  [{} | {} lines]",
-                 f.index, f.line_start, f.line_end,
-                 if f.still_running { " [deadline]" } else { "" },
+        println!("     ! unit {} (lines {}-{}) {:?}  [{} | {} lines]",
+                 f.index, f.line_start, f.line_end, f.status,
                  f.output_ref, f.output_lines);
+        if let Some(e) = &f.error_line {
+            println!("         error        : {}", one_line(e, 60));
+        }
         if let Some(a) = &f.checkpoints.abort_cause {
             println!("         abort-cause  : {}", one_line(a, 60));
         }
@@ -213,6 +215,9 @@ fn main() {
            "no checkpoints are attributed to the include-book failure", &mut fails);
     expect(f.checkpoints.abort_cause.is_none(),
            "and no abort cause is invented for it", &mut fails);
+    expect(f.status == acl2_session::Status::Rejected,
+           "it is classified Rejected, not ProofFailure", &mut fails);
+    expect(f.error_line.is_some(), "and the error line is surfaced", &mut fails);
 
     // Exercise rebuild-by-replay directly. Its real trigger -- a rollback that
     // cannot be verified -- is not reproducible on demand, so drive the

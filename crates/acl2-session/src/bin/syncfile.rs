@@ -59,10 +59,10 @@ fn main() {
     }
 
     if let Some(f) = &o.failed {
-        println!("unit {}  lines {}-{}  FAILED{}  [{} | {} lines]",
-                 f.index, f.line_start, f.line_end,
-                 if f.still_running { " (deadline)" } else { "" },
+        println!("unit {}  lines {}-{}  {:?}  [{} | {} lines]",
+                 f.index, f.line_start, f.line_end, f.status,
                  f.output_ref, f.output_lines);
+        if let Some(e) = &f.error_line { wrap("error", e, 4, 70); }
         let c = &f.checkpoints;
         if let Some(x) = &c.abort_cause { println!("    {:<14}{x}", "abort-cause"); }
         if let Some(s) = f.event_data.prover_steps { println!("    {:<14}{s}", "steps"); }
