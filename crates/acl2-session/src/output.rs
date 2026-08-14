@@ -47,6 +47,20 @@ pub enum Slice {
     Tail(usize),
     /// 1-based, inclusive.
     Range(usize, usize),
+    /// Everything ACL2 printed under one goal, from its header to the next.
+    ///
+    /// The natural way to navigate a proof: a client that has been handed
+    /// `Subgoal *1/2` as a checkpoint asks for that goal rather than guessing
+    /// line numbers. On a six-figure log it is the difference between a
+    /// targeted question and a fishing expedition.
+    ///
+    /// Recognising headers is a text operation, like every other slice here.
+    /// ACL2 can do it exactly -- `pso` accepts a goal name and replays the
+    /// saved io-records for it -- but that needs output saving switched on, an
+    /// ACL2 round trip per slice, and per-unit retention of records in session
+    /// state that grows without bound. Text works on every retained log, costs
+    /// nothing, and slices are display, never control flow.
+    Goal { name: String },
     /// Literal substring match with surrounding context lines.
     ///
     /// Substring rather than regex, to keep the core dependency-free. In
@@ -66,6 +80,25 @@ pub struct OutputSlice {
     /// output stays readable -- comparing against what a form used to print is
     /// useful -- but it no longer describes the current world.
     pub superseded: bool,
+}
+
+/// Is this line a bare goal header, such as `Goal`, `Goal'` or
+/// `Subgoal *1/2''`?
+///
+/// Deliberately strict: prose that merely mentions a goal -- "A goal of NIL,
+/// Subgoal *1/2'', has been generated!" -- must not be mistaken for a header,
+/// or a slice would stop early.
+fn is_goal_header(line: &str) -> bool {
+    let t = line.trim();
+    if t.is_empty() || t.len() > 40 {
+        return false;
+    }
+    let lower = t.to_ascii_lowercase();
+    if !(lower.starts_with("goal") || lower.starts_with("subgoal")) {
+        return false;
+    }
+    t.chars()
+        .all(|c| c.is_ascii_alphanumeric() || " *'/.".contains(c))
 }
 
 struct Entry {
@@ -129,38 +162,47 @@ impl OutputStore {
                 let hi = to.min(all.len());
                 if lo >= hi { String::new() } else { all[lo..hi].join("\n") }
             }
-            Slice::Find { needle, context, ignore_case } => {
-                let hay = |l: &str| {
-                    if ignore_case { l.to_lowercase() } else { l.to_string() }
-                };
-                let pat = if ignore_case { needle.to_lowercase() } else { needle.clone() };
-                let hits: Vec<usize> = all
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, l)| hay(l).contains(&pat))
-                    .map(|(i, _)| i)
-                    .collect();
-                let mut keep: Vec<usize> = Vec::new();
-                for h in hits {
-                    let lo = h.saturating_sub(context);
-                    let hi = (h + context + 1).min(all.len());
-                    for i in lo..hi {
-                        if keep.last() != Some(&i) {
-                            keep.push(i);
-                        }
+            Slice::Goal { name } => {
+                let want = name.trim();
+                let start = all.iter().position(|l| {
+                    is_goal_header(l) && l.trim().eq_ignore_ascii_case(want)
+                });
+                match start {
+                    None => String::new(),
+                    Some(i) => {
+                        let end = all[i + 1..]
+                            .iter()
+                            .position(|l| is_goal_header(l))
+                            .map(|k| i + 1 + k)
+                            .unwrap_or(all.len());
+                        all[i..end].join("\n").trim_end().to_string()
                     }
                 }
-                keep.dedup();
-                let mut out: Vec<String> = Vec::new();
-                let mut prev: Option<usize> = None;
-                for i in keep {
-                    if let Some(p) = prev {
-                        if i > p + 1 {
-                            out.push("...".to_string());
-                        }
+            }
+            Slice::Find { needle, context, ignore_case } => {
+                let pat = if ignore_case { needle.to_lowercase() } else { needle.clone() };
+                let matches = |l: &str| {
+                    if ignore_case { l.to_lowercase().contains(&pat) } else { l.contains(&pat) }
+                };
+                // Merge the context windows into disjoint ranges. Windows
+                // around nearby matches overlap, and emitting each window
+                // separately repeats their shared lines -- which reads as ACL2
+                // having printed something twice.
+                let mut ranges: Vec<(usize, usize)> = Vec::new();
+                for (i, _) in all.iter().enumerate().filter(|(_, l)| matches(l)) {
+                    let lo = i.saturating_sub(context);
+                    let hi = (i + context + 1).min(all.len());
+                    match ranges.last_mut() {
+                        Some(last) if lo <= last.1 => last.1 = last.1.max(hi),
+                        _ => ranges.push((lo, hi)),
                     }
-                    out.push(all[i].to_string());
-                    prev = Some(i);
+                }
+                let mut out: Vec<String> = Vec::new();
+                for (n, (lo, hi)) in ranges.iter().enumerate() {
+                    if n > 0 {
+                        out.push("...".to_string());
+                    }
+                    out.extend(all[*lo..*hi].iter().map(|l| l.to_string()));
                 }
                 out.join("\n")
             }
@@ -214,6 +256,18 @@ mod tests {
     }
 
     #[test]
+    fn overlapping_context_windows_do_not_repeat_lines() {
+        let mut s = store();
+        let r = s.put("a\nhit\nhit\nhit\nz").unwrap();
+        let got = s.get(&r, Slice::Find {
+            needle: "hit".into(), context: 1, ignore_case: false,
+        }).unwrap();
+        // Three adjacent matches with context 1 cover the whole thing exactly
+        // once; naive per-match windows would repeat the middle lines.
+        assert_eq!(got.text, "a\nhit\nhit\nhit\nz");
+    }
+
+    #[test]
     fn find_with_context_and_gaps() {
         let mut s = store();
         let r = s.put(BODY).unwrap();
@@ -247,6 +301,55 @@ mod tests {
         let got = s.get(&r, Slice::All).unwrap();
         assert!(got.superseded, "must be flagged");
         assert_eq!(got.text, BODY, "but must not be discarded");
+    }
+
+    const PROOF: &str = "\
+Goal
+(equal (na x) x)
+
+This simplifies, using nothing, to
+Subgoal *1/2
+(implies (not (consp x)) (not x))
+and that is false.
+Subgoal *1/1
+(implies (consp x) t)
+Q.E.D.";
+
+    #[test]
+    fn goal_slice_runs_to_the_next_header() {
+        let mut s = store();
+        let r = s.put(PROOF).unwrap();
+        let got = s.get(&r, Slice::Goal { name: "Subgoal *1/2".into() }).unwrap();
+        assert_eq!(
+            got.text,
+            "Subgoal *1/2\n(implies (not (consp x)) (not x))\nand that is false."
+        );
+        // The first goal runs up to the first subgoal, not to end of file.
+        let got = s.get(&r, Slice::Goal { name: "Goal".into() }).unwrap();
+        assert!(got.text.starts_with("Goal\n(equal (na x) x)"));
+        assert!(!got.text.contains("Subgoal"));
+        // The last goal runs to the end.
+        let got = s.get(&r, Slice::Goal { name: "Subgoal *1/1".into() }).unwrap();
+        assert!(got.text.ends_with("Q.E.D."));
+    }
+
+    #[test]
+    fn an_unknown_goal_is_empty_not_an_error() {
+        let mut s = store();
+        let r = s.put(PROOF).unwrap();
+        assert_eq!(s.get(&r, Slice::Goal { name: "Subgoal 9.9".into() }).unwrap().text, "");
+    }
+
+    #[test]
+    fn prose_mentioning_a_goal_is_not_a_header() {
+        assert!(is_goal_header("Subgoal *1/2"));
+        assert!(is_goal_header("  Goal'  "));
+        assert!(is_goal_header("Subgoal *1/2''"));
+        // These would truncate a slice if treated as headers.
+        assert!(!is_goal_header("A goal of NIL, Subgoal *1/2'', has been generated!"));
+        assert!(!is_goal_header("Goal of NIL, see :DOC nil-goal"));
+        assert!(!is_goal_header("(implies (not (consp x)) (not x))"));
+        assert!(!is_goal_header(""));
     }
 
     #[test]

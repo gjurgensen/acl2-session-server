@@ -313,6 +313,25 @@ const CLEAR_STALE: &str = "(acl2::pprogn \
     (acl2::f-put-global 'acl2::event-data-fal 'acl2::event-data-fal acl2::state) \
     (acl2::value :invisible))";
 
+/// Take ownership of the settings that decide what gets *captured*, while
+/// leaving the ones that decide what is *provable* exactly as inherited.
+///
+/// The session deliberately inherits the user's `acl2-customization.lsp`, so
+/// that proofs behave here exactly as they do in their own session. But a very
+/// common customization is `(quiet)`, which inhibits PROVE output -- and
+/// PROVE inhibition also silently disables output saving entirely
+/// (`prove.lisp`). Measured on one failing `defthm`: 27 captured lines with
+/// `(quiet)` against 46 without, and the missing 19 are the induction-scheme
+/// narrative and subgoal progression, which exist nowhere else -- not in
+/// `get-event-data`, not in `gag-state`.
+///
+/// Re-enabling costs the user nothing, because prover text goes to a captured
+/// sink rather than their terminal: they never see the flood, only the
+/// structured envelope. Only PROVE is removed, so any other inhibition they
+/// chose is respected, and gag-mode is left alone -- `:goals` still yields the
+/// induction narrative while avoiding the six-figure waterfall dumps.
+const OWN_OUTPUT: &str = "(acl2::er-progn     (acl2::set-inhibit-output-lst       (acl2::remove-eq 'acl2::prove (acl2::@ acl2::inhibit-output-lst)))     (acl2::value acl2::nil))";
+
 /// Report the events ACL2 recorded *inside* this unit.
 ///
 /// `event-data-fal` is a state global, off by default, that records each
@@ -549,6 +568,7 @@ impl Book {
         };
         // A baseline label, so "roll back to the empty prefix" is the same
         // operation as any other rollback rather than a special case.
+        b.session.submit(OWN_OUTPUT, Duration::from_secs(60))?;
         b.plant_base_label()?;
         Ok(b)
     }

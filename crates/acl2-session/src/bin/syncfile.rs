@@ -36,6 +36,7 @@ fn main() {
     let acl2 = PathBuf::from(&a[1]);
     let book = PathBuf::from(&a[2]);
     let find = a.iter().position(|x| x == "--find").and_then(|i| a.get(i + 1)).cloned();
+    let goal = a.iter().position(|x| x == "--goal").and_then(|i| a.get(i + 1)).cloned();
 
     let mut b = Book::open(&acl2, &book).expect("open book");
     let o = b.sync(None, Duration::from_secs(300)).expect("sync");
@@ -89,6 +90,19 @@ fn main() {
                      ev.abort_causes.as_deref().unwrap_or(""));
         }
         println!();
+    }
+
+    if let Some(g) = goal {
+        let refs: Vec<_> = o.admitted.iter().map(|u| (u.index, &u.output_ref))
+            .chain(o.failed.iter().map(|f| (f.index, &f.output_ref)))
+            .collect();
+        for (i, r) in refs {
+            let sl = b.output(r, Slice::Goal { name: g.clone() }).expect("slice");
+            if !sl.text.trim().is_empty() {
+                println!("--- unit {i}, goal {:?} (of {} lines) ---", g, sl.total_lines);
+                for l in sl.text.lines() { println!("  | {}", l.trim_end()); }
+            }
+        }
     }
 
     if let Some(needle) = find {
