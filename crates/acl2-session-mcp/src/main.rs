@@ -12,7 +12,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use acl2_session::{Health, Registry, SessionId, Slice, WorldChange};
-use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler, ServiceExt};
@@ -109,10 +108,13 @@ struct OutputArgs {
     context: Option<usize>,
 }
 
+/// The server state.
+///
+/// No `tool_router` field: since rmcp 3, `#[tool_handler]` builds the router by
+/// calling `Self::tool_router()` rather than reading one off the instance.
 #[derive(Clone)]
 struct Acl2Mcp {
     registry: Arc<Mutex<Registry>>,
-    tool_router: ToolRouter<Self>,
 }
 
 /// Run blocking work off the async runtime.
@@ -130,10 +132,7 @@ macro_rules! blocking {
 #[tool_router]
 impl Acl2Mcp {
     fn new(acl2: PathBuf) -> Self {
-        Self {
-            registry: Arc::new(Mutex::new(Registry::new(acl2))),
-            tool_router: Self::tool_router(),
-        }
+        Self { registry: Arc::new(Mutex::new(Registry::new(acl2))) }
     }
 
     /// Look up one session, holding the registry lock only for the lookup.
