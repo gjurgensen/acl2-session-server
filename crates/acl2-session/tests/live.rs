@@ -327,3 +327,48 @@ fn relative_paths_resolve_against_the_book_directory() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A form started by `eval` must be resumable.
+///
+/// `resume` used to consult the pending *unit*, which only `sync` sets, so an
+/// eval that outran its deadline could never be waited for: resume reported
+/// nothing in flight while ACL2 was still working. The session, not the unit
+/// bookkeeping, is the authority on whether something is running.
+#[test]
+#[ignore = "needs ACL2"]
+fn an_eval_that_outruns_its_deadline_can_be_resumed() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("resume-eval");
+    let file = dir.join("ev.lisp");
+    std::fs::write(&file, "(in-package \"ACL2\")\n").unwrap();
+    let mut b = Book::open(&acl2, &file).unwrap();
+    b.sync(None, Duration::from_secs(60)).unwrap();
+
+    // Long enough to outrun the deadline below, short enough to finish.
+    let slow = "(thm (equal (append (append a b) c) (append a (append b c))) \
+                :hints ((\"Goal\" :do-not-induct nil)))";
+    let r = b.eval(slow, Duration::from_millis(1)).unwrap();
+    assert_eq!(r.outcome, acl2_session::Outcome::StillRunning, "test needs a form that outruns 1ms");
+
+    let mut resumed = None;
+    for _ in 0..30 {
+        match b.resume(Duration::from_secs(5)).unwrap() {
+            Some(Resumed::StillRunning { .. }) => continue,
+            other => {
+                resumed = Some(other);
+                break;
+            }
+        }
+    }
+    match resumed {
+        Some(Some(Resumed::Evaluated(r))) => {
+            assert_eq!(r.outcome, acl2_session::Outcome::Ok);
+            assert_eq!(r.world_change, WorldChange::None, "a thm introduces no events");
+        }
+        other => panic!("expected the eval to finish, got {other:?}"),
+    }
+
+    // And the session is usable afterwards.
+    let r = b.eval("(+ 1 1)", Duration::from_secs(30)).unwrap();
+    assert_eq!(r.outcome, acl2_session::Outcome::Ok);
+}

@@ -220,6 +220,26 @@ pub struct EvalReply {
     pub elapsed_ms: u128,
 }
 
+pub fn evaluated(r: &core::EvalResult) -> EvalReply {
+    EvalReply {
+        outcome: match r.outcome {
+            core::Outcome::Ok => "ok",
+            core::Outcome::Failed => "failed",
+            core::Outcome::StillRunning => "still_running",
+        }
+        .to_string(),
+        world_change: match r.world_change {
+            core::WorldChange::None => "none",
+            core::WorldChange::Undone => "undone",
+            core::WorldChange::Dirty => "dirty",
+        }
+        .to_string(),
+        output_ref: r.output_ref.to_string(),
+        output_lines: r.output_lines,
+        elapsed_ms: r.elapsed.as_millis(),
+    }
+}
+
 /// A slice of one form's captured output.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct OutputReply {
@@ -247,12 +267,17 @@ pub struct ProgressReply {
 /// What resuming a form that had outrun its deadline produced.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct ResumeReply {
-    /// `still_running`, `admitted`, `failed`, or `nothing_in_flight`.
+    /// `still_running`, `admitted`, `failed`, `evaluated`, or
+    /// `nothing_in_flight`. `evaluated` means the form was one you submitted
+    /// with `acl2_eval` rather than a form of the file.
     pub outcome: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub admitted: Option<Admitted>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failed: Option<Failed>,
+    /// Present when the form that finished came from `acl2_eval`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evaluated: Option<EvalReply>,
     pub elapsed_ms: u128,
 }
 

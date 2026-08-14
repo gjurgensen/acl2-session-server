@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use acl2_session::{Health, ImagePolicy, Registry, SessionId, Slice, WorldChange};
+use acl2_session::{Health, ImagePolicy, Registry, SessionId, Slice};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler, ServiceExt};
@@ -268,23 +268,7 @@ impl Acl2Mcp {
             b.eval(&a.form, d).map_err(|e| e.to_string())
         })
         .map_err(fail)?;
-        json(wire::EvalReply {
-            outcome: match r.outcome {
-                acl2_session::Outcome::Ok => "ok",
-                acl2_session::Outcome::Failed => "failed",
-                acl2_session::Outcome::StillRunning => "still_running",
-            }
-            .to_string(),
-            world_change: match r.world_change {
-                WorldChange::None => "none",
-                WorldChange::Undone => "undone",
-                WorldChange::Dirty => "dirty",
-            }
-            .to_string(),
-            output_ref: r.output_ref.to_string(),
-            output_lines: r.output_lines,
-            elapsed_ms: r.elapsed.as_millis(),
-        })
+        json(wire::evaluated(&r))
     }
 
     #[tool(description = "Keep waiting for a form whose deadline expired. The \
@@ -307,12 +291,14 @@ impl Acl2Mcp {
                 outcome: "nothing_in_flight".into(),
                 admitted: None,
                 failed: None,
+                evaluated: None,
                 elapsed_ms: 0,
             },
             Some(Resumed::StillRunning { elapsed }) => wire::ResumeReply {
                 outcome: "still_running".into(),
                 admitted: None,
                 failed: None,
+                evaluated: None,
                 elapsed_ms: elapsed.as_millis(),
             },
             Some(Resumed::Admitted(u)) => wire::ResumeReply {
@@ -320,12 +306,21 @@ impl Acl2Mcp {
                 elapsed_ms: u.elapsed.as_millis(),
                 admitted: Some(wire::admitted(&u)),
                 failed: None,
+                evaluated: None,
             },
             Some(Resumed::Failed(f)) => wire::ResumeReply {
                 outcome: "failed".into(),
                 elapsed_ms: 0,
                 admitted: None,
                 failed: Some(wire::failed(&f)),
+                evaluated: None,
+            },
+            Some(Resumed::Evaluated(r)) => wire::ResumeReply {
+                outcome: "evaluated".into(),
+                elapsed_ms: r.elapsed.as_millis(),
+                admitted: None,
+                failed: None,
+                evaluated: Some(wire::evaluated(&r)),
             },
         };
         json(reply)

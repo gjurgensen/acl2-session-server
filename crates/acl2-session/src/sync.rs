@@ -244,6 +244,9 @@ pub enum Resumed {
     StillRunning { elapsed: Duration },
     Admitted(UnitReport),
     Failed(FailureReport),
+    /// A form started by `eval` finished. `eval` is not part of the file, so
+    /// it completes as an eval rather than as a unit.
+    Evaluated(EvalResult),
 }
 
 #[derive(Debug)]
@@ -589,7 +592,7 @@ impl Book {
             admitted: Vec::new(),
             label_gen: 0,
             rebuilds: 0,
-            outputs: OutputStore::new(std::process::id() as u64)?,
+            outputs: OutputStore::new()?,
             pending: None,
             base_command_number: None,
             dirty: false,
@@ -696,6 +699,16 @@ impl Book {
                (acl2::value :invisible))"
         );
         let sub = self.session.submit(&body, deadline)?;
+        self.finish_eval(sub, deadline)
+    }
+
+    /// Turn a completed (or timed-out) eval submission into a result, undoing
+    /// any world change. Shared with `resume` so the two cannot drift.
+    fn finish_eval(
+        &mut self,
+        sub: crate::session::Submission,
+        deadline: Duration,
+    ) -> Result<EvalResult, SyncError> {
         let output_ref = self.outputs.put(&sub.output)?;
         let output_lines = self.outputs.lines(&output_ref).unwrap_or(0);
         let after: Option<i64> = sub.get("cmd").and_then(|v| v.parse().ok());
@@ -961,7 +974,16 @@ impl Book {
     /// exactly as `sync` would have recorded it, so the prefix invariant holds
     /// either way; the caller then syncs again to continue through the file.
     pub fn resume(&mut self, deadline: Duration) -> Result<Option<Resumed>, SyncError> {
-        let Some(p) = self.pending.clone() else { return Ok(None) };
+        // Ask the session, not the unit bookkeeping. `pending` records a unit
+        // whose deadline expired mid-sync, so gating on it made resume answer
+        // "nothing in flight" for a form started by `eval` -- which is the very
+        // situation resume exists for. The same mistake was fixed in `health`
+        // and its twin was left here.
+        if !self.session.is_running() {
+            self.pending = None;
+            return Ok(None);
+        }
+        let pending = self.pending.clone();
         let Some(sub) = self.session.resume(deadline)? else {
             self.pending = None;
             return Ok(None);
@@ -970,6 +992,12 @@ impl Book {
             return Ok(Some(Resumed::StillRunning { elapsed: sub.elapsed }));
         }
         self.pending = None;
+
+        let Some(p) = pending else {
+            // No unit attached: an eval finished.
+            let r = self.finish_eval(sub, deadline)?;
+            return Ok(Some(Resumed::Evaluated(r)));
+        };
         let output_ref = self.outputs.put(&sub.output)?;
         let output_lines = self.outputs.lines(&output_ref).unwrap_or(0);
         if sub.outcome == Outcome::Ok {
