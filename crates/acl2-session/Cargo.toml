@@ -13,3 +13,7 @@ libc = "0.2"
 [[bin]]
 name = "acl2-session-smoke"
 path = "src/bin/smoke.rs"
+
+[[bin]]
+name = "acl2-session-syncdemo"
+path = "src/bin/syncdemo.rs"

@@ -12,6 +12,8 @@
 pub mod pty;
 pub mod session;
 pub mod split;
+pub mod sync;
 
 pub use session::{Outcome, Session, Submission};
-pub use split::{split, Form, SplitError};
+pub use split::{split, split_str, Form, SplitError};
+pub use sync::{Book, SyncError, SyncOutcome};

@@ -29,7 +29,18 @@ pub struct Submission {
     pub outcome: Outcome,
     /// Everything ACL2 printed for this form, sentinels stripped.
     pub output: String,
+    /// Structured values the submitted body asked ACL2 to report, via
+    /// `<<<ASS-DATA key value>>>`. This is how the caller gets facts out of
+    /// the session without parsing prover prose: the body computes them in
+    /// ACL2 and prints them under a key we chose.
+    pub data: Vec<(String, String)>,
     pub elapsed: Duration,
+}
+
+impl Submission {
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.data.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
 }
 
 pub struct Session {
@@ -204,7 +215,8 @@ impl Session {
         } else {
             Outcome::StillRunning
         };
-        Ok(Submission { outcome, output: strip_sentinels(&captured, genid), elapsed })
+        let (output, data) = strip_sentinels(&captured, genid);
+        Ok(Submission { outcome, output, data, elapsed })
     }
 
     /// Interrupt a running form.
@@ -290,19 +302,33 @@ impl Drop for Session {
     }
 }
 
-/// Remove our own markers, leaving what ACL2 printed.
+/// Remove our own markers, returning what ACL2 printed plus any structured
+/// values reported via `<<<ASS-DATA key value>>>`.
 ///
 /// Also trims the prompt fragment that ACL2 emits *before* reading our line and
 /// which therefore lands at the head of the capture. This is cosmetic only --
 /// the prompt is never used to decide anything (P2); it is just noise at the
 /// front of otherwise clean output.
-fn strip_sentinels(s: &str, genid: u64) -> String {
+fn strip_sentinels(s: &str, genid: u64) -> (String, Vec<(String, String)>) {
     let ok = format!("<<<ASS-OK {genid}>>>");
     let done = format!("<<<ASS-DONE {genid}>>>");
-    let kept: Vec<&str> = s
-        .lines()
-        .filter(|l| !l.contains(&ok) && !l.contains(&done))
-        .collect();
+    let mut data = Vec::new();
+    let mut kept: Vec<&str> = Vec::new();
+    for l in s.lines() {
+        if l.contains(&ok) || l.contains(&done) {
+            continue;
+        }
+        if let Some(rest) = l.find("<<<ASS-DATA ").map(|i| &l[i + 12..]) {
+            if let Some(end) = rest.find(">>>") {
+                let mut it = rest[..end].splitn(2, ' ');
+                if let (Some(k), Some(v)) = (it.next(), it.next()) {
+                    data.push((k.to_string(), v.trim().to_string()));
+                    continue;
+                }
+            }
+        }
+        kept.push(l);
+    }
     // Strip leading newlines *first*: with them attached, the "is the prompt
     // on the first line?" test below counts an empty leading line and never
     // fires.
@@ -313,5 +339,5 @@ fn strip_sentinels(s: &str, genid: u64) -> String {
             out = out[i + 2..].to_string();
         }
     }
-    out.trim_start_matches(['\n', '\r']).to_string()
+    (out.trim_start_matches(['\n', '\r']).to_string(), data)
 }
