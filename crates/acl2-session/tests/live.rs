@@ -484,3 +484,70 @@ fn rules_are_reported_as_separate_runes() {
         "expected the induction rune among {rules:?}"
     );
 }
+
+/// Certification blames the book that actually failed, not the one asked for.
+///
+/// This is the whole reason for calling cert.pl rather than certifying one
+/// book: it chases dependencies, so the failure is usually somewhere else, and
+/// reporting "your book failed" when a dependency broke would send the user to
+/// the wrong file.
+#[test]
+#[ignore = "needs ACL2"]
+fn certification_names_the_failing_dependency() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("certify");
+    std::fs::write(
+        dir.join("dep.lisp"),
+        "(in-package \"ACL2\")\n\
+         (defun h (x) x)\n\
+         (defthm h-bogus (equal (h x) 42))\n",
+    )
+    .unwrap();
+    let main = dir.join("main.lisp");
+    std::fs::write(
+        &main,
+        "(in-package \"ACL2\")\n\
+         (include-book \"dep\")\n\
+         (defthm trivial (equal x x) :rule-classes nil)\n",
+    )
+    .unwrap();
+
+    let mut b = Book::open(&acl2, &main).unwrap();
+    let r = b.certify(Duration::from_secs(300), 2).unwrap();
+    assert_eq!(r.status, acl2_session::cert::CertStatus::Failed);
+    assert!(r.failed_in_dependency(), "dep.lisp is to blame, not main.lisp");
+    assert_eq!(
+        r.failed_books.first().and_then(|p| p.file_name()),
+        Some(std::ffi::OsStr::new("dep.lisp"))
+    );
+    let e = r.error_line.as_deref().expect("the dependency's own .cert.out");
+    assert!(e.contains("H-BOGUS"), "expected the failing event named: {e:?}");
+    assert!(r.output_ref.is_some(), "a finished build hands back its log");
+
+    // The session is untouched by certification and still works.
+    let ev = b.eval("(+ 1 1)", Duration::from_secs(60)).unwrap();
+    assert_eq!(ev.outcome, acl2_session::Outcome::Ok);
+}
+
+/// A book with no bad dependency certifies, and blames nobody.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_good_book_certifies() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("certify-ok");
+    let book = dir.join("good.lisp");
+    std::fs::write(
+        &book,
+        "(in-package \"ACL2\")\n\
+         (defun f (x) x)\n\
+         (defthm f-id (equal (f x) x))\n",
+    )
+    .unwrap();
+    let mut b = Book::open(&acl2, &book).unwrap();
+    let r = b.certify(Duration::from_secs(300), 2).unwrap();
+    assert_eq!(r.status, acl2_session::cert::CertStatus::Certified,
+               "expected success; log: {:?}", r.error_line);
+    assert!(r.failed_books.is_empty());
+    assert!(!r.failed_in_dependency());
+    assert!(book.with_extension("cert").is_file(), "a .cert must exist now");
+}

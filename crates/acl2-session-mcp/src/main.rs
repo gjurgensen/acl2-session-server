@@ -89,6 +89,19 @@ struct ResumeArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct CertifyArgs {
+    session_id: String,
+    /// Seconds to wait before handing control back. The build keeps going;
+    /// call again to keep waiting. Certification of a large book takes
+    /// minutes, so expect to call more than once.
+    deadline_seconds: Option<u64>,
+    /// Parallel jobs for `cert.pl -j`. Defaults to 4. Raise it for a big
+    /// dependency tree, but memory-hungry books can exhaust a machine at high
+    /// parallelism, so it is deliberately not scaled to the core count.
+    jobs: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct StatusArgs {
     session_id: String,
     /// Lines of the tail to include. Defaults to 20.
@@ -326,6 +339,26 @@ impl Acl2Mcp {
         json(reply)
     }
 
+    #[tool(description = "Certify this session's book with cert.pl, chasing \
+        dependencies, using the same ACL2 image the session runs. Runs outside \
+        the session against the file on disk, so the session's world is \
+        untouched and stays usable. A book that syncs cleanly can still fail \
+        to certify -- certification is the check that catches it.")]
+    async fn acl2_certify(
+        &self,
+        Parameters(a): Parameters<CertifyArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let book = self.book(&a.session_id)?;
+        let d = secs(a.deadline_seconds);
+        let jobs = a.jobs.unwrap_or(4).max(1);
+        let r = blocking!({
+            let mut b = book.lock().map_err(|e| e.to_string())?;
+            b.certify(d, jobs).map_err(|e| e.to_string())
+        })
+        .map_err(fail)?;
+        json(wire::certified(&r))
+    }
+
     #[tool(description = "Progress on a form that is still running: how long it \
         has been going and the tail of what it has printed. Does not wait.")]
     async fn acl2_status(
@@ -454,7 +487,11 @@ impl ServerHandler for Acl2Mcp {
                  reason.\n\n\
                  The structured results are a projection over a complete log. When \
                  they do not explain a failure, read the log with acl2_output \
-                 rather than assuming the detail is unavailable."
+                 rather than assuming the detail is unavailable.\n\n\
+                 A book that syncs cleanly can still fail to certify. Use \
+                 acl2_certify when the work is done, or when a dependent book \
+                 needs this one certified; it runs cert.pl outside the session, \
+                 so the session is unaffected."
                 .into(),
         );
         info

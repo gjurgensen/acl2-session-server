@@ -1,14 +1,18 @@
 //! A file-anchored, structured interface to a live ACL2 session.
 //!
-//! Status: walking skeleton. This is the thinnest end-to-end slice --
-//! spawn a real ACL2 in a real book directory over a PTY, submit a real form,
-//! detect completion, hand back what was captured. It exists to hold the
-//! integration seams still while the rest is built on top.
+//! A session keeps an ACL2 process in agreement with a `.lisp` file: its world
+//! is the result of admitting file forms `1..N` in a plain interactive session
+//! started in the book's own directory. Editing the file and asking for a sync
+//! is the whole interface; the prefix that did not change is reused.
 //!
-//! Not yet implemented: the file-prefix invariant and sync, structured result
-//! extraction via `get-event-data` and `gag-state`, output handles, and the
-//! MCP transport.
+//! Results are read out of ACL2's own state -- `get-event-data` and
+//! `gag-state` -- rather than scraped from its prose, and the complete log is
+//! kept behind a handle for the things no field can carry.
+//!
+//! Transport-neutral on purpose: an editor is a plausible second client, so
+//! nothing here knows about MCP.
 
+pub mod cert;
 pub mod image;
 pub mod output;
 pub mod pty;
@@ -20,6 +24,7 @@ pub mod sync;
 pub use session::{Outcome, Session, Submission};
 pub use split::{split, split_str, Form, SplitError};
 pub use registry::{Registry, RegistryError, SessionId};
+pub use cert::{Build, CertError};
 pub use image::{find_checkout, ImageError, ImagePolicy};
 pub use output::{OutputRef, OutputSlice, OutputStore, Slice};
 pub use session::Progress;

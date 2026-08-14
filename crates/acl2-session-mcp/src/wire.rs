@@ -358,3 +358,57 @@ pub struct Ack {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
+
+/// What certifying a book produced.
+///
+/// Certification runs `cert.pl` outside the session, against the file on disk.
+/// It does not touch the session's world, so a session stays usable during and
+/// after one -- and an unsaved editor buffer certifies as whatever is actually
+/// on disk, exactly as it would from a shell.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct CertifyReply {
+    /// `certified`, `failed`, or `still_running` if the deadline expired.
+    /// The build keeps going; call again to keep waiting, or `acl2_interrupt`
+    /// to stop it and everything it started.
+    pub outcome: String,
+    /// The book that was asked for.
+    pub book: String,
+    /// Books that actually failed. Certification chases dependencies, so this
+    /// is often **not** the book you asked for -- check `failed_in_dependency`
+    /// before concluding your own edits broke something.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failed_books: Vec<String>,
+    /// The blame falls on a dependency rather than on `book`.
+    pub failed_in_dependency: bool,
+    /// The ACL2 error from the failing book's own `.cert.out`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_line: Option<String>,
+    /// Handle to everything `cert.pl` printed. Absent while still running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_ref: Option<String>,
+    pub output_lines: usize,
+    /// The last lines printed, when still running.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub tail: String,
+    pub elapsed_ms: u128,
+}
+
+pub fn certified(r: &acl2_session::cert::CertReport) -> CertifyReply {
+    use acl2_session::cert::CertStatus;
+    CertifyReply {
+        outcome: match r.status {
+            CertStatus::Certified => "certified",
+            CertStatus::Failed => "failed",
+            CertStatus::StillRunning => "still_running",
+        }
+        .to_string(),
+        book: r.book.display().to_string(),
+        failed_books: r.failed_books.iter().map(|p| p.display().to_string()).collect(),
+        failed_in_dependency: r.failed_in_dependency(),
+        error_line: r.error_line.clone(),
+        output_ref: r.output_ref.as_ref().map(|o| o.to_string()),
+        output_lines: r.output_lines,
+        tail: r.tail.clone(),
+        elapsed_ms: r.elapsed.as_millis(),
+    }
+}

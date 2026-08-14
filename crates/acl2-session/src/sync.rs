@@ -284,12 +284,21 @@ pub enum SyncError {
     /// should. Per P3 the fast path is always verified, and a failed check
     /// must degrade to rebuilding from scratch rather than being trusted.
     RollbackUnverified { expected: i64, actual: Option<i64> },
+    /// Certification could not be started or run.
+    Cert(crate::cert::CertError),
+}
+
+impl From<crate::cert::CertError> for SyncError {
+    fn from(e: crate::cert::CertError) -> Self {
+        SyncError::Cert(e)
+    }
 }
 
 impl std::fmt::Display for SyncError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SyncError::Io(e) => write!(f, "{e}"),
+            SyncError::Cert(e) => write!(f, "{e}"),
             SyncError::Busy { index } => match index {
                 Some(i) => write!(
                     f,
@@ -584,7 +593,7 @@ fn parse_checkpoints(sub: &crate::session::Submission) -> Checkpoints {
 /// line cut the message mid-sentence -- and worse, could keep a `See :DOC`
 /// while dropping the topic it pointed at. The message runs to the next blank
 /// line, which is where ACL2 ends the paragraph.
-fn error_message(output: &str) -> Option<String> {
+pub(crate) fn error_message(output: &str) -> Option<String> {
     let mut lines = output.lines().skip_while(|l| !l.contains("ACL2 Error"));
     let first = lines.next()?;
     let mut msg = first.trim().to_string();
@@ -634,6 +643,10 @@ pub struct Book {
     dirty: bool,
     /// `inhibit-output-lst` as inherited, before the server removed PROVE.
     inherited_inhibit: Option<String>,
+    /// A `cert.pl` run that has not finished. Certification happens outside
+    /// the session -- it must not touch the world the file prefix defines --
+    /// so it is tracked here rather than by `Session`.
+    build: Option<crate::cert::Build>,
 }
 
 /// Enough to finish recording a unit whose deadline expired mid-flight.
@@ -675,6 +688,7 @@ impl Book {
             base_command_number: None,
             dirty: false,
             inherited_inhibit: None,
+            build: None,
         };
         // A baseline label, so "roll back to the empty prefix" is the same
         // operation as any other rollback rather than a special case.
@@ -1121,11 +1135,79 @@ impl Book {
 
     /// Abort the unit in flight and make the session usable again.
     pub fn interrupt(&mut self) -> io::Result<bool> {
+        // A build is a separate process tree, so stopping it is a different
+        // act from interrupting the prover -- but a caller asking to stop
+        // means both, and leaving a -j build running after "interrupt" said
+        // yes would be the more surprising outcome.
+        if let Some(mut b) = self.build.take() {
+            let _ = b.kill();
+        }
         let ok = self.session.interrupt()?;
         if ok {
             self.pending = None;
         }
         Ok(ok)
+    }
+
+    /// Certify this book with `cert.pl`, waiting up to `deadline`.
+    ///
+    /// Runs outside the session: `certify-book` would change the world, and
+    /// the world is defined to be the file's prefix. Nothing here consults the
+    /// session, because the file on disk is what gets certified -- so an
+    /// unsaved buffer certifies as whatever is actually on disk, same as it
+    /// would from a shell.
+    ///
+    /// Calling again while a build is in flight keeps waiting on that build
+    /// rather than starting a second one.
+    pub fn certify(
+        &mut self,
+        deadline: Duration,
+        jobs: usize,
+    ) -> Result<crate::cert::CertReport, SyncError> {
+        use crate::cert::{blamed_books, cert_out_error, cert_pl_for, Build, CertReport, CertStatus};
+        if self.build.is_none() {
+            let cert_pl = cert_pl_for(&self.acl2)?;
+            self.build = Some(Build::start(&cert_pl, &self.acl2, &self.path, jobs)?);
+        }
+        let b = self.build.as_mut().expect("just started");
+        let finished = b.wait(deadline)?;
+        let elapsed = b.elapsed();
+        let Some(status) = finished else {
+            let log = b.output();
+            let tail: Vec<&str> = log.lines().rev().take(12).collect();
+            return Ok(CertReport {
+                status: CertStatus::StillRunning,
+                book: self.path.clone(),
+                failed_books: Vec::new(),
+                error_line: None,
+                output_ref: None,
+                output_lines: log.lines().count(),
+                tail: tail.into_iter().rev().collect::<Vec<_>>().join("\n"),
+                elapsed,
+            });
+        };
+        let log = b.output();
+        self.build = None;
+
+        let failed_books = blamed_books(&log);
+        // Trust the exit status for pass/fail, and the log only for *which*
+        // book. A build can fail without naming one -- a missing dependency,
+        // a make error -- and reporting that as success because no book was
+        // blamed would be exactly the silent-wrong-answer failure mode.
+        let ok = status.success() && failed_books.is_empty();
+        let error_line = failed_books.first().and_then(|b| cert_out_error(b));
+        let output_ref = self.outputs.put(&log)?;
+        let output_lines = self.outputs.lines(&output_ref).unwrap_or(0);
+        Ok(CertReport {
+            status: if ok { CertStatus::Certified } else { CertStatus::Failed },
+            book: self.path.clone(),
+            failed_books,
+            error_line,
+            output_ref: Some(output_ref),
+            output_lines,
+            tail: String::new(),
+            elapsed,
+        })
     }
 
     /// The file this session is anchored to.

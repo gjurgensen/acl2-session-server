@@ -88,8 +88,14 @@ its own "ACL2" by shipping an `acl2.lisp` next to an executable, and neither
 can a client that was told to. `acl2_images` lists what is permitted, and
 `acl2_session_open` reports which image the session actually got.
 
-Eleven tools: `session_open`, `session_close`, `sessions`, `images`, `sync`,
-`eval`, `resume`, `status`, `interrupt`, `health`, `output`.
+Twelve tools: `session_open`, `session_close`, `sessions`, `images`, `sync`,
+`eval`, `certify`, `resume`, `status`, `interrupt`, `health`, `output`.
+
+`certify` runs `cert.pl` on the session's book, with the same ACL2 image the
+session runs and the `cert.pl` from that image's own checkout. It runs outside
+the session, so the world is untouched — and because certification chases
+dependencies, the reply says *which* book failed, which is usually not the one
+you asked for.
 
 ## Tests
 
