@@ -11,5 +11,7 @@
 
 pub mod pty;
 pub mod session;
+pub mod split;
 
 pub use session::{Outcome, Session, Submission};
+pub use split::{split, Form, SplitError};

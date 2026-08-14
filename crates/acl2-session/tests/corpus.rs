@@ -1,0 +1,74 @@
+//! Corpus check for the splitter.
+//!
+//! Ignored by default because it needs a book tree. Run with:
+//!
+//! ```text
+//! ACL2_BOOKS=/path/to/acl2/books cargo test -p acl2-session -- --ignored --nocapture
+//! ```
+//!
+//! This is the cheapest high-value test available for the splitter: thousands
+//! of real files, and the failure mode we care about (a construct we cannot
+//! lex) is exactly what it detects. Every bug found in the splitter so far was
+//! found by running it at scale, and none by reasoning about it -- `#!PKG`,
+//! `#{"""..."""}` and `#0=`/`#0#` all surfaced this way.
+
+use std::path::{Path, PathBuf};
+
+fn lisp_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            lisp_files(&p, out);
+        } else if p.extension().map_or(false, |x| x == "lisp") {
+            out.push(p);
+        }
+    }
+}
+
+#[test]
+#[ignore = "needs ACL2_BOOKS pointing at a book tree"]
+fn splits_every_book_in_the_corpus() {
+    let root = match std::env::var("ACL2_BOOKS") {
+        Ok(r) => PathBuf::from(r),
+        Err(_) => {
+            eprintln!("ACL2_BOOKS not set; skipping");
+            return;
+        }
+    };
+    let mut files = Vec::new();
+    lisp_files(&root, &mut files);
+    files.sort();
+    assert!(!files.is_empty(), "no .lisp files under {}", root.display());
+
+    // Read bytes, not a String. ACL2 source is ISO-8859-1, and at least one
+    // book in the community tree contains raw 0x80-0xFF bytes. An earlier
+    // version of this test used `read_to_string` with `let Ok(..) else
+    // { continue }` and silently skipped that file while reporting success --
+    // a hole that hid 284 units. A file we cannot read is a failure.
+    let (mut units, mut failures) = (0usize, Vec::new());
+    for f in &files {
+        match std::fs::read(f) {
+            Ok(bytes) => match acl2_session::split(&bytes) {
+                Ok(forms) => units += forms.len(),
+                Err(e) => failures.push(format!("{}: {e}", f.display())),
+            },
+            Err(e) => failures.push(format!("{}: unreadable: {e}", f.display())),
+        }
+    }
+
+    if let Ok(dump) = std::env::var("ACL2_SPLIT_DUMP") {
+        let mut w = String::new();
+        for f in &files {
+            let bytes = std::fs::read(f).unwrap_or_default();
+            let n = acl2_session::split(&bytes).map(|v| v.len()).unwrap_or(0);
+            w.push_str(&format!("{n} {}\n", f.display()));
+        }
+        std::fs::write(dump, w).unwrap();
+    }
+    println!("books: {}  units: {}", files.len(), units);
+    for f in failures.iter().take(20) {
+        println!("  FAIL {f}");
+    }
+    assert!(failures.is_empty(), "{} book(s) failed to split", failures.len());
+}
