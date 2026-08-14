@@ -53,27 +53,33 @@ cargo install --path crates/acl2-session-mcp
 ```
 
 Then configure your client. The server is started as a subprocess, so it is
-configured through `args` (or `env`):
+configured through `args` (or `env`). With a single ACL2, that is one path:
 
 ```json
 {
   "mcpServers": {
     "acl2": {
       "command": "/home/you/.cargo/bin/acl2-session-mcp",
-      "args": ["--trusted", "/home/you/acl2-builds",
-               "--default", "/home/you/acl2-builds/release/saved_acl2"]
+      "args": ["/home/you/acl2/saved_acl2"]
     }
   }
 }
 ```
 
+If you keep several ACL2 builds side by side — a release and a development
+tree, or a set of git worktrees — name the directory holding them instead:
+
+```json
+"args": ["--trusted", "/home/you/acl2-builds",
+         "--default", "/home/you/acl2-builds/release/saved_acl2"]
+```
+
 `--trusted` vouches for the ACL2 checkouts under a directory. A book inside one
 runs under **its own checkout's image**, which is usually what you want, since a
-book was certified against the checkout it lives in. One entry covers a whole
-tree of worktrees, including ones made later. `--default` is used for books
-outside every trusted directory. `ACL2_TRUSTED` (colon-separated) and
-`ACL2_DEFAULT` work too, for clients where editing `args` is awkward. With a
-single ACL2, one bare path is still enough.
+book was certified against the checkout it lives in. One entry covers every
+build under that directory, including ones added later. `--default` is used for
+books outside every trusted directory. `ACL2_TRUSTED` (colon-separated) and
+`ACL2_DEFAULT` work too, for clients where editing `args` is awkward.
 
 The trusted set is an allowlist, not just a search path: an image is run only if
 it is the default or lives under a trusted directory. That holds for images
