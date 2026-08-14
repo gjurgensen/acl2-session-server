@@ -102,6 +102,16 @@ impl Session {
     /// `.acl2` parsing and no `cert.pl` emulation, so the session is the one a
     /// person gets by `cd`-ing here and starting ACL2.
     pub fn start(acl2: &Path, book_dir: &Path) -> io::Result<Session> {
+        // Check the directory first. It becomes the child's working directory,
+        // so a missing one fails the spawn with the same ENOENT a missing
+        // program gives -- and would then be reported as "cannot start ACL2",
+        // blaming a binary that is perfectly fine.
+        if !book_dir.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no such directory: {}", book_dir.display()),
+            ));
+        }
         let Pty { master, slave } = Pty::open()?;
         set_no_echo(&master)?;
 

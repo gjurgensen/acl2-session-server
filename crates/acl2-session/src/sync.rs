@@ -575,6 +575,12 @@ impl Book {
             Some(p) if !p.as_os_str().is_empty() => p,
             _ => Path::new("."),
         };
+        if !path.is_file() {
+            return Err(SyncError::Io(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no such book: {}", path.display()),
+            )));
+        }
         let session = Session::start(acl2, dir)?;
         let mut b = Book {
             acl2: acl2.to_path_buf(),
