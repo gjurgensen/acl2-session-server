@@ -26,13 +26,15 @@ fn main() {
     std::fs::create_dir_all(&dir).unwrap();
     let book = dir.join("b.lisp");
     write(&book, &["(in-package \"ACL2\")",
-                   "(defun alpha (x) (if (consp x) (alpha (cdr x)) nil))"]);
+                   "(defun alpha (x) (if (consp x) (alpha (cdr x)) nil))",
+                   "(defun fib (n) (if (zp n) 0 (if (= n 1) 1 \
+                      (+ (fib (- n 1)) (fib (- n 2))))))"]);
 
     let mut b = Book::open(&acl2, &book).expect("open");
     let mut fails = 0usize;
 
     let o = b.sync(None, D).expect("sync");
-    expect(o.admitted.len() == 2 && o.failed.is_none(), "book syncs", &mut fails);
+    expect(o.admitted.len() == 3 && o.failed.is_none(), "book syncs", &mut fails);
 
     println!("\n── a query leaves the world alone");
     let r = b.eval("(acl2::pe 'alpha)", D).expect("eval pe");
@@ -63,8 +65,18 @@ fn main() {
 
     println!("\n── the prefix still syncs cleanly afterwards");
     let o = b.sync(None, D).expect("resync");
-    expect(o.reused == 2 && o.admitted.is_empty() && o.failed.is_none(),
-           "prefix intact: 2 reused, nothing re-admitted", &mut fails);
+    expect(o.reused == 3 && o.admitted.is_empty() && o.failed.is_none(),
+           "prefix intact: 3 reused, nothing re-admitted", &mut fails);
+
+    println!("\n── an eval that outruns its deadline");
+    let slow = "(acl2::thm (acl2::equal (fib 44) 701408733))";
+    let r = b.eval(slow, Duration::from_secs(2)).expect("slow eval");
+    expect(r.outcome == acl2_session::Outcome::StillRunning,
+           "eval reports StillRunning", &mut fails);
+    let h = b.health(Duration::from_secs(2));
+    println!("   health says: {h:?}");
+    expect(h == Health::Busy, "health says Busy, not Dead", &mut fails);
+    expect(b.interrupt().expect("interrupt"), "and it can be interrupted", &mut fails);
 
     println!("\n── health");
     expect(b.health(D) == Health::Alive, "session reports Alive", &mut fails);

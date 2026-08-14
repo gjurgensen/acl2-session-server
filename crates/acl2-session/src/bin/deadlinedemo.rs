@@ -52,7 +52,7 @@ fn main() {
     println!("\n── the session refuses a second form while one is in flight");
     match b.sync(None, Duration::from_secs(2)) {
         Err(acl2_session::SyncError::Busy { index }) => {
-            expect(true, &format!("rejected: unit {index} is still running"), &mut fails)
+            expect(true, &format!("rejected: {index:?} is still running"), &mut fails)
         }
         other => {
             println!("   got {other:?}");

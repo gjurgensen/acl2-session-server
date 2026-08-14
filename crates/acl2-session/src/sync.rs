@@ -249,11 +249,14 @@ pub enum Resumed {
 #[derive(Debug)]
 pub enum SyncError {
     Io(io::Error),
-    /// A unit is still running. Resume it, interrupt it, or wait.
+    /// A form is still running. Resume it, interrupt it, or wait.
+    ///
+    /// `index` names the unit when one is mid-sync, and is `None` when the
+    /// form in flight came from `eval`, which is not part of the file.
     ///
     /// Rejected rather than queued: a session drives one ACL2 over one pipe,
     /// and starting a second form would interleave both on the same channel.
-    Busy { index: usize },
+    Busy { index: Option<usize> },
     Split(SplitError),
     /// The undo itself was rejected by ACL2.
     RollbackFailed { output: String },
@@ -269,10 +272,16 @@ impl std::fmt::Display for SyncError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SyncError::Io(e) => write!(f, "{e}"),
-            SyncError::Busy { index } => write!(
-                f,
-                "unit {index} is still running; resume, interrupt, or wait for it"
-            ),
+            SyncError::Busy { index } => match index {
+                Some(i) => write!(
+                    f,
+                    "unit {i} is still running; resume, interrupt, or wait for it"
+                ),
+                None => write!(
+                    f,
+                    "a form is still running; resume, interrupt, or wait for it"
+                ),
+            },
             SyncError::Split(e) => write!(f, "cannot split file: {e}"),
             SyncError::RollbackFailed { output } => {
                 let first = output.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
@@ -666,8 +675,8 @@ impl Book {
     ///
     /// Consequence: **world changes are not visible across consecutive evals.**
     pub fn eval(&mut self, form: &str, deadline: Duration) -> Result<EvalResult, SyncError> {
-        if let Some(p) = &self.pending {
-            return Err(SyncError::Busy { index: p.index });
+        if self.session.is_running() {
+            return Err(SyncError::Busy { index: self.running_unit() });
         }
         let body = format!(
             "{form}\n(acl2::prog2$ (acl2::cw \"~%<<<ASS-DATA cmd ~x0>>>~%\" \
@@ -706,8 +715,25 @@ impl Book {
     }
 
     /// Round-trip a trivial form to see whether the session is responsive.
+    /// Round-trip a trivial form to see whether the session is responsive.
+    ///
+    /// The three failure answers are genuinely different actions:
+    ///
+    /// - `Busy` -- a form is in flight. Working as intended; wait, resume, or
+    ///   interrupt. Asked of the session itself rather than of unit
+    ///   bookkeeping, because an `eval` can be in flight with no unit attached.
+    /// - `Wedged` -- nothing should be running, yet a trivial round trip did
+    ///   not come back. The process is alive and its descriptor works, but it
+    ///   is not answering: ACL2 may have dropped into a raw-Lisp debugger, or
+    ///   something may have swallowed a completion sentinel. Recoverable by
+    ///   interrupt or, failing that, by rebuild.
+    /// - `Dead` -- the descriptor itself failed. The process is gone; only a
+    ///   rebuild will help.
+    ///
+    /// Reporting `Dead` for a session that is merely busy would be the worst
+    /// of these, since a client would discard a session that is working.
     pub fn health(&mut self, deadline: Duration) -> Health {
-        if self.pending.is_some() {
+        if self.session.is_running() {
             return Health::Busy;
         }
         match self.session.submit("(acl2::value :invisible)", deadline) {
@@ -732,8 +758,8 @@ impl Book {
         through_line: Option<usize>,
         deadline: Duration,
     ) -> Result<SyncOutcome, SyncError> {
-        if let Some(p) = &self.pending {
-            return Err(SyncError::Busy { index: p.index });
+        if self.session.is_running() {
+            return Err(SyncError::Busy { index: self.running_unit() });
         }
         if self.dirty {
             // An undo we could not verify: rebuild rather than trust it.
