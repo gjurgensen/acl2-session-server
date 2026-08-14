@@ -283,6 +283,30 @@ pub struct ProgressReply {
     /// result arrives when the form finishes.
     pub tail: String,
     pub bytes_so_far: usize,
+    /// A certification still running, if there is one. Independent of
+    /// `running`: a build is a separate process, so it can be going while the
+    /// prover is idle, and both can be in flight at once.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build: Option<BuildProgressReply>,
+}
+
+/// How far a certification has got. Provisional; `acl2_certify` returns the
+/// authoritative result when the build finishes.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct BuildProgressReply {
+    pub book: String,
+    pub elapsed_ms: u128,
+    pub lines_so_far: usize,
+    pub tail: String,
+}
+
+pub fn build_progress(p: &acl2_session::cert::BuildProgress) -> BuildProgressReply {
+    BuildProgressReply {
+        book: p.book.display().to_string(),
+        elapsed_ms: p.elapsed.as_millis(),
+        lines_so_far: p.lines_so_far,
+        tail: p.tail.clone(),
+    }
 }
 
 /// What resuming a form that had outrun its deadline produced.

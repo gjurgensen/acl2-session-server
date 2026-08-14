@@ -551,3 +551,47 @@ fn a_good_book_certifies() {
     assert!(!r.failed_in_dependency());
     assert!(book.with_extension("cert").is_file(), "a .cert must exist now");
 }
+
+/// Certification works for an ACL2 that does not live inside a checkout.
+///
+/// cert.pl used to be found by walking up from the image looking for
+/// `acl2.lisp`. That finds nothing for an installed or copied ACL2 -- there is
+/// no checkout above it -- even though the image knows perfectly well where its
+/// books are. The books directory is now asked for rather than inferred, so
+/// this case works; before, it failed outright.
+#[test]
+#[ignore = "needs ACL2"]
+fn an_image_outside_a_checkout_can_still_certify() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("no-checkout");
+    let elsewhere = dir.join("bin");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let copied = elsewhere.join("acl2");
+    std::fs::copy(&acl2, &copied).unwrap();
+    let mut perms = std::fs::metadata(&copied).unwrap().permissions();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o755);
+    }
+    std::fs::set_permissions(&copied, perms).unwrap();
+
+    // Nothing resembling a checkout sits above the copy.
+    assert!(
+        acl2_session::find_checkout(&copied).is_none(),
+        "this test is pointless if the copy is inside a checkout"
+    );
+
+    let book = dir.join("solo.lisp");
+    std::fs::write(
+        &book,
+        "(in-package \"ACL2\")\n(defun k (x) x)\n(defthm k-id (equal (k x) x))\n",
+    )
+    .unwrap();
+    let mut b = Book::open(&copied, &book).unwrap();
+    let r = b.certify(Duration::from_secs(300), 2).unwrap();
+    assert_eq!(
+        r.status,
+        acl2_session::cert::CertStatus::Certified,
+        "cert.pl must be found via the books directory ACL2 reports"
+    );
+}

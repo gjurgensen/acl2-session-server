@@ -71,6 +71,28 @@ pub fn cert_pl_for(image: &Path) -> Result<PathBuf, CertError> {
     }
 }
 
+/// `cert.pl` inside a books directory ACL2 named itself.
+///
+/// Preferred over `cert_pl_for`, which can only find a checkout the image
+/// still lives inside. `image` is carried only for the error message.
+pub fn cert_pl_in(books_dir: &Path, image: &Path) -> Result<PathBuf, CertError> {
+    let p = books_dir.join("build/cert.pl");
+    if p.is_file() {
+        return Ok(p);
+    }
+    // The books directory is known but has no build scripts; the checkout walk
+    // is a long shot from here, but costs nothing and covers odd layouts.
+    cert_pl_for(image)
+}
+
+/// How far a certification has got.
+pub struct BuildProgress {
+    pub book: PathBuf,
+    pub elapsed: Duration,
+    pub lines_so_far: usize,
+    pub tail: String,
+}
+
 /// A certification in progress.
 pub struct Build {
     child: Child,

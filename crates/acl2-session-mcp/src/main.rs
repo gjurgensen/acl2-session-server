@@ -359,18 +359,20 @@ impl Acl2Mcp {
         json(wire::certified(&r))
     }
 
-    #[tool(description = "Progress on a form that is still running: how long it \
-        has been going and the tail of what it has printed. Does not wait.")]
+    #[tool(description = "Progress on whatever is still running -- a form in \
+        the prover, a certification, or both. Reports how long each has been \
+        going and the tail of what it has printed. Does not wait.")]
     async fn acl2_status(
         &self,
         Parameters(a): Parameters<StatusArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let book = self.book(&a.session_id)?;
         let n = a.tail_lines.unwrap_or(20);
-        let (p, unit) = blocking!({
+        let (p, unit, build) = blocking!({
             let mut b = book.lock().map_err(|e| e.to_string())?;
             let u = b.running_unit();
-            b.progress(n).map(|p| (p, u)).map_err(|e| e.to_string())
+            let bp = b.build_progress(n).as_ref().map(wire::build_progress);
+            b.progress(n).map(|p| (p, u, bp)).map_err(|e| e.to_string())
         })
         .map_err(fail)?;
         json(match p {
@@ -380,6 +382,7 @@ impl Acl2Mcp {
                 elapsed_ms: p.elapsed.as_millis(),
                 tail: p.tail,
                 bytes_so_far: p.bytes_so_far,
+                build,
             },
             None => wire::ProgressReply {
                 running: false,
@@ -387,6 +390,7 @@ impl Acl2Mcp {
                 elapsed_ms: 0,
                 tail: String::new(),
                 bytes_so_far: 0,
+                build,
             },
         })
     }

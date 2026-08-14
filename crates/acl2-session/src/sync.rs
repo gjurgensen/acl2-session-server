@@ -367,7 +367,9 @@ const CLEAR_STALE: &str = "(acl2::pprogn \
 /// chose is respected, and gag-mode is left alone -- `:goals` still yields the
 /// induction narrative while avoiding the six-figure waterfall dumps.
 const OWN_OUTPUT: &str = "(acl2::prog2$ \
-    (acl2::cw \"~%<<<ASS-DATA inhibit ~x0>>>~%\" (acl2::@ acl2::inhibit-output-lst)) \
+    (acl2::cw \"~%<<<ASS-DATA inhibit ~x0>>>~%<<<ASS-DATA sbd ~x1>>>~%\" \
+      (acl2::@ acl2::inhibit-output-lst) \
+      (acl2::system-books-dir acl2::state)) \
     (acl2::er-progn \
       (acl2::set-inhibit-output-lst \
         (acl2::remove-eq 'acl2::prove (acl2::@ acl2::inhibit-output-lst))) \
@@ -420,6 +422,12 @@ const INNER_EVENTS_PROBE: &str = r#"(acl2::let*
           (acl2::prog2$
             (acl2::cw "<<<ASS-END inner>>>~%")
             (acl2::value :invisible)))))))"#;
+
+/// ACL2 prints a string with `~x` in quotes; the value is the text inside.
+fn unquote(v: &str) -> Option<String> {
+    let t = v.trim();
+    t.strip_prefix('"').and_then(|t| t.strip_suffix('"')).map(str::to_string)
+}
 
 /// Every value recorded under a repeated key, with ACL2's wrapping undone.
 ///
@@ -643,6 +651,14 @@ pub struct Book {
     dirty: bool,
     /// `inhibit-output-lst` as inherited, before the server removed PROVE.
     inherited_inhibit: Option<String>,
+    /// Where this image keeps its books, as ACL2 itself reports it.
+    ///
+    /// Asked rather than inferred. Walking up from the image looking for
+    /// `acl2.lisp` finds the checkout only when the image still sits inside
+    /// one; an ACL2 installed or copied elsewhere has no checkout above it,
+    /// and yet still knows perfectly well where its books are. This is also
+    /// what `cert.pl` itself falls back on.
+    books_dir: Option<PathBuf>,
     /// A `cert.pl` run that has not finished. Certification happens outside
     /// the session -- it must not touch the world the file prefix defines --
     /// so it is tracked here rather than by `Session`.
@@ -688,12 +704,14 @@ impl Book {
             base_command_number: None,
             dirty: false,
             inherited_inhibit: None,
+            books_dir: None,
             build: None,
         };
         // A baseline label, so "roll back to the empty prefix" is the same
         // operation as any other rollback rather than a special case.
         let sub = b.session.submit(OWN_OUTPUT, Duration::from_secs(60))?;
         b.inherited_inhibit = sub.get("inhibit").map(str::to_string);
+        b.books_dir = sub.get("sbd").and_then(unquote).map(PathBuf::from);
         b.plant_base_label()?;
         Ok(b)
     }
@@ -1133,6 +1151,26 @@ impl Book {
         self.session.progress(tail_lines)
     }
 
+    /// Progress of a certification that is still running, if there is one.
+    ///
+    /// Separate from `progress`, which reports the prover. A build is a
+    /// different process doing a different thing, and both can be in flight at
+    /// once -- certification does not touch the session.
+    pub fn build_progress(&mut self, tail_lines: usize) -> Option<crate::cert::BuildProgress> {
+        let b = self.build.as_mut()?;
+        // A finished build is not progress. Leave it in place: the report is
+        // assembled by `certify`, and inventing a second path to it would be a
+        // second chance to disagree with the first.
+        let log = b.output();
+        let tail: Vec<&str> = log.lines().rev().take(tail_lines).collect();
+        Some(crate::cert::BuildProgress {
+            book: b.book().to_path_buf(),
+            elapsed: b.elapsed(),
+            lines_so_far: log.lines().count(),
+            tail: tail.into_iter().rev().collect::<Vec<_>>().join("\n"),
+        })
+    }
+
     /// Abort the unit in flight and make the session usable again.
     pub fn interrupt(&mut self) -> io::Result<bool> {
         // A build is a separate process tree, so stopping it is a different
@@ -1166,7 +1204,10 @@ impl Book {
     ) -> Result<crate::cert::CertReport, SyncError> {
         use crate::cert::{blamed_books, cert_out_error, cert_pl_for, Build, CertReport, CertStatus};
         if self.build.is_none() {
-            let cert_pl = cert_pl_for(&self.acl2)?;
+            let cert_pl = match self.books_dir.as_deref() {
+                Some(d) => crate::cert::cert_pl_in(d, &self.acl2)?,
+                None => cert_pl_for(&self.acl2)?,
+            };
             self.build = Some(Build::start(&cert_pl, &self.acl2, &self.path, jobs)?);
         }
         let b = self.build.as_mut().expect("just started");
