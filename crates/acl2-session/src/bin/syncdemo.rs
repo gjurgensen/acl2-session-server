@@ -48,16 +48,18 @@ fn report(label: &str, o: &SyncOutcome) -> bool {
         if let Some(r) = &f.event_data.rules {
             println!("         rules        : {}", one_line(r, 60));
         }
-        match (&f.checkpoints.top, &f.checkpoints.sub) {
-            (None, None) => println!("         checkpoints  : (none reported)"),
-            (t, s) => {
-                if let Some(t) = t {
-                    println!("         checkpoint top : {}", one_line(t, 58));
-                }
-                if let Some(s) = s {
-                    println!("         checkpoint sub : {}", one_line(s, 58));
-                }
-            }
+        let c = &f.checkpoints;
+        if c.n_top == 0 && c.n_sub == 0 {
+            println!("         checkpoints  : (none reported)");
+        }
+        for (i, g) in c.top.iter().enumerate() {
+            println!("         top[{i}]/{}      : {}", c.n_top, one_line(g, 52));
+        }
+        for (i, g) in c.sub.iter().enumerate() {
+            println!("         sub[{i}]/{}      : {}", c.n_sub, one_line(g, 52));
+        }
+        if c.forced {
+            println!("         forced       : yes (checkpoints may be incomplete)");
         }
     }
     o.failed.is_none()
@@ -97,7 +99,6 @@ fn main() {
     let mut b = Book::open(&acl2, &book).expect("open book");
     eprintln!("session up\n");
 
-    println!("checkpoints available: {}\n", b.checkpoints_available());
     let mut fails = 0usize;
 
     let o = b.sync(None, DEADLINE).expect("sync 1");
@@ -141,7 +142,7 @@ fn main() {
     expect(o.failed.as_ref().map(|f| f.index) == Some(4), "failure is unit 4", &mut fails);
     let f = o.failed.as_ref().unwrap();
     expect(f.event_data.abort_causes.is_some(), "an abort cause is reported", &mut fails);
-    expect(f.checkpoints.top.is_some() || f.checkpoints.sub.is_some(),
+    expect(!f.checkpoints.top.is_empty() || !f.checkpoints.sub.is_empty(),
            "at least one key checkpoint is reported", &mut fails);
 
     // Fixing the failing unit needs no rollback: it was never admitted.

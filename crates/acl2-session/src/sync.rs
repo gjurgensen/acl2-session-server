@@ -57,8 +57,18 @@ pub struct EventData {
 /// is. Flattening them buries the informative one.
 #[derive(Debug, Clone, Default)]
 pub struct Checkpoints {
-    pub top: Option<String>,
-    pub sub: Option<String>,
+    /// Goals at the top level, prettified as ACL2 would print them.
+    pub top: Vec<String>,
+    /// Goals under a top-level induction.
+    pub sub: Vec<String>,
+    /// How many the prover actually pushed. May exceed the number reported:
+    /// the probe reads a fixed number of slots, and the counts say so rather
+    /// than letting the client mistake a truncation for the whole story.
+    pub n_top: usize,
+    pub n_sub: usize,
+    /// Non-nil when forcing took place, in which case the checkpoints are
+    /// probably not the full story.
+    pub forced: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -163,44 +173,101 @@ const EVENT_DATA_PROBE: &str = r#"(acl2::prog2$
 
 /// Report the key checkpoints of the most recent failed proof.
 ///
-/// Uses `books/kestrel/utilities/checkpoints`, which reads `gag-state-saved`.
-/// Only issued after a failure, and as its own submission, because a failing
-/// unit aborts its own `ld` before any trailing probe could run.
-const CHECKPOINT_PROBE: &str = r#"(acl2::prog2$
-  (acl2::cw "~%<<<ASS-BEGIN ckpt-top>>>~%~x0~%<<<ASS-END ckpt-top>>>~%<<<ASS-BEGIN ckpt-sub>>>~%~x1~%<<<ASS-END ckpt-sub>>>~%"
-    (acl2::checkpoint-list-pretty t acl2::state)
-    (acl2::checkpoint-list-pretty acl2::nil acl2::state))
-  (acl2::value :invisible))"#;
+/// Deliberately introduces **nothing** into the ACL2 world: it is one
+/// expression built from `access`, `nth` and `prettyify-clause`, all ACL2
+/// built-ins. An earlier version included
+/// `books/kestrel/utilities/checkpoints`, which was simpler but added fourteen
+/// function definitions -- each carrying definition and type-prescription
+/// runes -- to a world that is supposed to look like a plain interactive
+/// session. Nothing would ever have mentioned those functions, but "would
+/// never" is not a guarantee, and the names were a real collision surface.
+///
+/// A fixed number of slots is read rather than mapping over the stacks,
+/// because `state` is not available inside a `loop$` body and defining a
+/// recursive helper would reintroduce exactly the world modification being
+/// avoided. `nth` past the end returns `nil` and the whole chain degrades to
+/// `NIL`, so out-of-range slots are harmless. The true stack lengths are
+/// reported alongside, so a client can tell when there were more.
+const CHECKPOINT_PROBE: &str = r#"(acl2::let*
+  ((acl2::gs (acl2::f-get-global 'acl2::gag-state-saved acl2::state))
+   (acl2::tp (acl2::access acl2::gag-state acl2::gs :top-stack))
+   (acl2::sb (acl2::access acl2::gag-state acl2::gs :sub-stack))
+   (acl2::wr (acl2::w acl2::state)))
+  (acl2::prog2$
+    (acl2::cw "~%<<<ASS-BEGIN ckpt>>>~%ntop ~x0~%nsub ~x1~%forced ~x2~%top0 ~x3~%top1 ~x4~%top2 ~x5~%sub0 ~x6~%sub1 ~x7~%sub2 ~x8~%<<<ASS-END ckpt>>>~%"
+      (acl2::len acl2::tp)
+      (acl2::len acl2::sb)
+      (acl2::access acl2::gag-state acl2::gs :forcep)
+      (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 0 acl2::tp) :clause) acl2::nil acl2::wr)
+      (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 1 acl2::tp) :clause) acl2::nil acl2::wr)
+      (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 2 acl2::tp) :clause) acl2::nil acl2::wr)
+      (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 0 acl2::sb) :clause) acl2::nil acl2::wr)
+      (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 1 acl2::sb) :clause) acl2::nil acl2::wr)
+      (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 2 acl2::sb) :clause) acl2::nil acl2::wr))
+    (acl2::value :invisible)))"#;
 
-fn parse_event_data(sub: &crate::session::Submission) -> EventData {
-    let mut e = EventData::default();
-    let Some(body) = sub.block("evd") else { return e };
-    // The probe prints one `key value` pair per line, but ACL2 wraps long
-    // values at its right margin, so a value runs until the next known key.
-    let keys = ["steps", "rules", "warnings", "abort", "time"];
-    let mut cur: Option<(&str, Vec<&str>)> = None;
-    let mut done: Vec<(&str, String)> = Vec::new();
+/// Split a `key value` block into pairs, tolerating values that ACL2 wrapped
+/// across lines.
+fn keyed_block(body: &str, keys: &[&str]) -> Vec<(String, String)> {
+    let mut cur: Option<(String, Vec<String>)> = None;
+    let mut done: Vec<(String, String)> = Vec::new();
     for line in body.lines() {
-        let start = keys.iter().find(|k| {
-            line.strip_prefix(*k).map_or(false, |r| r.starts_with(' '))
+        let hit = keys.iter().find(|k| {
+            line.strip_prefix(**k).map_or(false, |r| r.starts_with(' '))
         });
-        if let Some(k) = start {
+        if let Some(k) = hit {
             if let Some((pk, v)) = cur.take() {
                 done.push((pk, v.join("\n")));
             }
-            cur = Some((k, vec![line[k.len() + 1..].trim_end()]));
+            cur = Some((k.to_string(), vec![line[k.len() + 1..].trim_end().to_string()]));
         } else if let Some((_, v)) = cur.as_mut() {
-            v.push(line.trim_end());
+            v.push(line.trim_end().to_string());
         }
     }
     if let Some((pk, v)) = cur {
         done.push((pk, v.join("\n")));
     }
+    done
+}
+
+fn is_nil(v: &str) -> bool {
+    let t = v.trim();
+    t.is_empty() || t.eq_ignore_ascii_case("nil")
+}
+
+fn parse_checkpoints(sub: &crate::session::Submission) -> Checkpoints {
+    let mut c = Checkpoints::default();
+    let Some(body) = sub.block("ckpt") else { return c };
+    let keys = ["ntop", "nsub", "forced", "top0", "top1", "top2", "sub0", "sub1", "sub2"];
+    let pairs = keyed_block(body, &keys);
+    let get = |k: &str| pairs.iter().find(|(pk, _)| pk == k).map(|(_, v)| v.trim().to_string());
+    c.n_top = get("ntop").and_then(|v| v.parse().ok()).unwrap_or(0);
+    c.n_sub = get("nsub").and_then(|v| v.parse().ok()).unwrap_or(0);
+    c.forced = get("forced").map_or(false, |v| !is_nil(&v));
+    for k in ["top0", "top1", "top2"] {
+        if let Some(v) = get(k).filter(|v| !is_nil(v)) {
+            c.top.push(v);
+        }
+    }
+    for k in ["sub0", "sub1", "sub2"] {
+        if let Some(v) = get(k).filter(|v| !is_nil(v)) {
+            c.sub.push(v);
+        }
+    }
+    c
+}
+
+fn parse_event_data(sub: &crate::session::Submission) -> EventData {
+    let mut e = EventData::default();
+    let Some(body) = sub.block("evd") else { return e };
+    // ACL2 wraps long values at its right margin, so a value runs until the
+    // next known key rather than to end of line.
+    let done = keyed_block(body, &["steps", "rules", "warnings", "abort", "time"]);
     let pick = |k: &str| -> Option<String> {
         done.iter()
-            .find(|(dk, _)| *dk == k)
+            .find(|(dk, _)| dk == k)
             .map(|(_, v)| v.trim().to_string())
-            .filter(|v| !v.is_empty() && v != "nil" && v != "NIL")
+            .filter(|v| !is_nil(v))
     };
     e.prover_steps = pick("steps").and_then(|v| v.parse().ok());
     e.rules = pick("rules");
@@ -218,7 +285,6 @@ pub struct Book {
     admitted: Vec<Admitted>,
     label_gen: u64,
     rebuilds: usize,
-    checkpoints_available: bool,
 }
 
 impl Book {
@@ -233,9 +299,7 @@ impl Book {
             admitted: Vec::new(),
             label_gen: 0,
             rebuilds: 0,
-            checkpoints_available: false,
         };
-        b.load_checkpoint_support()?;
         // A baseline label, so "roll back to the empty prefix" is the same
         // operation as any other rollback rather than a special case.
         b.plant_base_label()?;
@@ -258,34 +322,6 @@ impl Book {
 
     fn label_name(genid: u64) -> String {
         format!("acl2-session-mark-{genid}")
-    }
-
-    /// Make `checkpoint-list-pretty` available, before the base label so that
-    /// no rollback can remove it.
-    ///
-    /// `books/kestrel/utilities/checkpoints` is Kaufmann's, has no
-    /// include-books of its own, and ships with the community books, so this
-    /// is about as light a dependency as exists. Reading `gag-state-saved`
-    /// directly would mean reimplementing its clause prettifying against ACL2
-    /// internals, which is a worse trade.
-    ///
-    /// Known deviation from a plain interactive session (5.1): this adds
-    /// events to the world that would not otherwise be there. The names are
-    /// distinctive, so a collision with the user's own book is unlikely, but
-    /// it is not impossible. Failure is not fatal -- checkpoints are simply
-    /// unavailable, and everything else still works.
-    fn load_checkpoint_support(&mut self) -> Result<(), SyncError> {
-        let sub = self.session.submit(
-            "(acl2::include-book \"kestrel/utilities/checkpoints\" :dir :system)",
-            Duration::from_secs(120),
-        )?;
-        self.checkpoints_available = sub.outcome == Outcome::Ok;
-        Ok(())
-    }
-
-    /// True when key checkpoints can be reported for failing proofs.
-    pub fn checkpoints_available(&self) -> bool {
-        self.checkpoints_available
     }
 
     fn plant_base_label(&mut self) -> Result<(), SyncError> {
@@ -391,17 +427,10 @@ impl Book {
             Ok(sub) => parse_event_data(&sub),
             Err(_) => EventData::default(),
         };
-        let mut cp = Checkpoints::default();
-        if self.checkpoints_available {
-            if let Ok(sub) = self.session.submit(CHECKPOINT_PROBE, deadline) {
-                let keep = |v: Option<&str>| {
-                    v.map(str::to_string)
-                        .filter(|x| !x.is_empty() && x != "nil" && x != "NIL")
-                };
-                cp.top = keep(sub.block("ckpt-top"));
-                cp.sub = keep(sub.block("ckpt-sub"));
-            }
-        }
+        let cp = match self.session.submit(CHECKPOINT_PROBE, deadline) {
+            Ok(sub) => parse_checkpoints(&sub),
+            Err(_) => Checkpoints::default(),
+        };
         (ed, cp)
     }
 
