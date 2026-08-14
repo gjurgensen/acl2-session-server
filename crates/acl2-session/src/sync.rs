@@ -29,6 +29,38 @@ struct Admitted {
     command_number: Option<i64>,
 }
 
+/// What ACL2 recorded about an event, read from `get-event-data` rather than
+/// parsed out of the prover's prose.
+///
+/// Values are ACL2-printed text. Deliberately: the *envelope* is structured --
+/// each fact is its own field and can never be elided by a truncated blob --
+/// while the values stay in the notation a reader of ACL2 already knows. There
+/// is no gain in re-encoding a rune list as JSON.
+#[derive(Debug, Clone, Default)]
+pub struct EventData {
+    pub prover_steps: Option<u64>,
+    /// Runes the proof used.
+    pub rules: Option<String>,
+    pub warnings: Option<String>,
+    /// Why the prover gave up: `empty-clause` means the conjecture is false,
+    /// `induction-depth-limit-exceeded` means it ran out of depth, and so on.
+    /// These imply completely different next moves.
+    pub abort_causes: Option<String>,
+    /// `(prove print proof-tree other)`, in seconds.
+    pub time: Option<String>,
+}
+
+/// Key checkpoints from the most recent failed proof.
+///
+/// The two stacks stay separate because they answer different questions: `top`
+/// is where the top-level proof stalled, `sub` is often where the actual defect
+/// is. Flattening them buries the informative one.
+#[derive(Debug, Clone, Default)]
+pub struct Checkpoints {
+    pub top: Option<String>,
+    pub sub: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct UnitReport {
     pub index: usize,
@@ -36,6 +68,7 @@ pub struct UnitReport {
     pub line_end: usize,
     pub elapsed: Duration,
     pub output: String,
+    pub event_data: EventData,
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +79,8 @@ pub struct FailureReport {
     pub output: String,
     /// True when the deadline expired rather than ACL2 rejecting the unit.
     pub still_running: bool,
+    pub event_data: EventData,
+    pub checkpoints: Checkpoints,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -112,6 +147,69 @@ impl From<io::Error> for SyncError {
     }
 }
 
+/// Report what ACL2 recorded about the event just executed.
+///
+/// Must run *before* the `deflabel`: `get-event-data` describes the
+/// immediately preceding event, and planting a label first would make it
+/// describe the label.
+const EVENT_DATA_PROBE: &str = r#"(acl2::prog2$
+  (acl2::cw "~%<<<ASS-BEGIN evd>>>~%steps ~x0~%rules ~x1~%warnings ~x2~%abort ~x3~%time ~x4~%<<<ASS-END evd>>>~%"
+    (acl2::get-event-data 'acl2::prover-steps-counted acl2::state)
+    (acl2::get-event-data 'acl2::rules acl2::state)
+    (acl2::get-event-data 'acl2::warnings acl2::state)
+    (acl2::get-event-data 'acl2::abort-causes acl2::state)
+    (acl2::get-event-data 'acl2::time acl2::state))
+  (acl2::value :invisible))"#;
+
+/// Report the key checkpoints of the most recent failed proof.
+///
+/// Uses `books/kestrel/utilities/checkpoints`, which reads `gag-state-saved`.
+/// Only issued after a failure, and as its own submission, because a failing
+/// unit aborts its own `ld` before any trailing probe could run.
+const CHECKPOINT_PROBE: &str = r#"(acl2::prog2$
+  (acl2::cw "~%<<<ASS-BEGIN ckpt-top>>>~%~x0~%<<<ASS-END ckpt-top>>>~%<<<ASS-BEGIN ckpt-sub>>>~%~x1~%<<<ASS-END ckpt-sub>>>~%"
+    (acl2::checkpoint-list-pretty t acl2::state)
+    (acl2::checkpoint-list-pretty acl2::nil acl2::state))
+  (acl2::value :invisible))"#;
+
+fn parse_event_data(sub: &crate::session::Submission) -> EventData {
+    let mut e = EventData::default();
+    let Some(body) = sub.block("evd") else { return e };
+    // The probe prints one `key value` pair per line, but ACL2 wraps long
+    // values at its right margin, so a value runs until the next known key.
+    let keys = ["steps", "rules", "warnings", "abort", "time"];
+    let mut cur: Option<(&str, Vec<&str>)> = None;
+    let mut done: Vec<(&str, String)> = Vec::new();
+    for line in body.lines() {
+        let start = keys.iter().find(|k| {
+            line.strip_prefix(*k).map_or(false, |r| r.starts_with(' '))
+        });
+        if let Some(k) = start {
+            if let Some((pk, v)) = cur.take() {
+                done.push((pk, v.join("\n")));
+            }
+            cur = Some((k, vec![line[k.len() + 1..].trim_end()]));
+        } else if let Some((_, v)) = cur.as_mut() {
+            v.push(line.trim_end());
+        }
+    }
+    if let Some((pk, v)) = cur {
+        done.push((pk, v.join("\n")));
+    }
+    let pick = |k: &str| -> Option<String> {
+        done.iter()
+            .find(|(dk, _)| *dk == k)
+            .map(|(_, v)| v.trim().to_string())
+            .filter(|v| !v.is_empty() && v != "nil" && v != "NIL")
+    };
+    e.prover_steps = pick("steps").and_then(|v| v.parse().ok());
+    e.rules = pick("rules");
+    e.warnings = pick("warnings");
+    e.abort_causes = pick("abort");
+    e.time = pick("time");
+    e
+}
+
 /// A session anchored to one file.
 pub struct Book {
     acl2: PathBuf,
@@ -120,6 +218,7 @@ pub struct Book {
     admitted: Vec<Admitted>,
     label_gen: u64,
     rebuilds: usize,
+    checkpoints_available: bool,
 }
 
 impl Book {
@@ -134,7 +233,9 @@ impl Book {
             admitted: Vec::new(),
             label_gen: 0,
             rebuilds: 0,
+            checkpoints_available: false,
         };
+        b.load_checkpoint_support()?;
         // A baseline label, so "roll back to the empty prefix" is the same
         // operation as any other rollback rather than a special case.
         b.plant_base_label()?;
@@ -157,6 +258,34 @@ impl Book {
 
     fn label_name(genid: u64) -> String {
         format!("acl2-session-mark-{genid}")
+    }
+
+    /// Make `checkpoint-list-pretty` available, before the base label so that
+    /// no rollback can remove it.
+    ///
+    /// `books/kestrel/utilities/checkpoints` is Kaufmann's, has no
+    /// include-books of its own, and ships with the community books, so this
+    /// is about as light a dependency as exists. Reading `gag-state-saved`
+    /// directly would mean reimplementing its clause prettifying against ACL2
+    /// internals, which is a worse trade.
+    ///
+    /// Known deviation from a plain interactive session (5.1): this adds
+    /// events to the world that would not otherwise be there. The names are
+    /// distinctive, so a collision with the user's own book is unlikely, but
+    /// it is not impossible. Failure is not fatal -- checkpoints are simply
+    /// unavailable, and everything else still works.
+    fn load_checkpoint_support(&mut self) -> Result<(), SyncError> {
+        let sub = self.session.submit(
+            "(acl2::include-book \"kestrel/utilities/checkpoints\" :dir :system)",
+            Duration::from_secs(120),
+        )?;
+        self.checkpoints_available = sub.outcome == Outcome::Ok;
+        Ok(())
+    }
+
+    /// True when key checkpoints can be reported for failing proofs.
+    pub fn checkpoints_available(&self) -> bool {
+        self.checkpoints_available
     }
 
     fn plant_base_label(&mut self) -> Result<(), SyncError> {
@@ -223,10 +352,16 @@ impl Book {
                         line_start: u.line_start,
                         line_end: u.line_end,
                         elapsed: sub.elapsed,
+                        event_data: parse_event_data(&sub),
                         output: sub.output,
                     });
                 }
                 Outcome::Failed | Outcome::StillRunning => {
+                    // A failing unit aborts its own `ld`, so the trailing
+                    // probes never ran. Ask again in a separate submission:
+                    // `gag-state-saved` and `last-event-data` are state
+                    // globals and survive the failure.
+                    let (ed, cp) = self.probe_after_failure(deadline);
                     // Stop here. The world is sequential, so later units almost
                     // always depend on this one and continuing produces
                     // cascading noise rather than information.
@@ -236,12 +371,38 @@ impl Book {
                         line_end: u.line_end,
                         output: sub.output,
                         still_running: sub.outcome == Outcome::StillRunning,
+                        event_data: ed,
+                        checkpoints: cp,
                     });
                     break;
                 }
             }
         }
         Ok(out)
+    }
+
+    /// After a failed unit, recover what ACL2 recorded about it.
+    ///
+    /// Best effort by design: this runs when something has already gone wrong,
+    /// so a probe that itself fails must degrade to an empty report rather than
+    /// masking the original failure with a second one.
+    fn probe_after_failure(&mut self, deadline: Duration) -> (EventData, Checkpoints) {
+        let ed = match self.session.submit(EVENT_DATA_PROBE, deadline) {
+            Ok(sub) => parse_event_data(&sub),
+            Err(_) => EventData::default(),
+        };
+        let mut cp = Checkpoints::default();
+        if self.checkpoints_available {
+            if let Ok(sub) = self.session.submit(CHECKPOINT_PROBE, deadline) {
+                let keep = |v: Option<&str>| {
+                    v.map(str::to_string)
+                        .filter(|x| !x.is_empty() && x != "nil" && x != "NIL")
+                };
+                cp.top = keep(sub.block("ckpt-top"));
+                cp.sub = keep(sub.block("ckpt-sub"));
+            }
+        }
+        (ed, cp)
     }
 
     /// Submit one unit together with its label and command-number probe.
@@ -259,7 +420,7 @@ impl Book {
         self.label_gen += 1;
         let label = self.label_gen;
         let body = format!(
-            "{text}\n(acl2::deflabel {})\n\
+            "{text}\n{EVENT_DATA_PROBE}\n(acl2::deflabel {})\n\
              (acl2::prog2$ (acl2::cw \"~%<<<ASS-DATA cmd ~x0>>>~%\" \
                (acl2::max-absolute-command-number (acl2::w acl2::state))) \
                (acl2::value :invisible))",

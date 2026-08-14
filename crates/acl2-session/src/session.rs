@@ -29,17 +29,26 @@ pub struct Submission {
     pub outcome: Outcome,
     /// Everything ACL2 printed for this form, sentinels stripped.
     pub output: String,
-    /// Structured values the submitted body asked ACL2 to report, via
-    /// `<<<ASS-DATA key value>>>`. This is how the caller gets facts out of
-    /// the session without parsing prover prose: the body computes them in
-    /// ACL2 and prints them under a key we chose.
+    /// Single-line structured values, via `<<<ASS-DATA key value>>>`.
+    /// This is how the caller gets facts out of the session without parsing
+    /// prover prose: the body computes them in ACL2 and prints them under a
+    /// key we chose.
     pub data: Vec<(String, String)>,
+    /// Multi-line structured values, delimited by `<<<ASS-BEGIN key>>>` and
+    /// `<<<ASS-END key>>>`. Needed because most of what is worth extracting --
+    /// a rune list, a checkpoint goal -- does not fit on one line and ACL2
+    /// wraps at its right margin.
+    pub blocks: Vec<(String, String)>,
     pub elapsed: Duration,
 }
 
 impl Submission {
     pub fn get(&self, key: &str) -> Option<&str> {
         self.data.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+
+    pub fn block(&self, key: &str) -> Option<&str> {
+        self.blocks.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
     }
 }
 
@@ -215,8 +224,8 @@ impl Session {
         } else {
             Outcome::StillRunning
         };
-        let (output, data) = strip_sentinels(&captured, genid);
-        Ok(Submission { outcome, output, data, elapsed })
+        let (output, data, blocks) = strip_sentinels(&captured, genid);
+        Ok(Submission { outcome, output, data, blocks, elapsed })
     }
 
     /// Interrupt a running form.
@@ -309,13 +318,40 @@ impl Drop for Session {
 /// which therefore lands at the head of the capture. This is cosmetic only --
 /// the prompt is never used to decide anything (P2); it is just noise at the
 /// front of otherwise clean output.
-fn strip_sentinels(s: &str, genid: u64) -> (String, Vec<(String, String)>) {
+fn strip_sentinels(s: &str, genid: u64) -> (String, Vec<(String, String)>, Vec<(String, String)>) {
     let ok = format!("<<<ASS-OK {genid}>>>");
     let done = format!("<<<ASS-DONE {genid}>>>");
     let mut data = Vec::new();
+    let mut blocks: Vec<(String, String)> = Vec::new();
     let mut kept: Vec<&str> = Vec::new();
+    let mut open: Option<(String, Vec<&str>)> = None;
     for l in s.lines() {
         if l.contains(&ok) || l.contains(&done) {
+            continue;
+        }
+        // Multi-line block delimiters. Collected out of the output entirely,
+        // so a block's contents never appear twice.
+        if let Some(i) = l.find("<<<ASS-BEGIN ") {
+            if let Some(end) = l[i + 13..].find(">>>") {
+                open = Some((l[i + 13..i + 13 + end].trim().to_string(), Vec::new()));
+                continue;
+            }
+        }
+        if let Some(i) = l.find("<<<ASS-END ") {
+            if let Some(end) = l[i + 11..].find(">>>") {
+                let key = l[i + 11..i + 11 + end].trim().to_string();
+                if let Some((k, body)) = open.take() {
+                    if k == key {
+                        blocks.push((k, body.join("\n").trim().to_string()));
+                        continue;
+                    }
+                    open = Some((k, body));
+                }
+                continue;
+            }
+        }
+        if let Some((_, body)) = open.as_mut() {
+            body.push(l);
             continue;
         }
         if let Some(rest) = l.find("<<<ASS-DATA ").map(|i| &l[i + 12..]) {
@@ -339,5 +375,5 @@ fn strip_sentinels(s: &str, genid: u64) -> (String, Vec<(String, String)>) {
             out = out[i + 2..].to_string();
         }
     }
-    (out.trim_start_matches(['\n', '\r']).to_string(), data)
+    (out.trim_start_matches(['\n', '\r']).to_string(), data, blocks)
 }

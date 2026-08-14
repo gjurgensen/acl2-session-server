@@ -28,16 +28,44 @@ fn report(label: &str, o: &SyncOutcome) -> bool {
         o.admitted.len()
     );
     for u in &o.admitted {
-        println!("     + unit {} (lines {}-{}) {} ms", u.index, u.line_start, u.line_end,
-                 u.elapsed.as_millis());
+        let steps = u.event_data.prover_steps.map(|s| format!(" {s} steps"))
+            .unwrap_or_default();
+        println!("     + unit {} (lines {}-{}) {} ms{}", u.index, u.line_start, u.line_end,
+                 u.elapsed.as_millis(), steps);
+        if let Some(r) = &u.event_data.rules {
+            println!("         rules: {}", one_line(r, 66));
+        }
     }
     if let Some(f) = &o.failed {
-        let first = f.output.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-        println!("     ! unit {} (lines {}-{}) failed{}: {}", f.index, f.line_start,
-                 f.line_end, if f.still_running { " [deadline]" } else { "" },
-                 first.trim());
+        println!("     ! unit {} (lines {}-{}) failed{}", f.index, f.line_start,
+                 f.line_end, if f.still_running { " [deadline]" } else { "" });
+        if let Some(a) = &f.event_data.abort_causes {
+            println!("         abort-causes : {}", one_line(a, 60));
+        }
+        if let Some(s) = f.event_data.prover_steps {
+            println!("         prover steps : {s}");
+        }
+        if let Some(r) = &f.event_data.rules {
+            println!("         rules        : {}", one_line(r, 60));
+        }
+        match (&f.checkpoints.top, &f.checkpoints.sub) {
+            (None, None) => println!("         checkpoints  : (none reported)"),
+            (t, s) => {
+                if let Some(t) = t {
+                    println!("         checkpoint top : {}", one_line(t, 58));
+                }
+                if let Some(s) = s {
+                    println!("         checkpoint sub : {}", one_line(s, 58));
+                }
+            }
+        }
     }
     o.failed.is_none()
+}
+
+fn one_line(s: &str, max: usize) -> String {
+    let j: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if j.len() > max { format!("{}...", &j[..max]) } else { j }
 }
 
 fn expect(cond: bool, what: &str, fails: &mut usize) {
@@ -69,6 +97,7 @@ fn main() {
     let mut b = Book::open(&acl2, &book).expect("open book");
     eprintln!("session up\n");
 
+    println!("checkpoints available: {}\n", b.checkpoints_available());
     let mut fails = 0usize;
 
     let o = b.sync(None, DEADLINE).expect("sync 1");
@@ -110,6 +139,10 @@ fn main() {
     expect(o.failed.is_some(), "the false theorem is reported as a failure", &mut fails);
     expect(o.admitted.is_empty(), "nothing new admitted before the failure", &mut fails);
     expect(o.failed.as_ref().map(|f| f.index) == Some(4), "failure is unit 4", &mut fails);
+    let f = o.failed.as_ref().unwrap();
+    expect(f.event_data.abort_causes.is_some(), "an abort cause is reported", &mut fails);
+    expect(f.checkpoints.top.is_some() || f.checkpoints.sub.is_some(),
+           "at least one key checkpoint is reported", &mut fails);
 
     // Fixing the failing unit needs no rollback: it was never admitted.
     write(&book, &["(in-package \"ACL2\")", f_alpha,
