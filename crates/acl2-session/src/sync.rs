@@ -213,9 +213,23 @@ pub struct SyncOutcome {
     pub rebuilt: bool,
 }
 
+/// What resuming an in-flight unit produced.
+#[derive(Debug)]
+pub enum Resumed {
+    /// Still running. The deadline bounded this call, not the proof.
+    StillRunning { elapsed: Duration },
+    Admitted(UnitReport),
+    Failed(FailureReport),
+}
+
 #[derive(Debug)]
 pub enum SyncError {
     Io(io::Error),
+    /// A unit is still running. Resume it, interrupt it, or wait.
+    ///
+    /// Rejected rather than queued: a session drives one ACL2 over one pipe,
+    /// and starting a second form would interleave both on the same channel.
+    Busy { index: usize },
     Split(SplitError),
     /// The undo itself was rejected by ACL2.
     RollbackFailed { output: String },
@@ -231,6 +245,10 @@ impl std::fmt::Display for SyncError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SyncError::Io(e) => write!(f, "{e}"),
+            SyncError::Busy { index } => write!(
+                f,
+                "unit {index} is still running; resume, interrupt, or wait for it"
+            ),
             SyncError::Split(e) => write!(f, "cannot split file: {e}"),
             SyncError::RollbackFailed { output } => {
                 let first = output.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
@@ -470,6 +488,18 @@ pub struct Book {
     label_gen: u64,
     rebuilds: usize,
     outputs: OutputStore,
+    /// The unit whose submission has not reported yet.
+    pending: Option<PendingUnit>,
+}
+
+/// Enough to finish recording a unit whose deadline expired mid-flight.
+#[derive(Debug, Clone)]
+struct PendingUnit {
+    index: usize,
+    hash: u64,
+    line_start: usize,
+    line_end: usize,
+    label: u64,
 }
 
 impl Book {
@@ -485,6 +515,7 @@ impl Book {
             label_gen: 0,
             rebuilds: 0,
             outputs: OutputStore::new(std::process::id() as u64)?,
+            pending: None,
         };
         // A baseline label, so "roll back to the empty prefix" is the same
         // operation as any other rollback rather than a special case.
@@ -534,6 +565,9 @@ impl Book {
         through_line: Option<usize>,
         deadline: Duration,
     ) -> Result<SyncOutcome, SyncError> {
+        if let Some(p) = &self.pending {
+            return Err(SyncError::Busy { index: p.index });
+        }
         let bytes = std::fs::read(&self.path)?;
         let units = split(&bytes).map_err(SyncError::Split)?;
 
@@ -567,7 +601,7 @@ impl Book {
         }
 
         for (i, u) in units.iter().enumerate().take(target + 1).skip(keep) {
-            let (sub, output_ref) = self.admit_unit(u, &bytes, deadline)?;
+            let (sub, output_ref) = self.admit_unit(u, i, &bytes, deadline)?;
             let output_lines = self.outputs.lines(&output_ref).unwrap_or(0);
             match sub.outcome {
                 Outcome::Ok => {
@@ -665,9 +699,10 @@ impl Book {
     fn admit_unit(
         &mut self,
         u: &Form,
+        index: usize,
         bytes: &[u8],
         deadline: Duration,
-) -> Result<(crate::session::Submission, OutputRef), SyncError> {
+    ) -> Result<(crate::session::Submission, OutputRef), SyncError> {
         let text = String::from_utf8_lossy(&bytes[u.start..u.end]).into_owned();
         self.label_gen += 1;
         let label = self.label_gen;
@@ -680,6 +715,17 @@ impl Book {
             Self::label_name(label)
         );
         let sub = self.session.submit(&body, deadline)?;
+        if sub.outcome == Outcome::StillRunning {
+            // Deadline expired; ACL2 is untouched and still working. Remember
+            // what is needed to finish recording it when it reports.
+            self.pending = Some(PendingUnit {
+                index,
+                hash: u.hash,
+                line_start: u.line_start,
+                line_end: u.line_end,
+                label,
+            });
+        }
         let output_ref = self.outputs.put(&sub.output)?;
         if sub.outcome == Outcome::Ok {
             self.admitted.push(Admitted {
@@ -692,6 +738,86 @@ impl Book {
             });
         }
         Ok((sub, output_ref))
+    }
+
+    /// Finish a unit whose deadline expired.
+    ///
+    /// Returns `None` when nothing is in flight. A completed unit is recorded
+    /// exactly as `sync` would have recorded it, so the prefix invariant holds
+    /// either way; the caller then syncs again to continue through the file.
+    pub fn resume(&mut self, deadline: Duration) -> Result<Option<Resumed>, SyncError> {
+        let Some(p) = self.pending.clone() else { return Ok(None) };
+        let Some(sub) = self.session.resume(deadline)? else {
+            self.pending = None;
+            return Ok(None);
+        };
+        if sub.outcome == Outcome::StillRunning {
+            return Ok(Some(Resumed::StillRunning { elapsed: sub.elapsed }));
+        }
+        self.pending = None;
+        let output_ref = self.outputs.put(&sub.output)?;
+        let output_lines = self.outputs.lines(&output_ref).unwrap_or(0);
+        if sub.outcome == Outcome::Ok {
+            self.admitted.push(Admitted {
+                hash: p.hash,
+                line_start: p.line_start,
+                line_end: p.line_end,
+                label: p.label,
+                command_number: sub.get("cmd").and_then(|v| v.parse().ok()),
+                output_ref: output_ref.clone(),
+            });
+            let (inner, inner_total) = parse_inner(&sub);
+            return Ok(Some(Resumed::Admitted(UnitReport {
+                index: p.index,
+                line_start: p.line_start,
+                line_end: p.line_end,
+                elapsed: sub.elapsed,
+                event_data: parse_event_data(&sub),
+                inner,
+                inner_total,
+                output_ref,
+                output_lines,
+            })));
+        }
+        let (ed, cp, inner, inner_total) = self.probe_after_failure(deadline);
+        let error_line = sub
+            .output
+            .lines()
+            .find(|l| l.contains("ACL2 Error"))
+            .map(|l| l.trim().to_string());
+        Ok(Some(Resumed::Failed(FailureReport {
+            index: p.index,
+            line_start: p.line_start,
+            line_end: p.line_end,
+            status: if cp.proof_ran { Status::ProofFailure } else { Status::Rejected },
+            still_running: false,
+            error_line,
+            event_data: ed,
+            checkpoints: cp,
+            inner,
+            inner_total,
+            output_ref,
+            output_lines,
+        })))
+    }
+
+    /// Progress on the unit in flight, if any.
+    pub fn progress(&mut self, tail_lines: usize) -> io::Result<Option<crate::session::Progress>> {
+        self.session.progress(tail_lines)
+    }
+
+    /// Abort the unit in flight and make the session usable again.
+    pub fn interrupt(&mut self) -> io::Result<bool> {
+        let ok = self.session.interrupt()?;
+        if ok {
+            self.pending = None;
+        }
+        Ok(ok)
+    }
+
+    /// The unit currently in flight, if any.
+    pub fn running_unit(&self) -> Option<usize> {
+        self.pending.as_ref().map(|p| p.index)
     }
 
     /// Read part of a captured output.
@@ -728,7 +854,7 @@ impl Book {
         self.plant_base_label()?;
 
         for u in units.iter().take(keep) {
-            let (sub, _) = self.admit_unit(u, &bytes, deadline)?;
+            let (sub, _) = self.admit_unit(u, 0, &bytes, deadline)?;
             if sub.outcome != Outcome::Ok {
                 // A unit that admitted before but not now means the world we
                 // were trying to restore was never reachable. Fail loudly.

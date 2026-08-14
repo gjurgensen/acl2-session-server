@@ -24,6 +24,17 @@ pub enum Outcome {
     StillRunning,
 }
 
+/// A snapshot of a form that is still running.
+#[derive(Debug, Clone)]
+pub struct Progress {
+    pub elapsed: Duration,
+    /// The last few lines ACL2 has printed. Provisional by nature: the
+    /// authoritative result comes from the structured probes once the form
+    /// finishes.
+    pub tail: String,
+    pub bytes_so_far: usize,
+}
+
 #[derive(Debug)]
 pub struct Submission {
     pub outcome: Outcome,
@@ -52,9 +63,23 @@ impl Submission {
     }
 }
 
+/// The form a session is currently working on.
+struct InFlight {
+    generation: u64,
+    started: Instant,
+}
+
 pub struct Session {
     child: Child,
     master: OwnedFd,
+    /// Set while ACL2 is still working on a submitted form.
+    ///
+    /// A session drives one ACL2 over one pipe, so it is strictly
+    /// single-threaded: submitting again while a form is in flight would
+    /// interleave two forms' input and output on the same channel. That is
+    /// rejected rather than queued, because queueing would hide from the
+    /// caller that its deadline did not actually end the work.
+    inflight: Option<InFlight>,
     tmpdir: PathBuf,
     generation: u64,
     /// Output read past the end of the previous form. Carried forward so it is
@@ -106,6 +131,7 @@ impl Session {
             master,
             tmpdir,
             generation: 0,
+            inflight: None,
             pending: String::new(),
         };
         // Drain the startup banner and everything the customization file
@@ -161,6 +187,12 @@ impl Session {
     /// ensures that markers left over from an aborted submission cannot be
     /// mistaken for this one's.
     pub fn submit(&mut self, form: &str, deadline: Duration) -> io::Result<Submission> {
+        if self.inflight.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "a form is still running in this session; resume, interrupt, or wait",
+            ));
+        }
         self.generation += 1;
         let genid = self.generation;
         let path = self.tmpdir.join(format!("form-{genid}.lisp"));
@@ -204,26 +236,88 @@ impl Session {
         );
         self.write_all(line.as_bytes())?;
 
+        self.inflight = Some(InFlight { generation: genid, started: Instant::now() });
+        self.await_completion(deadline)
+    }
+
+    /// Keep waiting for the form already in flight.
+    ///
+    /// Returns `None` when the session is idle. This is what makes a deadline
+    /// bound the *call* rather than the *proof*: an expired deadline hands
+    /// control back without disturbing ACL2, and the caller decides whether to
+    /// wait longer, ask for progress, or interrupt.
+    pub fn resume(&mut self, deadline: Duration) -> io::Result<Option<Submission>> {
+        if self.inflight.is_none() {
+            return Ok(None);
+        }
+        self.await_completion(deadline).map(Some)
+    }
+
+    fn await_completion(&mut self, deadline: Duration) -> io::Result<Submission> {
+        let Some(InFlight { generation: genid, started }) = self.inflight else {
+            return Err(io::Error::new(io::ErrorKind::Other, "nothing in flight"));
+        };
         let done = format!("<<<ASS-DONE {genid}>>>");
-        let start = Instant::now();
         let raw = self.read_until(|b| b.contains(&done), deadline)?;
-        let elapsed = start.elapsed();
+
+        if !raw.contains(&done) {
+            // Not finished. Keep everything read so far so a later resume
+            // continues where this one stopped rather than losing the head of
+            // the output.
+            self.pending = raw;
+            return Ok(Submission {
+                outcome: Outcome::StillRunning,
+                output: String::new(),
+                data: Vec::new(),
+                blocks: Vec::new(),
+                elapsed: started.elapsed(),
+            });
+        }
 
         // Anything read past our sentinel belongs to whatever comes next.
-        let finished = self.split_after(raw.clone(), &done);
-        let captured = finished.unwrap_or(raw);
-
-        let outcome = if captured.contains(&done) {
-            if captured.contains(&format!("<<<ASS-OK {genid}>>>")) {
-                Outcome::Ok
-            } else {
-                Outcome::Failed
-            }
+        let captured = self.split_after(raw.clone(), &done).unwrap_or(raw);
+        self.inflight = None;
+        let outcome = if captured.contains(&format!("<<<ASS-OK {genid}>>>")) {
+            Outcome::Ok
         } else {
-            Outcome::StillRunning
+            Outcome::Failed
         };
         let (output, data, blocks) = strip_sentinels(&captured, genid);
-        Ok(Submission { outcome, output, data, blocks, elapsed })
+        Ok(Submission { outcome, output, data, blocks, elapsed: started.elapsed() })
+    }
+
+    /// Whether ACL2 is still working on a submitted form.
+    pub fn is_running(&self) -> bool {
+        self.inflight.is_some()
+    }
+
+    /// Progress on the form in flight: how long it has been running, and the
+    /// tail of what it has printed so far.
+    ///
+    /// Drains without blocking, so it is safe to call repeatedly. The tail is
+    /// the only thing offered here; anything more belongs behind an output
+    /// handle once the form completes.
+    pub fn progress(&mut self, tail_lines: usize) -> io::Result<Option<Progress>> {
+        let Some(InFlight { started, .. }) = self.inflight else {
+            return Ok(None);
+        };
+        // A short poll rather than the deadline: this reports, it does not wait.
+        let more = self.read_until(|_| false, Duration::from_millis(50))?;
+        self.pending = more;
+        let tail: Vec<&str> = self
+            .pending
+            .lines()
+            .rev()
+            .take(tail_lines)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        Ok(Some(Progress {
+            elapsed: started.elapsed(),
+            tail: tail.join("\n"),
+            bytes_so_far: self.pending.len(),
+        }))
     }
 
     /// Interrupt a running form.
@@ -246,6 +340,8 @@ impl Session {
             // genuinely back, whereas a prompt in the output proves nothing
             // (ACL2 prints nested prompts while an `ld` is still running).
             if self.handshake(INTERRUPT_STEP)? {
+                // The interrupted form will never report; stop waiting on it.
+                self.inflight = None;
                 return Ok(true);
             }
         }

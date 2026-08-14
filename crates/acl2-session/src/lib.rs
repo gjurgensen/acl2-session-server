@@ -18,4 +18,5 @@ pub mod sync;
 pub use session::{Outcome, Session, Submission};
 pub use split::{split, split_str, Form, SplitError};
 pub use output::{OutputRef, OutputSlice, OutputStore, Slice};
-pub use sync::{Book, InnerEvent, Status, SyncError, SyncOutcome};
+pub use session::Progress;
+pub use sync::{Book, InnerEvent, Resumed, Status, SyncError, SyncOutcome};

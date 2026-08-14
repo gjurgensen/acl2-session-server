@@ -21,3 +21,7 @@ path = "src/bin/syncdemo.rs"
 [[bin]]
 name = "acl2-session-syncfile"
 path = "src/bin/syncfile.rs"
+
+[[bin]]
+name = "acl2-session-deadlinedemo"
+path = "src/bin/deadlinedemo.rs"
