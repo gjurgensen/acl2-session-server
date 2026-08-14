@@ -192,11 +192,10 @@ impl From<io::Error> for SyncError {
 /// immediately preceding event, and planting a label first would make it
 /// describe the label.
 const EVENT_DATA_PROBE: &str = r#"(acl2::prog2$
-  (acl2::cw "~%<<<ASS-BEGIN evd>>>~%steps ~x0~%rules ~x1~%warnings ~x2~%abort ~x3~%time ~x4~%<<<ASS-END evd>>>~%"
+  (acl2::cw "~%<<<ASS-BEGIN evd>>>~%steps ~x0~%rules ~x1~%warnings ~x2~%time ~x3~%<<<ASS-END evd>>>~%"
     (acl2::get-event-data 'acl2::prover-steps-counted acl2::state)
     (acl2::get-event-data 'acl2::rules acl2::state)
     (acl2::get-event-data 'acl2::warnings acl2::state)
-    (acl2::get-event-data 'acl2::abort-causes acl2::state)
     (acl2::get-event-data 'acl2::time acl2::state))
   (acl2::value :invisible))"#;
 
@@ -362,7 +361,7 @@ impl Book {
 
     fn plant_base_label(&mut self) -> Result<(), SyncError> {
         let body = format!(
-            "(acl2::deflabel {})",
+            "(acl2::with-output :off :all (acl2::deflabel {}))",
             Self::label_name(0)
         );
         self.session.submit(&body, Duration::from_secs(60))?;
@@ -479,6 +478,11 @@ impl Book {
     /// One round trip: the unit, our `deflabel`, and the command number travel
     /// in a single submission, so the bookkeeping cannot drift from the world.
     /// On success the unit is recorded in `admitted`.
+    ///
+    /// The label is wrapped in `with-output :off :all` so our bookkeeping
+    /// leaves no trace in the captured log. Without it every unit's output
+    /// ends with a summary for `deflabel acl2-session-mark-N`, which is noise
+    /// we introduced showing up in output the client reads as ACL2's.
     fn admit_unit(
         &mut self,
         u: &Form,
@@ -489,7 +493,8 @@ impl Book {
         self.label_gen += 1;
         let label = self.label_gen;
         let body = format!(
-            "{text}\n{EVENT_DATA_PROBE}\n(acl2::deflabel {})\n\
+            "{text}\n{EVENT_DATA_PROBE}\n\
+             (acl2::with-output :off :all (acl2::deflabel {}))\n\
              (acl2::prog2$ (acl2::cw \"~%<<<ASS-DATA cmd ~x0>>>~%\" \
                (acl2::max-absolute-command-number (acl2::w acl2::state))) \
                (acl2::value :invisible))",

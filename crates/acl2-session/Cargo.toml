@@ -17,3 +17,7 @@ path = "src/bin/smoke.rs"
 [[bin]]
 name = "acl2-session-syncdemo"
 path = "src/bin/syncdemo.rs"
+
+[[bin]]
+name = "acl2-session-syncfile"
+path = "src/bin/syncfile.rs"
