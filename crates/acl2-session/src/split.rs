@@ -295,6 +295,38 @@ fn line_of(s: &[u8], offset: usize) -> usize {
 /// same fact that forces lexical splitting: the file cannot be read up front.
 /// It happens also to be what we want -- reindenting a form or editing a
 /// comment inside it costs no re-proving.
+///
+/// Comment handling is free: the splitter already has to skip both comment
+/// forms to balance parentheses, so this reuses that lexer rather than
+/// reimplementing it. That also means a `;` or `#|` inside a string or a
+/// `|bar symbol|` is correctly *not* treated as a comment -- which is why this
+/// cannot be done with a regular expression.
+///
+/// Whitespace collapses to a single space rather than vanishing, so tokens are
+/// never merged: `(f a b)` must not normalise to the same thing as `(f ab)`.
+///
+/// All errors are in the safe direction. Normalising only merges inputs that
+/// are certainly equivalent, so the worst case is a spurious *difference* --
+/// costing re-proving that was not strictly needed. A spurious *match* would be
+/// a correctness bug, and nothing here can produce one. Note for instance that
+/// case is preserved even though ACL2's reader upcases unescaped symbols, so
+/// re-casing a form does force a re-admit.
+///
+/// # Examples
+///
+/// ```
+/// use acl2_session::split::normalize;
+/// let n = normalize(b"(defun f (x)  ; note\n  x)");
+/// assert_eq!(String::from_utf8(n).unwrap(), "(defun f (x) x)");
+///
+/// // A comment character inside a string is not a comment.
+/// let n = normalize(b"(f \";)\" y)");
+/// assert_eq!(String::from_utf8(n).unwrap(), "(f \";)\" y)");
+///
+/// // Nested block comments.
+/// let n = normalize(b"(f #| a #| b |# c |# y)");
+/// assert_eq!(String::from_utf8(n).unwrap(), "(f y)");
+/// ```
 pub fn normalize(form: &[u8]) -> Vec<u8> {
     let sp = Splitter { s: form };
     let b = form;
