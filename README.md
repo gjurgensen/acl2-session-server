@@ -117,4 +117,4 @@ compiler enforces it.
 
 ## Runtime
 
-Rust 1.85 or later, distributed as a single binary.
+Rust 1.88 or later, distributed as a single binary.

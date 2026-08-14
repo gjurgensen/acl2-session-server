@@ -19,7 +19,7 @@ members = ["crates/acl2-session", "crates/acl2-session-mcp"]
 [workspace.package]
 version = "0.0.1"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "BSD-3-Clause"
 repository = "https://github.com/gjurgensen/acl2-session-server"
 readme = "README.md"
