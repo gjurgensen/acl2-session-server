@@ -8,6 +8,8 @@
 //! protocol to fall out of step with. Rollback stops being something a client
 //! requests and becomes a consequence of editing.
 
+#![forbid(unsafe_code)]
+// This module is pure logic; all FFI lives in pty.rs and session.rs.
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;

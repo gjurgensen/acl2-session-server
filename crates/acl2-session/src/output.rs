@@ -10,6 +10,8 @@
 //! handle. Nothing is ever sampled, truncated at capture, or reconstructed.
 //! A client that wants the narrative asks for it.
 
+#![forbid(unsafe_code)]
+// This module is pure logic; all FFI lives in pty.rs and session.rs.
 use std::collections::HashMap;
 use std::fmt;
 use std::io;

@@ -16,6 +16,8 @@
 //! failures, and agreement with ACL2's own reader wherever the two can be
 //! compared.
 
+#![forbid(unsafe_code)]
+// This module is pure logic; all FFI lives in pty.rs and session.rs.
 use std::fmt;
 
 /// One top-level submission unit.

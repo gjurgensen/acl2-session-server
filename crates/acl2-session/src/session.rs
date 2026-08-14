@@ -1,7 +1,7 @@
 //! A live ACL2 session: one process, one book directory, one form at a time.
 
 use std::io;
-use std::os::unix::io::{FromRawFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -54,7 +54,7 @@ impl Submission {
 
 pub struct Session {
     child: Child,
-    master: RawFd,
+    master: OwnedFd,
     tmpdir: PathBuf,
     generation: u64,
     /// Output read past the end of the previous form. Carried forward so it is
@@ -72,33 +72,31 @@ impl Session {
     /// `.acl2` parsing and no `cert.pl` emulation, so the session is the one a
     /// person gets by `cd`-ing here and starting ACL2.
     pub fn start(acl2: &Path, book_dir: &Path) -> io::Result<Session> {
-        let pty = Pty::open()?;
-        let (master, slave) = (pty.master, pty.slave);
-        set_no_echo(master)?;
+        let Pty { master, slave } = Pty::open()?;
+        set_no_echo(&master)?;
 
-        // Each Stdio takes ownership of the fd it is given and will close it,
-        // so hand out three *duplicates* and keep `slave` for ourselves. Using
-        // the same raw fd three times closes it three times, which can shut a
-        // completely unrelated descriptor once the number is reused.
-        let dup = |fd: RawFd| -> io::Result<Stdio> {
-            let d = unsafe { libc::dup(fd) };
-            if d < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(unsafe { Stdio::from_raw_fd(d) })
-        };
+        // Each Stdio takes ownership of the descriptor it is given and closes
+        // it, so hand out three independent clones and keep `slave` for
+        // ourselves. Passing one descriptor to all three would give it three
+        // owners; with `OwnedFd` that no longer compiles, which is the point.
         let mut cmd = Command::new(acl2);
         cmd.current_dir(book_dir)
             // TERM=dumb: no cursor addressing or colour to strip back out.
             .env("TERM", "dumb")
-            .stdin(dup(slave)?)
-            .stdout(dup(slave)?)
-            .stderr(dup(slave)?);
+            .stdin(Stdio::from(slave.try_clone()?))
+            .stdout(Stdio::from(slave.try_clone()?))
+            .stderr(Stdio::from(slave.try_clone()?));
+        // `pre_exec` is unsafe by nature -- it runs between fork and exec,
+        // where only async-signal-safe operations are legal -- and no wrapper
+        // crate can discharge that contract. It is the only `unsafe` left in
+        // this crate. The closure must be 'static, so it captures the raw
+        // descriptor and re-borrows it in the child, where it is still open.
+        let slave_raw = slave.as_raw_fd();
         unsafe {
-            cmd.pre_exec(move || become_session_leader(slave));
+            cmd.pre_exec(move || become_session_leader(BorrowedFd::borrow_raw(slave_raw)));
         }
         let child = cmd.spawn()?;
-        unsafe { libc::close(slave) };
+        drop(slave);
 
         let tmpdir = std::env::temp_dir().join(format!("acl2-session-{}", child.id()));
         std::fs::create_dir_all(&tmpdir)?;
@@ -241,7 +239,9 @@ impl Session {
     /// Verified to behave identically on ACL2 images built on SBCL and CCL.
     pub fn interrupt(&mut self) -> io::Result<bool> {
         for _ in 0..INTERRUPT_TRIES {
-            unsafe { libc::kill(self.child.id() as libc::pid_t, libc::SIGINT) };
+            if let Some(pid) = rustix::process::Pid::from_raw(self.child.id() as i32) {
+                let _ = rustix::process::kill_process(pid, rustix::process::Signal::INT);
+            }
             // Verify by handshake: a session that answers a round-trip is
             // genuinely back, whereas a prompt in the output proves nothing
             // (ACL2 prints nested prompts while an `ld` is still running).
@@ -254,13 +254,11 @@ impl Session {
 
     fn write_all(&mut self, mut buf: &[u8]) -> io::Result<()> {
         while !buf.is_empty() {
-            let n = unsafe {
-                libc::write(self.master, buf.as_ptr() as *const libc::c_void, buf.len())
-            };
-            if n < 0 {
-                return Err(io::Error::last_os_error());
+            let n = rustix::io::write(self.master.as_fd(), buf)?;
+            if n == 0 {
+                return Err(io::Error::from(io::ErrorKind::WriteZero));
             }
-            buf = &buf[n as usize..];
+            buf = &buf[n..];
         }
         Ok(())
     }
@@ -283,17 +281,14 @@ impl Session {
                 Some(d) if !d.is_zero() => d,
                 _ => break,
             };
-            let ms = left.as_millis().min(i32::MAX as u128) as i32;
-            if !wait_readable(self.master, ms)? {
+            if !wait_readable(self.master.as_fd(), left)? {
                 continue;
             }
-            let n = unsafe {
-                libc::read(self.master, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len())
+            let n = match rustix::io::read(self.master.as_fd(), &mut chunk) {
+                Ok(0) | Err(_) => break, // EOF or the child went away
+                Ok(n) => n,
             };
-            if n <= 0 {
-                break; // EOF or the child went away
-            }
-            buf.push_str(&String::from_utf8_lossy(&chunk[..n as usize]));
+            buf.push_str(&String::from_utf8_lossy(&chunk[..n]));
             if done(&buf) {
                 break;
             }
@@ -306,7 +301,7 @@ impl Drop for Session {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        unsafe { libc::close(self.master) };
+        // `master` is an OwnedFd and closes itself.
         let _ = std::fs::remove_dir_all(&self.tmpdir);
     }
 }

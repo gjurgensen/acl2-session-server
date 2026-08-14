@@ -5,49 +5,41 @@
 //! delivered zero bytes while a PTY delivered output incrementally. Live
 //! progress on a running form is impossible without one.
 //!
-//! `posix_openpt` and friends are used rather than `openpty` so that no
-//! dependency on libutil is required.
+//! Everything here goes through `rustix`, so file descriptors are `OwnedFd`
+//! and ownership is a property the compiler checks rather than a convention
+//! a comment asks you to respect. That is not abstract tidiness: the one
+//! descriptor bug this project has hit was handing the same `RawFd` to three
+//! consumers, each of which closed it — which can shut an unrelated
+//! descriptor once the number is reused. `OwnedFd` makes that a type error.
 
-use std::ffi::CStr;
 use std::io;
-use std::os::unix::io::RawFd;
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::time::Duration;
+
+use rustix::event::{PollFd, PollFlags};
+use rustix::termios::{LocalModes, OptionalActions, OutputModes};
 
 pub struct Pty {
     /// Our end. Everything ACL2 prints arrives here; everything we send it
     /// goes out here.
-    pub master: RawFd,
-    /// The child's end, which becomes its controlling terminal. Closed in the
+    pub master: OwnedFd,
+    /// The child's end, which becomes its controlling terminal. Dropped in the
     /// parent once the child has been spawned.
-    pub slave: RawFd,
+    pub slave: OwnedFd,
 }
 
 impl Pty {
     pub fn open() -> io::Result<Pty> {
-        unsafe {
-            let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
-            if master < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            if libc::grantpt(master) < 0 || libc::unlockpt(master) < 0 {
-                let e = io::Error::last_os_error();
-                libc::close(master);
-                return Err(e);
-            }
-            let mut buf = [0i8; 128];
-            if libc::ptsname_r(master, buf.as_mut_ptr(), buf.len()) != 0 {
-                let e = io::Error::last_os_error();
-                libc::close(master);
-                return Err(e);
-            }
-            let name = CStr::from_ptr(buf.as_ptr());
-            let slave = libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
-            if slave < 0 {
-                let e = io::Error::last_os_error();
-                libc::close(master);
-                return Err(e);
-            }
-            Ok(Pty { master, slave })
-        }
+        let master = rustix::pty::openpt(rustix::pty::OpenptFlags::RDWR)?;
+        rustix::pty::grantpt(&master)?;
+        rustix::pty::unlockpt(&master)?;
+        let name = rustix::pty::ptsname(&master, Vec::new())?;
+        let slave = rustix::fs::open(
+            name.to_string_lossy().as_ref(),
+            rustix::fs::OFlags::RDWR | rustix::fs::OFlags::NOCTTY,
+            rustix::fs::Mode::empty(),
+        )?;
+        Ok(Pty { master, slave })
     }
 }
 
@@ -55,6 +47,8 @@ impl Pty {
 /// controlling terminal.
 ///
 /// Runs in the child between fork and exec, so it must stay async-signal-safe.
+/// `setsid` and `ioctl` both are; adding an allocation or a `println!` here
+/// would not be.
 ///
 /// `setsid` alone is **not** enough. Without `TIOCSCTTY` the pty is not the
 /// controlling terminal, so the line discipline has no foreground process
@@ -62,20 +56,9 @@ impl Pty {
 /// cost an hour of chasing a phantom ACL2 behaviour. We signal the process
 /// directly rather than via `^C`, but a correct controlling terminal is still
 /// what makes ACL2 treat the session as interactive.
-///
-/// # Safety
-/// Must only be called in a freshly forked child, before `exec`.
-pub unsafe fn become_session_leader(slave: RawFd) -> io::Result<()> {
-    // An `unsafe fn` body is not an implicit unsafe block, so the genuinely
-    // unsafe calls are marked as such rather than the whole function.
-    unsafe {
-        if libc::setsid() < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if libc::ioctl(slave, libc::TIOCSCTTY as libc::c_ulong, 0) < 0 {
-            return Err(io::Error::last_os_error());
-        }
-    }
+pub fn become_session_leader(slave: BorrowedFd<'_>) -> io::Result<()> {
+    rustix::process::setsid()?;
+    rustix::process::ioctl_tiocsctty(slave)?;
     Ok(())
 }
 
@@ -94,33 +77,29 @@ pub unsafe fn become_session_leader(slave: RawFd) -> io::Result<()> {
 /// a terminal. Note that canonical mode caps a single input line (`MAX_CANON`,
 /// typically 4096 bytes) -- one more reason forms are submitted by `ld`-ing a
 /// temp file rather than by typing them at the REPL.
-pub fn set_no_echo(fd: RawFd) -> io::Result<()> {
-    unsafe {
-        let mut t: libc::termios = std::mem::zeroed();
-        if libc::tcgetattr(fd, &mut t) < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        t.c_lflag &= !(libc::ECHO | libc::ECHOE | libc::ECHOK | libc::ECHONL);
-        t.c_oflag &= !libc::OPOST;
-        if libc::tcsetattr(fd, libc::TCSANOW, &t) < 0 {
-            return Err(io::Error::last_os_error());
-        }
-    }
+pub fn set_no_echo(fd: impl AsFd) -> io::Result<()> {
+    let fd = fd.as_fd();
+    let mut t = rustix::termios::tcgetattr(fd)?;
+    t.local_modes.remove(
+        LocalModes::ECHO | LocalModes::ECHOE | LocalModes::ECHOK | LocalModes::ECHONL,
+    );
+    t.output_modes.remove(OutputModes::OPOST);
+    rustix::termios::tcsetattr(fd, OptionalActions::Now, &t)?;
     Ok(())
 }
 
-/// Wait until `fd` is readable, or `timeout_ms` elapses.
+/// Wait until `fd` is readable, or `timeout` elapses.
 /// Returns `true` if readable.
-pub fn wait_readable(fd: RawFd, timeout_ms: i32) -> io::Result<bool> {
-    let mut p = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
-    let n = unsafe { libc::poll(&mut p, 1, timeout_ms) };
-    if n < 0 {
-        let e = io::Error::last_os_error();
+pub fn wait_readable(fd: impl AsFd, timeout: Duration) -> io::Result<bool> {
+    let mut fds = [PollFd::new(&fd, PollFlags::IN)];
+    let ts = rustix::event::Timespec {
+        tv_sec: timeout.as_secs() as _,
+        tv_nsec: timeout.subsec_nanos() as _,
+    };
+    match rustix::event::poll(&mut fds, Some(&ts)) {
+        Ok(n) => Ok(n > 0),
         // A signal interrupted the wait; treat as "nothing yet".
-        if e.kind() == io::ErrorKind::Interrupted {
-            return Ok(false);
-        }
-        return Err(e);
+        Err(e) if e == rustix::io::Errno::INTR => Ok(false),
+        Err(e) => Err(e.into()),
     }
-    Ok(n > 0)
 }
