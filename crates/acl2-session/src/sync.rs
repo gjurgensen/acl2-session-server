@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::session::{Outcome, Session};
+use crate::output::{OutputRef, OutputSlice, OutputStore, Slice};
 use crate::split::{split, Form, SplitError};
 
 /// One unit the session has actually admitted.
@@ -27,6 +28,7 @@ struct Admitted {
     /// `max-absolute-command-number` immediately after admission, used to
     /// verify that a rollback landed where we believe it did.
     command_number: Option<i64>,
+    output_ref: OutputRef,
 }
 
 /// What ACL2 recorded about an event, read from `get-event-data` rather than
@@ -77,8 +79,12 @@ pub struct UnitReport {
     pub line_start: usize,
     pub line_end: usize,
     pub elapsed: Duration,
-    pub output: String,
     pub event_data: EventData,
+    /// Handle to everything ACL2 printed for this unit. Not inlined: a single
+    /// `defthm` can emit six figures of output, and a report that carried it
+    /// would be the very payload this design exists to avoid.
+    pub output_ref: OutputRef,
+    pub output_lines: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -86,9 +92,10 @@ pub struct FailureReport {
     pub index: usize,
     pub line_start: usize,
     pub line_end: usize,
-    pub output: String,
     /// True when the deadline expired rather than ACL2 rejecting the unit.
     pub still_running: bool,
+    pub output_ref: OutputRef,
+    pub output_lines: usize,
     pub event_data: EventData,
     pub checkpoints: Checkpoints,
 }
@@ -285,6 +292,7 @@ pub struct Book {
     admitted: Vec<Admitted>,
     label_gen: u64,
     rebuilds: usize,
+    outputs: OutputStore,
 }
 
 impl Book {
@@ -299,6 +307,7 @@ impl Book {
             admitted: Vec::new(),
             label_gen: 0,
             rebuilds: 0,
+            outputs: OutputStore::new(std::process::id() as u64)?,
         };
         // A baseline label, so "roll back to the empty prefix" is the same
         // operation as any other rollback rather than a special case.
@@ -360,7 +369,8 @@ impl Book {
 
         // Longest common prefix by hash. This is the whole diff: the client
         // never says what changed, we just re-derive it.
-        let keep = common_prefix(&self.admitted, &units);
+        let hashes: Vec<u64> = self.admitted.iter().map(|a| a.hash).collect();
+        let keep = common_prefix(&hashes, &units);
         out.reused = keep;
 
         if keep < self.admitted.len() {
@@ -380,7 +390,8 @@ impl Book {
         }
 
         for (i, u) in units.iter().enumerate().take(target + 1).skip(keep) {
-            let sub = self.admit_unit(u, &bytes, deadline)?;
+            let (sub, output_ref) = self.admit_unit(u, &bytes, deadline)?;
+            let output_lines = self.outputs.lines(&output_ref).unwrap_or(0);
             match sub.outcome {
                 Outcome::Ok => {
                     out.admitted.push(UnitReport {
@@ -389,7 +400,8 @@ impl Book {
                         line_end: u.line_end,
                         elapsed: sub.elapsed,
                         event_data: parse_event_data(&sub),
-                        output: sub.output,
+                        output_ref,
+                        output_lines,
                     });
                 }
                 Outcome::Failed | Outcome::StillRunning => {
@@ -405,8 +417,9 @@ impl Book {
                         index: i,
                         line_start: u.line_start,
                         line_end: u.line_end,
-                        output: sub.output,
                         still_running: sub.outcome == Outcome::StillRunning,
+                        output_ref,
+                        output_lines,
                         event_data: ed,
                         checkpoints: cp,
                     });
@@ -444,7 +457,7 @@ impl Book {
         u: &Form,
         bytes: &[u8],
         deadline: Duration,
-    ) -> Result<crate::session::Submission, SyncError> {
+) -> Result<(crate::session::Submission, OutputRef), SyncError> {
         let text = String::from_utf8_lossy(&bytes[u.start..u.end]).into_owned();
         self.label_gen += 1;
         let label = self.label_gen;
@@ -456,6 +469,7 @@ impl Book {
             Self::label_name(label)
         );
         let sub = self.session.submit(&body, deadline)?;
+        let output_ref = self.outputs.put(&sub.output)?;
         if sub.outcome == Outcome::Ok {
             self.admitted.push(Admitted {
                 hash: u.hash,
@@ -463,9 +477,15 @@ impl Book {
                 line_end: u.line_end,
                 label,
                 command_number: sub.get("cmd").and_then(|v| v.parse().ok()),
+                output_ref: output_ref.clone(),
             });
         }
-        Ok(sub)
+        Ok((sub, output_ref))
+    }
+
+    /// Read part of a captured output.
+    pub fn output(&self, r: &OutputRef, slice: Slice) -> io::Result<OutputSlice> {
+        self.outputs.get(r, slice)
     }
 
     /// Discard the ACL2 process and replay the first `keep` units of the file.
@@ -497,13 +517,13 @@ impl Book {
         self.plant_base_label()?;
 
         for u in units.iter().take(keep) {
-            let sub = self.admit_unit(u, &bytes, deadline)?;
+            let (sub, _) = self.admit_unit(u, &bytes, deadline)?;
             if sub.outcome != Outcome::Ok {
                 // A unit that admitted before but not now means the world we
                 // were trying to restore was never reachable. Fail loudly.
                 return Err(SyncError::ReplayFailed {
                     line_start: u.line_start,
-                    output: sub.output,
+                    output: sub.output.clone(),
                 });
             }
         }
@@ -553,6 +573,12 @@ impl Book {
                 }
             }
         }
+        // Output from rolled-back units stays readable -- comparing against
+        // what a form used to print is useful -- but is flagged so it cannot be
+        // mistaken for a description of the current world.
+        for a in &self.admitted[keep..] {
+            self.outputs.mark_superseded(&a.output_ref);
+        }
         self.admitted.truncate(keep);
         Ok(())
     }
@@ -564,9 +590,12 @@ impl Book {
 }
 
 /// Length of the longest prefix whose hashes still agree.
-fn common_prefix(admitted: &[Admitted], units: &[Form]) -> usize {
+///
+/// Takes hashes rather than the admitted records: this is the entire diff, and
+/// it depends on nothing else about a unit.
+fn common_prefix(admitted: &[u64], units: &[Form]) -> usize {
     let mut n = 0;
-    while n < admitted.len() && n < units.len() && admitted[n].hash == units[n].hash {
+    while n < admitted.len() && n < units.len() && admitted[n] == units[n].hash {
         n += 1;
     }
     n
@@ -634,39 +663,25 @@ mod tests {
         assert_eq!(resolve_target(&u, Some(1)), None);
     }
 
-    fn adm(hashes: &[u64]) -> Vec<Admitted> {
-        hashes
-            .iter()
-            .enumerate()
-            .map(|(i, &h)| Admitted {
-                hash: h,
-                line_start: i + 1,
-                line_end: i + 1,
-                label: i as u64 + 1,
-                command_number: Some(i as i64),
-            })
-            .collect()
-    }
-
     #[test]
     fn prefix_diff() {
         let u = units(SRC);
         let all: Vec<u64> = u.iter().map(|f| f.hash).collect();
 
         // Unchanged file: everything is reused.
-        assert_eq!(common_prefix(&adm(&all), &u), 3);
+        assert_eq!(common_prefix(&all, &u), 3);
         // Nothing admitted yet.
         assert_eq!(common_prefix(&[], &u), 0);
         // Edit to the middle unit invalidates it and everything after.
         let mut changed = all.clone();
         changed[1] = 0xdead;
-        assert_eq!(common_prefix(&adm(&changed), &u), 1);
+        assert_eq!(common_prefix(&changed, &u), 1);
         // Edit to the first unit invalidates everything.
         let mut first = all.clone();
         first[0] = 0xdead;
-        assert_eq!(common_prefix(&adm(&first), &u), 0);
+        assert_eq!(common_prefix(&first, &u), 0);
         // A file truncated below what was admitted.
-        assert_eq!(common_prefix(&adm(&all), &u[..1]), 1);
+        assert_eq!(common_prefix(&all, &u[..1]), 1);
     }
 
     #[test]
@@ -675,7 +690,7 @@ mod tests {
         let hashes: Vec<u64> = original.iter().map(|f| f.hash).collect();
         let reformatted = units("(alpha)\n\n(beta\n\n  ; note\n  gamma)\n\n(delta)\n");
         assert_eq!(
-            common_prefix(&adm(&hashes), &reformatted),
+            common_prefix(&hashes, &reformatted),
             3,
             "reindenting and adding a comment must reuse the whole prefix"
         );

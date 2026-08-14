@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use acl2_session::{Book, SyncOutcome};
+use acl2_session::{Book, Slice, SyncOutcome};
 
 const DEADLINE: Duration = Duration::from_secs(120);
 
@@ -18,7 +18,7 @@ fn write(path: &Path, forms: &[&str]) {
     std::fs::write(path, forms.join("\n\n") + "\n").expect("write book");
 }
 
-fn report(label: &str, o: &SyncOutcome) -> bool {
+fn report(b: &Book, label: &str, o: &SyncOutcome) -> bool {
     println!("── {label}");
     println!(
         "   through={:?}  reused={}  rolled_back={}  admitted={}",
@@ -30,15 +30,18 @@ fn report(label: &str, o: &SyncOutcome) -> bool {
     for u in &o.admitted {
         let steps = u.event_data.prover_steps.map(|s| format!(" {s} steps"))
             .unwrap_or_default();
-        println!("     + unit {} (lines {}-{}) {} ms{}", u.index, u.line_start, u.line_end,
-                 u.elapsed.as_millis(), steps);
+        println!("     + unit {} (lines {}-{}) {} ms{}  [{} | {} lines]",
+                 u.index, u.line_start, u.line_end, u.elapsed.as_millis(), steps,
+                 u.output_ref, u.output_lines);
         if let Some(r) = &u.event_data.rules {
             println!("         rules: {}", one_line(r, 66));
         }
     }
     if let Some(f) = &o.failed {
-        println!("     ! unit {} (lines {}-{}) failed{}", f.index, f.line_start,
-                 f.line_end, if f.still_running { " [deadline]" } else { "" });
+        println!("     ! unit {} (lines {}-{}) failed{}  [{} | {} lines]",
+                 f.index, f.line_start, f.line_end,
+                 if f.still_running { " [deadline]" } else { "" },
+                 f.output_ref, f.output_lines);
         if let Some(a) = &f.event_data.abort_causes {
             println!("         abort-causes : {}", one_line(a, 60));
         }
@@ -60,6 +63,19 @@ fn report(label: &str, o: &SyncOutcome) -> bool {
         }
         if c.forced {
             println!("         forced       : yes (checkpoints may be incomplete)");
+        }
+        // The narrative lives behind the handle, never inline. Fetch just the
+        // part worth looking at.
+        if let Ok(sl) = b.output(&f.output_ref, Slice::Find {
+            needle: "Key checkpoint".into(), context: 2, ignore_case: false,
+        }) {
+            if !sl.text.trim().is_empty() {
+                println!("         --- output slice: \"Key checkpoint\" (of {} lines) ---",
+                         sl.total_lines);
+                for l in sl.text.lines().take(6) {
+                    println!("         | {}", l.trim_end());
+                }
+            }
         }
     }
     o.failed.is_none()
@@ -102,11 +118,11 @@ fn main() {
     let mut fails = 0usize;
 
     let o = b.sync(None, DEADLINE).expect("sync 1");
-    report("first sync: everything is new", &o);
+    report(&b, "first sync: everything is new", &o);
     expect(o.admitted.len() == 4 && o.reused == 0, "4 admitted, 0 reused", &mut fails);
 
     let o = b.sync(None, DEADLINE).expect("sync 2");
-    report("re-sync, file untouched: nothing to do", &o);
+    report(&b, "re-sync, file untouched: nothing to do", &o);
     expect(o.reused == 4 && o.admitted.is_empty() && o.rolled_back == 0,
            "4 reused, nothing re-admitted", &mut fails);
 
@@ -119,14 +135,14 @@ fn main() {
         f_thm,
     ]);
     let o = b.sync(None, DEADLINE).expect("sync 3");
-    report("reformat a unit: layout is not a change", &o);
+    report(&b, "reformat a unit: layout is not a change", &o);
     expect(o.reused == 4 && o.admitted.is_empty(), "still 4 reused", &mut fails);
 
     // A real edit to unit 2. Everything from there on must be undone and redone.
     write(&book, &["(in-package \"ACL2\")", f_alpha,
                    "(defun beta (x) (cons x (cons x x)))", f_thm]);
     let o = b.sync(None, DEADLINE).expect("sync 4");
-    report("edit unit 2: roll back and re-admit from there", &o);
+    report(&b, "edit unit 2: roll back and re-admit from there", &o);
     expect(o.reused == 2 && o.rolled_back == 2 && o.admitted.len() == 2,
            "2 reused, 2 rolled back, 2 re-admitted", &mut fails);
 
@@ -136,7 +152,7 @@ fn main() {
                    "(defthm obviously-false (equal (alpha x) x))",
                    "(defun never-reached (x) x)"]);
     let o = b.sync(None, DEADLINE).expect("sync 5");
-    report("a failing unit stops the run", &o);
+    report(&b, "a failing unit stops the run", &o);
     expect(o.failed.is_some(), "the false theorem is reported as a failure", &mut fails);
     expect(o.admitted.is_empty(), "nothing new admitted before the failure", &mut fails);
     expect(o.failed.as_ref().map(|f| f.index) == Some(4), "failure is unit 4", &mut fails);
@@ -151,13 +167,13 @@ fn main() {
                    "(defthm now-true (equal (alpha nil) nil))",
                    "(defun never-reached (x) x)"]);
     let o = b.sync(None, DEADLINE).expect("sync 6");
-    report("fix the failing unit: no rollback needed", &o);
+    report(&b, "fix the failing unit: no rollback needed", &o);
     expect(o.rolled_back == 0 && o.admitted.len() == 2 && o.failed.is_none(),
            "0 rolled back, 2 admitted, no failure", &mut fails);
 
     // Targeting a line inside a unit selects that unit.
     let o = b.sync(Some(3), DEADLINE).expect("sync 7");
-    report("sync through line 3 only", &o);
+    report(&b, "sync through line 3 only", &o);
     expect(o.resolved_through == Some(1), "resolves to unit 1", &mut fails);
 
     // Exercise rebuild-by-replay directly. Its real trigger -- a rollback that
