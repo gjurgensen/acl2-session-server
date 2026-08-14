@@ -125,7 +125,15 @@ impl Session {
         unsafe {
             cmd.pre_exec(move || become_session_leader(BorrowedFd::borrow_raw(slave_raw)));
         }
-        let child = cmd.spawn()?;
+        // Say which program failed. Bare "No such file or directory" here is
+        // indistinguishable from the *book* path being wrong, which is the
+        // other thing that produces it.
+        let child = cmd.spawn().map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("cannot start ACL2 at {}: {e}", acl2.display()),
+            )
+        })?;
         drop(slave);
 
         let tmpdir = std::env::temp_dir().join(format!("acl2-session-{}", child.id()));

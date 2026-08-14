@@ -433,16 +433,49 @@ impl ServerHandler for Acl2Mcp {
     }
 }
 
+/// Resolve the ACL2 image, and check it before any client connects.
+///
+/// A misconfigured path used to surface as "No such file or directory" from the
+/// first `session_open` -- indistinguishable from the *book* path being wrong,
+/// and reported to an agent that cannot fix it. Failing at startup puts the
+/// error in front of whoever wrote the config.
+fn resolve_acl2() -> Result<PathBuf, String> {
+    let given = std::env::args()
+        .nth(1)
+        .or_else(|| std::env::var("ACL2").ok())
+        .ok_or_else(|| {
+            "no ACL2 image given.\n\
+             usage: acl2-session-mcp <path-to-acl2>, or set ACL2.\n\
+             The path is usually a saved_acl2 script in an ACL2 build."
+                .to_string()
+        })?;
+
+    // A bare name is looked up on PATH by the OS, so only check paths.
+    let p = PathBuf::from(&given);
+    if given.contains(std::path::MAIN_SEPARATOR) {
+        if !p.exists() {
+            return Err(format!("no ACL2 image at {given}"));
+        }
+        if p.is_dir() {
+            return Err(format!(
+                "{given} is a directory; the ACL2 image is usually the \
+                 saved_acl2 script inside it"
+            ));
+        }
+    }
+    Ok(p)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let acl2 = std::env::args().nth(1).or_else(|| std::env::var("ACL2").ok());
-    let Some(acl2) = acl2 else {
-        eprintln!("usage: acl2-session-mcp <path-to-acl2>   (or set ACL2)");
-        std::process::exit(2);
+    let acl2 = match resolve_acl2() {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
     };
-    let service = Acl2Mcp::new(PathBuf::from(acl2))
-        .serve(rmcp::transport::stdio())
-        .await?;
+    let service = Acl2Mcp::new(acl2).serve(rmcp::transport::stdio()).await?;
     service.waiting().await?;
     Ok(())
 }

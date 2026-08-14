@@ -66,6 +66,10 @@ path to your ACL2 image as its argument:
 }
 ```
 
+The image is taken from the first argument, or from the `ACL2` environment
+variable. A bare name is looked up on `PATH`. It is checked at startup, so a
+misconfigured path fails there rather than at the first tool call.
+
 Ten tools: `session_open`, `session_close`, `sessions`, `sync`, `eval`,
 `resume`, `status`, `interrupt`, `health`, `output`.
 
