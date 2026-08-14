@@ -260,6 +260,9 @@ pub struct ResumeReply {
 pub struct OpenReply {
     pub session_id: String,
     pub file: String,
+    /// The ACL2 image this session is running. Reported because it is usually
+    /// derived rather than requested, and a session keeps it for life.
+    pub acl2: String,
     /// The server re-enabled PROVE output so proofs could be captured, because
     /// this environment inhibits it. Prover output in the log is therefore
     /// output the user's own session would have suppressed.
@@ -287,6 +290,20 @@ pub struct SessionsReply {
 pub struct SessionEntry {
     pub session_id: String,
     pub file: String,
+    pub acl2: String,
+}
+
+/// What the server may run.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct ImagesReply {
+    /// Images that may be passed to `acl2_session_open`.
+    pub images: Vec<String>,
+    /// Directories whose ACL2 checkouts are trusted. A book inside one of
+    /// these runs under its own checkout's image.
+    pub trusted_directories: Vec<String>,
+    /// Used for books outside every trusted directory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]

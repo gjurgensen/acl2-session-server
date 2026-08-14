@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use acl2_session::{Health, Registry, SessionId, Slice, WorldChange};
+use acl2_session::{Health, ImagePolicy, Registry, SessionId, Slice, WorldChange};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler, ServiceExt};
@@ -43,6 +43,14 @@ struct OpenArgs {
     /// directory's `acl2-customization.lsp` applies exactly as it would if you
     /// had started ACL2 there yourself.
     file: String,
+    /// Which ACL2 image to run. Omit to use the one belonging to the book's
+    /// own checkout, which is almost always what you want — a book was
+    /// certified against its own checkout's image.
+    ///
+    /// Only images the server has been told to trust may be used, whether
+    /// derived or named here. `acl2_images` lists them. The reply always says
+    /// which was used.
+    acl2: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -131,8 +139,8 @@ macro_rules! blocking {
 
 #[tool_router]
 impl Acl2Mcp {
-    fn new(acl2: PathBuf) -> Self {
-        Self { registry: Arc::new(Mutex::new(Registry::new(acl2))) }
+    fn new(policy: ImagePolicy) -> Self {
+        Self { registry: Arc::new(Mutex::new(Registry::new(policy))) }
     }
 
     /// Look up one session, holding the registry lock only for the lookup.
@@ -153,20 +161,22 @@ impl Acl2Mcp {
     ) -> Result<CallToolResult, ErrorData> {
         let reg = self.registry.clone();
         let file = PathBuf::from(&a.file);
-        let (id, overridden) = blocking!({
+        let want = a.acl2.clone().map(PathBuf::from);
+        let (id, image, overridden) = blocking!({
             let mut r = reg.lock().map_err(|e| e.to_string())?;
-            let id = r.open(&file).map_err(|e| e.to_string())?;
+            let (id, image) = r.open(&file, want.as_deref()).map_err(|e| e.to_string())?;
             let b = r.get(&id).map_err(|e| e.to_string())?;
             let g = b.lock().map_err(|e| e.to_string())?;
             let ov = g
                 .prove_output_overridden()
                 .then(|| g.inherited_inhibit_output().unwrap_or("?").to_string());
-            Ok::<_, String>((id, ov))
+            Ok::<_, String>((id, image, ov))
         })
         .map_err(fail)?;
         json(wire::OpenReply {
             session_id: id.to_string(),
             file: a.file,
+            acl2: image.display().to_string(),
             prove_output_overridden: overridden,
         })
     }
@@ -194,11 +204,34 @@ impl Acl2Mcp {
         json(wire::SessionsReply {
             sessions: list
                 .into_iter()
-                .map(|(id, p)| wire::SessionEntry {
+                .map(|(id, p, img)| wire::SessionEntry {
                     session_id: id.to_string(),
                     file: p.display().to_string(),
+                    acl2: img.display().to_string(),
                 })
                 .collect(),
+        })
+    }
+
+    #[tool(description = "List the ACL2 images this server may run, and the \
+        directories it trusts. An image is used only if it is one of these, \
+        whether derived from a book's checkout or named explicitly.")]
+    async fn acl2_images(&self) -> Result<CallToolResult, ErrorData> {
+        let reg = self.registry.clone();
+        let (images, trusted, default) = blocking!({
+            let r = reg.lock().map_err(|e| e.to_string())?;
+            let p = r.policy();
+            Ok::<_, String>((
+                p.available(),
+                p.trusted_roots().to_vec(),
+                p.default_path().map(|d| d.display().to_string()),
+            ))
+        })
+        .map_err(fail)?;
+        json(wire::ImagesReply {
+            images: images.iter().map(|p| p.display().to_string()).collect(),
+            trusted_directories: trusted.iter().map(|p| p.display().to_string()).collect(),
+            default: default,
         })
     }
 
@@ -433,49 +466,102 @@ impl ServerHandler for Acl2Mcp {
     }
 }
 
-/// Resolve the ACL2 image, and check it before any client connects.
+/// Build the image policy from the command line, falling back to the
+/// environment.
 ///
-/// A misconfigured path used to surface as "No such file or directory" from the
-/// first `session_open` -- indistinguishable from the *book* path being wrong,
-/// and reported to an agent that cannot fix it. Failing at startup puts the
-/// error in front of whoever wrote the config.
-fn resolve_acl2() -> Result<PathBuf, String> {
-    let given = std::env::args()
-        .nth(1)
-        .or_else(|| std::env::var("ACL2").ok())
-        .ok_or_else(|| {
-            "no ACL2 image given.\n\
-             usage: acl2-session-mcp <path-to-acl2>, or set ACL2.\n\
-             The path is usually a saved_acl2 script in an ACL2 build."
-                .to_string()
-        })?;
+/// An MCP client starts a server as a subprocess with `command`, `args` and
+/// `env` from its own JSON config, so those are the only channels available.
+/// Flags are preferred over a config file of our own: the trusted set is
+/// security-relevant, and it belongs in the file the user edits to install the
+/// server rather than somewhere they may not connect with it.
+///
+///   --default <image>    used when a book is outside every trusted directory
+///   --trusted <dir>      vouch for the ACL2 checkouts under a directory;
+///                        repeatable
+///
+/// Or, for clients where editing `args` is awkward:
+///
+///   ACL2_DEFAULT=<image>
+///   ACL2_TRUSTED=<dir>:<dir>       colon-separated, like PATH
+///
+/// A single bare argument is still accepted as the default image, so the
+/// simplest configuration remains one path.
+fn policy_from_args() -> Result<ImagePolicy, String> {
+    let mut policy = ImagePolicy::new();
+    let mut default: Option<String> = None;
+    let mut trusted: Vec<String> = Vec::new();
 
-    // A bare name is looked up on PATH by the OS, so only check paths.
-    let p = PathBuf::from(&given);
-    if given.contains(std::path::MAIN_SEPARATOR) {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--default" => {
+                i += 1;
+                default = Some(args.get(i).ok_or("--default needs a path")?.clone());
+            }
+            "--trusted" => {
+                i += 1;
+                trusted.push(args.get(i).ok_or("--trusted needs a path")?.clone());
+            }
+            bare if !bare.starts_with('-') && default.is_none() => {
+                default = Some(bare.to_string());
+            }
+            other => return Err(format!("unrecognised argument {other:?}")),
+        }
+        i += 1;
+    }
+
+    if default.is_none() {
+        default = std::env::var("ACL2_DEFAULT").ok();
+    }
+    if trusted.is_empty() {
+        if let Ok(v) = std::env::var("ACL2_TRUSTED") {
+            trusted.extend(v.split(':').filter(|s| !s.is_empty()).map(String::from));
+        }
+    }
+
+    for d in &trusted {
+        let p = PathBuf::from(d);
+        if !p.is_dir() {
+            return Err(format!("--trusted {d}: not a directory"));
+        }
+        policy = policy.trust(p);
+    }
+    if let Some(d) = &default {
+        let p = PathBuf::from(d);
         if !p.exists() {
-            return Err(format!("no ACL2 image at {given}"));
+            return Err(format!("no ACL2 image at {d}"));
         }
         if p.is_dir() {
             return Err(format!(
-                "{given} is a directory; the ACL2 image is usually the \
-                 saved_acl2 script inside it"
+                "{d} is a directory; the image is usually the saved_acl2 script inside it"
             ));
         }
+        policy = policy.default_image(p);
     }
-    Ok(p)
+
+    if default.is_none() && trusted.is_empty() {
+        return Err("no ACL2 image configured.\n\
+             usage: acl2-session-mcp [--default <image>] [--trusted <dir>]...\n\
+             or set ACL2_DEFAULT / ACL2_TRUSTED.\n\
+             --default names the image for books outside any trusted checkout;\n\
+             --trusted vouches for the ACL2 checkouts under a directory, and a\n\
+             book inside one is run by its own checkout's image."
+            .to_string());
+    }
+    Ok(policy)
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let acl2 = match resolve_acl2() {
-        Ok(a) => a,
+    let policy = match policy_from_args() {
+        Ok(p) => p,
         Err(e) => {
             eprintln!("{e}");
             std::process::exit(2);
         }
     };
-    let service = Acl2Mcp::new(acl2).serve(rmcp::transport::stdio()).await?;
+    let service = Acl2Mcp::new(policy).serve(rmcp::transport::stdio()).await?;
     service.waiting().await?;
     Ok(())
 }

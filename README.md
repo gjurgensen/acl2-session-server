@@ -46,32 +46,44 @@ cargo build
 Syncs a book and prints the structured report for each top-level form. Add
 `--find <text>` or `--goal "Subgoal *1/2"` to slice a form's captured log.
 
-As an MCP server, install it and point it at your ACL2:
+As an MCP server, install it:
 
 ```
 cargo install --path crates/acl2-session-mcp
 ```
 
-That puts `acl2-session-mcp` in `~/.cargo/bin`. Configure your client with the
-path to your ACL2 image as its argument:
+Then configure your client. The server is started as a subprocess, so it is
+configured through `args` (or `env`):
 
 ```json
 {
   "mcpServers": {
     "acl2": {
       "command": "/home/you/.cargo/bin/acl2-session-mcp",
-      "args": ["/path/to/saved_acl2"]
+      "args": ["--trusted", "/home/you/acl2-builds",
+               "--default", "/home/you/acl2-builds/release/saved_acl2"]
     }
   }
 }
 ```
 
-The image is taken from the first argument, or from the `ACL2` environment
-variable. A bare name is looked up on `PATH`. It is checked at startup, so a
-misconfigured path fails there rather than at the first tool call.
+`--trusted` vouches for the ACL2 checkouts under a directory. A book inside one
+runs under **its own checkout's image**, which is usually what you want, since a
+book was certified against the checkout it lives in. One entry covers a whole
+tree of worktrees, including ones made later. `--default` is used for books
+outside every trusted directory. `ACL2_TRUSTED` (colon-separated) and
+`ACL2_DEFAULT` work too, for clients where editing `args` is awkward. With a
+single ACL2, one bare path is still enough.
 
-Ten tools: `session_open`, `session_close`, `sessions`, `sync`, `eval`,
-`resume`, `status`, `interrupt`, `health`, `output`.
+The trusted set is an allowlist, not just a search path: an image is run only if
+it is the default or lives under a trusted directory. That holds for images
+named explicitly in `acl2_session_open` as well, so a repository cannot supply
+its own "ACL2" by shipping an `acl2.lisp` next to an executable, and neither
+can a client that was told to. `acl2_images` lists what is permitted, and
+`acl2_session_open` reports which image the session actually got.
+
+Eleven tools: `session_open`, `session_close`, `sessions`, `images`, `sync`,
+`eval`, `resume`, `status`, `interrupt`, `health`, `output`.
 
 ## Tests
 

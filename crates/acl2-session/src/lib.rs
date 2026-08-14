@@ -9,6 +9,7 @@
 //! extraction via `get-event-data` and `gag-state`, output handles, and the
 //! MCP transport.
 
+pub mod image;
 pub mod output;
 pub mod pty;
 pub mod registry;
@@ -19,6 +20,7 @@ pub mod sync;
 pub use session::{Outcome, Session, Submission};
 pub use split::{split, split_str, Form, SplitError};
 pub use registry::{Registry, RegistryError, SessionId};
+pub use image::{find_checkout, ImageError, ImagePolicy};
 pub use output::{OutputRef, OutputSlice, OutputStore, Slice};
 pub use session::Progress;
 pub use sync::{
