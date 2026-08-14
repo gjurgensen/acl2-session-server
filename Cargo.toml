@@ -22,3 +22,6 @@ edition = "2024"
 rust-version = "1.85"
 license = "BSD-3-Clause"
 repository = "https://github.com/gjurgensen/acl2-session-server"
+readme = "README.md"
+keywords = ["acl2", "theorem-prover", "mcp", "formal-verification"]
+categories = ["development-tools", "api-bindings"]

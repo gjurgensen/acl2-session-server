@@ -62,6 +62,17 @@ As an MCP server, configure the binary with the path to your ACL2:
 Ten tools: `session_open`, `session_close`, `sessions`, `sync`, `eval`,
 `resume`, `status`, `interrupt`, `health`, `output`.
 
+## Tests
+
+```
+cargo test
+ACL2=/path/to/saved_acl2 cargo test -- --ignored --test-threads=1
+```
+
+The first runs the unit tests. The second adds the integration tests, which
+drive a real ACL2 — the prefix invariant, deadlines and interrupts, eval, and
+the splitter across every book in a tree if `ACL2_BOOKS` is also set.
+
 ## Layout
 
 ```

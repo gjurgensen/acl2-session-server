@@ -6,26 +6,13 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 rustix = { version = "1", features = ["pty", "termios", "event", "process"] }
 
 [[bin]]
-name = "acl2-session-smoke"
-path = "src/bin/smoke.rs"
-
-[[bin]]
-name = "acl2-session-syncdemo"
-path = "src/bin/syncdemo.rs"
-
-[[bin]]
 name = "acl2-session-syncfile"
 path = "src/bin/syncfile.rs"
-
-[[bin]]
-name = "acl2-session-deadlinedemo"
-path = "src/bin/deadlinedemo.rs"
-
-[[bin]]
-name = "acl2-session-evaldemo"
-path = "src/bin/evaldemo.rs"
