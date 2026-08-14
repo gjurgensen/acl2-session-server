@@ -213,6 +213,30 @@ pub struct SyncOutcome {
     pub rebuilt: bool,
 }
 
+/// Whether an `eval` disturbed the logical world.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorldChange {
+    /// The form introduced no events. Queries (`pe`, `pl`, `pr`), session
+    /// settings, and `thm` all land here -- verified: none of them advance the
+    /// command number.
+    None,
+    /// The form introduced events, which were undone. Reported rather than
+    /// hidden, so a client is not puzzled when its `defthm` is missing later.
+    Undone,
+    /// Events were introduced and the undo could not be verified. The prefix
+    /// invariant is no longer trusted and the next `sync` rebuilds by replay.
+    Dirty,
+}
+
+#[derive(Debug)]
+pub struct EvalResult {
+    pub outcome: Outcome,
+    pub world_change: WorldChange,
+    pub output_ref: OutputRef,
+    pub output_lines: usize,
+    pub elapsed: Duration,
+}
+
 /// What resuming an in-flight unit produced.
 #[derive(Debug)]
 pub enum Resumed {
@@ -490,6 +514,10 @@ pub struct Book {
     outputs: OutputStore,
     /// The unit whose submission has not reported yet.
     pending: Option<PendingUnit>,
+    /// Command number just after the base label, i.e. the empty prefix.
+    base_command_number: Option<i64>,
+    /// Set when an undo could not be verified; the next sync rebuilds.
+    dirty: bool,
 }
 
 /// Enough to finish recording a unit whose deadline expired mid-flight.
@@ -516,6 +544,8 @@ impl Book {
             rebuilds: 0,
             outputs: OutputStore::new(std::process::id() as u64)?,
             pending: None,
+            base_command_number: None,
+            dirty: false,
         };
         // A baseline label, so "roll back to the empty prefix" is the same
         // operation as any other rollback rather than a special case.
@@ -543,11 +573,96 @@ impl Book {
 
     fn plant_base_label(&mut self) -> Result<(), SyncError> {
         let body = format!(
-            "(acl2::with-output :off :all (acl2::deflabel {}))",
+            "(acl2::with-output :off :all (acl2::deflabel {}))\n\
+             (acl2::prog2$ (acl2::cw \"~%<<<ASS-DATA cmd ~x0>>>~%\" \
+               (acl2::max-absolute-command-number (acl2::w acl2::state))) \
+               (acl2::value :invisible))",
             Self::label_name(0)
         );
-        self.session.submit(&body, Duration::from_secs(60))?;
+        let sub = self.session.submit(&body, Duration::from_secs(60))?;
+        self.base_command_number = sub.get("cmd").and_then(|v| v.parse().ok());
         Ok(())
+    }
+
+    /// The command number the world should be at with the current prefix.
+    fn expected_command_number(&self) -> Option<i64> {
+        match self.admitted.last() {
+            Some(a) => a.command_number,
+            None => self.base_command_number,
+        }
+    }
+
+    /// Evaluate a form without letting it change the logical world.
+    ///
+    /// This is the path for everything that is not part of the file: queries
+    /// (`pe`, `pl`, `pr`, `disabledp`), session settings, and throwaway
+    /// experiments such as `thm`. Forcing those through the file would need two
+    /// edits per query, pollute the source, and -- decisively -- make a query
+    /// part of the prefix invariant, since `sync` would try to *admit* it.
+    ///
+    /// The rule is precise: **eval cannot change the world, but may change
+    /// state**. `ubt!` undoes world changes; it does not undo `f-put-global`
+    /// settings like `set-gag-mode` or `accumulated-persistence`, and that
+    /// asymmetry is deliberate -- those are exactly the settings that should
+    /// stick, and a debugging session that turns on accumulated persistence
+    /// then asks for the results would break if they did not.
+    ///
+    /// World changes cannot be rejected statically, since macros and
+    /// `make-event` expand to anything, so the form runs and is undone
+    /// afterwards. No new label is needed: the prefix already ends in one, and
+    /// that is precisely the world an eval should return to.
+    ///
+    /// Consequence: **world changes are not visible across consecutive evals.**
+    pub fn eval(&mut self, form: &str, deadline: Duration) -> Result<EvalResult, SyncError> {
+        if let Some(p) = &self.pending {
+            return Err(SyncError::Busy { index: p.index });
+        }
+        let body = format!(
+            "{form}\n(acl2::prog2$ (acl2::cw \"~%<<<ASS-DATA cmd ~x0>>>~%\" \
+               (acl2::max-absolute-command-number (acl2::w acl2::state))) \
+               (acl2::value :invisible))"
+        );
+        let sub = self.session.submit(&body, deadline)?;
+        let output_ref = self.outputs.put(&sub.output)?;
+        let output_lines = self.outputs.lines(&output_ref).unwrap_or(0);
+        let after: Option<i64> = sub.get("cmd").and_then(|v| v.parse().ok());
+
+        let mut world_change = WorldChange::None;
+        if let (Some(a), Some(e)) = (after, self.expected_command_number()) {
+            if a != e {
+                // Events were introduced. Undo back to the prefix, which is
+                // where the last planted label sits.
+                let keep = self.admitted.len();
+                world_change = match self.rollback_to(keep, deadline) {
+                    Ok(()) => WorldChange::Undone,
+                    Err(SyncError::RollbackFailed { .. })
+                    | Err(SyncError::RollbackUnverified { .. }) => {
+                        self.dirty = true;
+                        WorldChange::Dirty
+                    }
+                    Err(e) => return Err(e),
+                };
+            }
+        }
+        Ok(EvalResult {
+            outcome: sub.outcome,
+            world_change,
+            output_ref,
+            output_lines,
+            elapsed: sub.elapsed,
+        })
+    }
+
+    /// Round-trip a trivial form to see whether the session is responsive.
+    pub fn health(&mut self, deadline: Duration) -> Health {
+        if self.pending.is_some() {
+            return Health::Busy;
+        }
+        match self.session.submit("(acl2::value :invisible)", deadline) {
+            Ok(s) if s.outcome != Outcome::StillRunning => Health::Alive,
+            Ok(_) => Health::Wedged,
+            Err(_) => Health::Dead,
+        }
     }
 
     /// Bring the session into agreement with the file on disk.
@@ -567,6 +682,11 @@ impl Book {
     ) -> Result<SyncOutcome, SyncError> {
         if let Some(p) = &self.pending {
             return Err(SyncError::Busy { index: p.index });
+        }
+        if self.dirty {
+            // An undo we could not verify: rebuild rather than trust it.
+            self.rebuild(0, deadline)?;
+            self.dirty = false;
         }
         let bytes = std::fs::read(&self.path)?;
         let units = split(&bytes).map_err(SyncError::Split)?;
@@ -924,6 +1044,17 @@ impl Book {
     pub fn admitted_lines(&self) -> Vec<(usize, usize)> {
         self.admitted.iter().map(|a| (a.line_start, a.line_end)).collect()
     }
+}
+
+/// Whether a session is answering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Health {
+    Alive,
+    /// A form is in flight; the session is working, not stuck.
+    Busy,
+    /// Answered nothing within the deadline while claiming to be idle.
+    Wedged,
+    Dead,
 }
 
 /// Length of the longest prefix whose hashes still agree.

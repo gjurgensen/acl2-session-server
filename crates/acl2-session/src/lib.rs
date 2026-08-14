@@ -19,4 +19,7 @@ pub use session::{Outcome, Session, Submission};
 pub use split::{split, split_str, Form, SplitError};
 pub use output::{OutputRef, OutputSlice, OutputStore, Slice};
 pub use session::Progress;
-pub use sync::{Book, InnerEvent, Resumed, Status, SyncError, SyncOutcome};
+pub use sync::{
+    Book, EvalResult, Health, InnerEvent, Resumed, Status, SyncError, SyncOutcome,
+    WorldChange,
+};
