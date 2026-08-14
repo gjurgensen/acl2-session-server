@@ -46,6 +46,9 @@ impl From<&core::InnerEvent> for InnerEvent {
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct Checkpoints {
     /// Where the top-level proof stalled.
+    ///
+    /// If `pre_revert` is set, these are the goals as they stood *before* the
+    /// proof reverted to induction -- a phase the prover then abandoned.
     pub top: Vec<String>,
     /// Goals under a top-level induction. Often where the actual defect is,
     /// which is why these are kept separate from `top` rather than merged.
@@ -56,6 +59,9 @@ pub struct Checkpoints {
     pub n_sub: usize,
     /// Forcing took place, so the checkpoints are probably not the whole story.
     pub forced: bool,
+    /// The proof reverted to proof by induction. `top` then describes the
+    /// pre-revert goals, and `sub` the induction it fell back on.
+    pub pre_revert: bool,
 }
 
 /// A form that was admitted.
@@ -105,9 +111,10 @@ pub struct Failed {
     /// `induction-depth-limit-exceeded` means it ran out of depth.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub abort_cause: Option<String>,
-    /// The first `ACL2 Error` line, verbatim. Matters most for `rejected`,
-    /// where no proof ran and the other fields are empty. For a compound form
-    /// it also names the inner event that failed.
+    /// The `ACL2 Error` message, with ACL2's line wrapping undone so the
+    /// sentence is whole. Matters most for `rejected`, where no proof ran and
+    /// the other fields are empty. For a compound form it also names the
+    /// inner event that failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_line: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -196,6 +203,7 @@ pub fn failed(f: &core::sync::FailureReport) -> Failed {
             n_top: f.checkpoints.n_top,
             n_sub: f.checkpoints.n_sub,
             forced: f.checkpoints.forced,
+            pre_revert: f.checkpoints.pre_revert,
         },
         inner: f.inner.iter().map(InnerEvent::from).collect(),
         failed_event: f.failed_event().map(|e| e.name.clone()),

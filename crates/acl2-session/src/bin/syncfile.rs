@@ -80,8 +80,12 @@ fn main() {
         let c = &f.checkpoints;
         if let Some(x) = &c.abort_cause { println!("    {:<14}{x}", "abort-cause"); }
         if let Some(s) = f.event_data.prover_steps { println!("    {:<14}{s}", "steps"); }
+        let top_tag = if c.pre_revert { "top!" } else { "top" };
         for (i, g) in c.top.iter().enumerate() {
-            wrap(&format!("top[{i}]/{}", c.n_top), g, 4, 70);
+            wrap(&format!("{top_tag}[{i}]/{}", c.n_top), g, 4, 70);
+        }
+        if c.pre_revert {
+            println!("    {:<14}top! = before reverting to induction", "note");
         }
         for (i, g) in c.sub.iter().enumerate() {
             wrap(&format!("sub[{i}]/{}", c.n_sub), g, 4, 70);

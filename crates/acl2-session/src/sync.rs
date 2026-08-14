@@ -90,6 +90,9 @@ pub struct Checkpoints {
     /// actually ran. This is what separates `ProofFailure` from `Rejected`.
     pub proof_ran: bool,
     /// Goals at the top level, prettified as ACL2 would print them.
+    ///
+    /// When `pre_revert` is set these are the checkpoints from *before* the
+    /// proof reverted to induction, since that is where ACL2 keeps them.
     pub top: Vec<String>,
     /// Goals under a top-level induction.
     pub sub: Vec<String>,
@@ -108,6 +111,11 @@ pub struct Checkpoints {
     /// failing `progn` and a failing `encapsulate` all report `EMPTY-CLAUSE`
     /// here, where `get-event-data` reports it only for the bare `defthm`.
     pub abort_cause: Option<String>,
+    /// The proof reverted to induction, so `top` holds the checkpoints as
+    /// they stood before reverting. ACL2 labels these "before reverting to
+    /// proof by induction"; the distinction matters because the goals shown
+    /// are from a phase the prover abandoned.
+    pub pre_revert: bool,
     /// Non-nil when forcing took place, in which case the checkpoints are
     /// probably not the full story.
     pub forced: bool,
@@ -441,21 +449,32 @@ const EVENT_DATA_PROBE: &str = r#"(acl2::prog2$
 /// avoided. `nth` past the end returns `nil` and the whole chain degrades to
 /// `NIL`, so out-of-range slots are harmless. The true stack lengths are
 /// reported alongside, so a client can tell when there were more.
+/// Key checkpoints, read from the saved gag-state.
+///
+/// The top-level stack is taken from `abort-info` in preference to
+/// `:top-stack`, which is what ACL2's own printer does
+/// (`history-management.lisp`: `(top-stack (or abort-stack top-stack0))`).
+/// The two differ exactly when a proof reverts to induction: ACL2 then
+/// replaces `:top-stack` with a placeholder whose clause is the literal
+/// symbol `<goal>` and moves the real pre-revert checkpoints into
+/// `abort-info`. Reading `:top-stack` alone therefore reported `<goal>` as
+/// the checkpoint while the actual term sat in the log.
 const CHECKPOINT_PROBE: &str = r#"(acl2::let*
   ((acl2::gs (acl2::f-get-global 'acl2::gag-state-saved acl2::state))
-   (acl2::tp (acl2::access acl2::gag-state acl2::gs :top-stack))
+   (acl2::ai (acl2::access acl2::gag-state acl2::gs :abort-info))
+   (acl2::as (acl2::abort-info-stack acl2::ai))
+   (acl2::tp (acl2::or acl2::as
+                       (acl2::access acl2::gag-state acl2::gs :top-stack)))
    (acl2::sb (acl2::access acl2::gag-state acl2::gs :sub-stack))
    (acl2::wr (acl2::w acl2::state)))
   (acl2::prog2$
-    (acl2::cw "~%<<<ASS-BEGIN ckpt>>>~%gag ~x0~%ntop ~x1~%nsub ~x2~%forced ~x3~%abort ~x4~%"
+    (acl2::cw "~%<<<ASS-BEGIN ckpt>>>~%gag ~x0~%ntop ~x1~%nsub ~x2~%forced ~x3~%abort ~x4~%reverted ~x5~%"
       (acl2::if acl2::gs acl2::t acl2::nil)
       (acl2::len acl2::tp)
       (acl2::len acl2::sb)
       (acl2::access acl2::gag-state acl2::gs :forcep)
-      (acl2::let ((acl2::ai (acl2::access acl2::gag-state acl2::gs :abort-info)))
-        (acl2::if (acl2::consp acl2::ai)
-                  (acl2::and (acl2::symbolp (acl2::car acl2::ai)) (acl2::car acl2::ai))
-                  acl2::ai)))
+      (acl2::abort-info-cause acl2::ai)
+      (acl2::if acl2::as acl2::t acl2::nil))
     (acl2::prog2$
       (acl2::cw "top0 ~x0~%top1 ~x1~%top2 ~x2~%sub0 ~x3~%sub1 ~x4~%sub2 ~x5~%<<<ASS-END ckpt>>>~%"
         (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 0 acl2::tp) :clause) acl2::nil acl2::wr)
@@ -498,7 +517,7 @@ fn is_nil(v: &str) -> bool {
 fn parse_checkpoints(sub: &crate::session::Submission) -> Checkpoints {
     let mut c = Checkpoints::default();
     let Some(body) = sub.block("ckpt") else { return c };
-    let keys = ["gag", "ntop", "nsub", "forced", "abort",
+    let keys = ["gag", "ntop", "nsub", "forced", "abort", "reverted",
                 "top0", "top1", "top2", "sub0", "sub1", "sub2"];
     let pairs = keyed_block(body, &keys);
     let get = |k: &str| pairs.iter().find(|(pk, _)| pk == k).map(|(_, v)| v.trim().to_string());
@@ -507,6 +526,7 @@ fn parse_checkpoints(sub: &crate::session::Submission) -> Checkpoints {
     c.n_sub = get("nsub").and_then(|v| v.parse().ok()).unwrap_or(0);
     c.forced = get("forced").map_or(false, |v| !is_nil(&v));
     c.abort_cause = get("abort").filter(|v| !is_nil(v));
+    c.pre_revert = get("reverted").map_or(false, |v| !is_nil(&v));
     for k in ["top0", "top1", "top2"] {
         if let Some(v) = get(k).filter(|v| !is_nil(v)) {
             c.top.push(v);
@@ -518,6 +538,26 @@ fn parse_checkpoints(sub: &crate::session::Submission) -> Checkpoints {
         }
     }
     c
+}
+
+/// The `ACL2 Error` message, with ACL2's line wrapping undone.
+///
+/// ACL2 fill-wraps its errors at the right margin, so taking one physical
+/// line cut the message mid-sentence -- and worse, could keep a `See :DOC`
+/// while dropping the topic it pointed at. The message runs to the next blank
+/// line, which is where ACL2 ends the paragraph.
+fn error_message(output: &str) -> Option<String> {
+    let mut lines = output.lines().skip_while(|l| !l.contains("ACL2 Error"));
+    let first = lines.next()?;
+    let mut msg = first.trim().to_string();
+    for l in lines {
+        if l.trim().is_empty() {
+            break;
+        }
+        msg.push(' ');
+        msg.push_str(l.trim());
+    }
+    Some(msg)
 }
 
 fn parse_event_data(sub: &crate::session::Submission) -> EventData {
@@ -861,11 +901,7 @@ impl Book {
                     } else {
                         Status::Rejected
                     };
-                    let error_line = sub
-                        .output
-                        .lines()
-                        .find(|l| l.contains("ACL2 Error"))
-                        .map(|l| l.trim().to_string());
+                    let error_line = error_message(&sub.output);
                     // Stop here. The world is sequential, so later units almost
                     // always depend on this one and continuing produces
                     // cascading noise rather than information.
@@ -1023,11 +1059,7 @@ impl Book {
             })));
         }
         let (ed, cp, inner, inner_total) = self.probe_after_failure(deadline);
-        let error_line = sub
-            .output
-            .lines()
-            .find(|l| l.contains("ACL2 Error"))
-            .map(|l| l.trim().to_string());
+        let error_line = error_message(&sub.output);
         Ok(Some(Resumed::Failed(FailureReport {
             index: p.index,
             line_start: p.line_start,
@@ -1230,6 +1262,21 @@ fn resolve_target(units: &[Form], through_line: Option<usize>) -> Option<usize> 
 
 #[cfg(test)]
 mod tests {
+    /// ACL2 fill-wraps its errors, so the message is not one line.
+    #[test]
+    fn an_error_message_survives_acl2s_line_wrapping() {
+        let out = "Q.E.D.\n\nACL2 Error [Failure] in ( DEFTHM FOO ...):  See :DOC\nfailure.\n\nSummary\n";
+        let m = super::error_message(out).expect("an error is present");
+        assert!(m.ends_with("failure."), "the sentence must be whole: {m:?}");
+        assert!(m.contains("See :DOC failure."), "a :DOC reference must keep its topic: {m:?}");
+        assert!(!m.contains("Summary"), "the message stops at the blank line");
+    }
+
+    #[test]
+    fn output_without_an_error_has_no_message() {
+        assert_eq!(super::error_message("Q.E.D.\n\nSummary\n"), None);
+    }
+
     use super::*;
     use crate::split::split_str;
 

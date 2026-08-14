@@ -372,3 +372,78 @@ fn an_eval_that_outruns_its_deadline_can_be_resumed() {
     let r = b.eval("(+ 1 1)", Duration::from_secs(30)).unwrap();
     assert_eq!(r.outcome, acl2_session::Outcome::Ok);
 }
+
+/// Checkpoints must be the real goals, not ACL2's post-revert placeholder.
+///
+/// When a proof reverts to induction, ACL2 replaces `:top-stack` with a
+/// gag-info whose clause is the literal symbol `<goal>` and moves the real
+/// pre-revert checkpoints into `abort-info`. Reading `:top-stack` alone
+/// reported `<goal>` as the checkpoint. ACL2's own printer prefers the
+/// abort-stack, and so must we.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_proof_that_reverts_to_induction_reports_real_checkpoints() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("revert");
+    let file = dir.join("rev.lisp");
+    std::fs::write(
+        &file,
+        "(in-package \"ACL2\")\n\
+         (defun my-rev (x)\n\
+           (if (endp x) nil (append (my-rev (cdr x)) (list (car x)))))\n\
+         (defthm car-of-my-rev-bogus\n\
+           (equal (car (my-rev x)) (car x)))\n",
+    )
+    .unwrap();
+    let mut b = Book::open(&acl2, &file).unwrap();
+    let o = b.sync(None, Duration::from_secs(120)).unwrap();
+    let f = o.failed.expect("the theorem is false and must fail");
+    assert_eq!(f.status, Status::ProofFailure);
+
+    let c = &f.checkpoints;
+    assert!(c.pre_revert, "this proof reverts to induction");
+    let top = c.top.first().expect("a top-level checkpoint");
+    assert!(!top.contains("<goal>"), "placeholder leaked through: {top:?}");
+    assert!(
+        top.contains("my-rev") && top.contains("equal"),
+        "expected the real goal term, got {top:?}"
+    );
+
+    // And the error message is not cut mid-sentence.
+    let e = f.error_line.as_deref().expect("an error line");
+    assert!(e.ends_with("failure."), "message truncated: {e:?}");
+}
+
+/// A failure that does *not* revert still reads the ordinary top-stack.
+///
+/// Induction has to be disabled to get one: ACL2 reverts to induction on
+/// almost any goal it cannot simplify away, and installs the `<goal>`
+/// placeholder when it does. With `:do-not-induct t` the abort-stack is empty
+/// and `:top-stack` holds the real term, so this covers the fallback arm of
+/// `(or abort-stack top-stack)`.
+#[test]
+#[ignore = "needs ACL2"]
+fn an_ordinary_failure_still_reports_top_stack_checkpoints() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("norevert");
+    let file = dir.join("plain.lisp");
+    std::fs::write(
+        &file,
+        "(in-package \"ACL2\")\n\
+         (defthm plainly-false\n\
+           (equal (car x) 17)\n\
+           :hints ((\"Goal\" :do-not-induct t)))\n",
+    )
+    .unwrap();
+    let mut b = Book::open(&acl2, &file).unwrap();
+    let o = b.sync(None, Duration::from_secs(120)).unwrap();
+    let f = o.failed.expect("must fail");
+    let c = &f.checkpoints;
+    assert!(!c.pre_revert, "induction was disabled, so nothing reverted");
+    assert_eq!(c.abort_cause.as_deref(), Some("do-not-induct"));
+    assert!(
+        c.top.first().map_or(false, |g| g.contains("17")),
+        "expected the goal, got {:?}",
+        c.top
+    );
+}
