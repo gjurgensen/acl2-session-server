@@ -71,6 +71,19 @@ pub struct EventData {
 /// The two stacks stay separate because they answer different questions: `top`
 /// is where the top-level proof stalled, `sub` is often where the actual defect
 /// is. Flattening them buries the informative one.
+/// One event ACL2 recorded *inside* a unit.
+///
+/// Most of a real book is compound forms -- `define`, `defrule`, `encapsulate`
+/// -- and `get-event-data` describes only the outer one, reporting no rules and
+/// no abort cause for it. These fill that in per inner event.
+#[derive(Debug, Clone)]
+pub struct InnerEvent {
+    pub name: String,
+    /// Non-empty when this is the inner event that failed.
+    pub abort_causes: Option<String>,
+    pub rules: Option<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Checkpoints {
     /// Whether `gag-state-saved` was populated at all -- i.e. whether a proof
@@ -107,6 +120,11 @@ pub struct UnitReport {
     pub line_end: usize,
     pub elapsed: Duration,
     pub event_data: EventData,
+    /// Events recorded inside this unit, newest first. See `InnerEvent`.
+    pub inner: Vec<InnerEvent>,
+    /// Total inner events ACL2 recorded, which may exceed `inner.len()`: a
+    /// fixed number of slots is read, and the count says when there were more.
+    pub inner_total: usize,
     /// Handle to everything ACL2 printed for this unit. Not inlined: a single
     /// `defthm` can emit six figures of output, and a report that carried it
     /// would be the very payload this design exists to avoid.
@@ -158,6 +176,19 @@ pub struct FailureReport {
     pub output_lines: usize,
     pub event_data: EventData,
     pub checkpoints: Checkpoints,
+    pub inner: Vec<InnerEvent>,
+    pub inner_total: usize,
+}
+
+impl FailureReport {
+    /// The inner event that actually failed, when the unit was compound.
+    ///
+    /// For a bare `defthm` this is the unit itself and adds nothing; for a
+    /// `defrule` with prep-lemmas it distinguishes a failing prep-lemma from a
+    /// failing main theorem, which the checkpoints alone cannot.
+    pub fn failed_event(&self) -> Option<&InnerEvent> {
+        self.inner.iter().find(|e| e.abort_causes.is_some())
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -234,7 +265,69 @@ impl From<io::Error> for SyncError {
 /// `(EQUAL (ALPHA X) X)` as its checkpoint.
 ///
 /// Both are state globals, so clearing them does not touch the world.
-const CLEAR_STALE: &str = "(acl2::pprogn     (acl2::f-put-global 'acl2::gag-state-saved acl2::nil acl2::state)     (acl2::f-put-global 'acl2::last-event-data acl2::nil acl2::state)     (acl2::value :invisible))";
+const CLEAR_STALE: &str = "(acl2::pprogn \
+    (acl2::f-put-global 'acl2::gag-state-saved acl2::nil acl2::state) \
+    (acl2::f-put-global 'acl2::last-event-data acl2::nil acl2::state) \
+    (acl2::f-put-global 'acl2::event-data-fal 'acl2::event-data-fal acl2::state) \
+    (acl2::value :invisible))";
+
+/// Report the events ACL2 recorded *inside* this unit.
+///
+/// `event-data-fal` is a state global, off by default, that records each
+/// `defthm`/`defun`/`verify-guards`/`thm` keyed by name -- including events
+/// nested inside a compound form, which is exactly what `get-event-data`
+/// cannot see. Enabling it costs nothing in the world, and resetting it per
+/// unit (see `CLEAR_STALE`) both isolates units from each other and stops it
+/// growing without bound.
+///
+/// The alist is a fast-alist and therefore *improper*: its final cdr is the
+/// symbol `event-data-fal` rather than `nil`, so `strip-cars` guard-fails on
+/// it. Hence the `consp`-guarded walk. Entries are pushed newest-first, and a
+/// fixed number of slots is read for the same reason as the checkpoints:
+/// iterating would need a recursive helper, and defining one would put it in
+/// the world.
+const INNER_EVENTS_PROBE: &str = r#"(acl2::let*
+  ((acl2::f0 (acl2::@ acl2::event-data-fal))
+   (acl2::e0 (acl2::and (acl2::consp acl2::f0) (acl2::car acl2::f0)))
+   (acl2::f1 (acl2::and (acl2::consp acl2::f0) (acl2::cdr acl2::f0)))
+   (acl2::e1 (acl2::and (acl2::consp acl2::f1) (acl2::car acl2::f1)))
+   (acl2::f2 (acl2::and (acl2::consp acl2::f1) (acl2::cdr acl2::f1)))
+   (acl2::e2 (acl2::and (acl2::consp acl2::f2) (acl2::car acl2::f2)))
+   (acl2::f3 (acl2::and (acl2::consp acl2::f2) (acl2::cdr acl2::f2)))
+   (acl2::d0 (acl2::and (acl2::consp acl2::e0) (acl2::car (acl2::cdr acl2::e0))))
+   (acl2::d1 (acl2::and (acl2::consp acl2::e1) (acl2::car (acl2::cdr acl2::e1))))
+   (acl2::d2 (acl2::and (acl2::consp acl2::e2) (acl2::car (acl2::cdr acl2::e2)))))
+  (acl2::prog2$
+    (acl2::cw "~%<<<ASS-BEGIN inner>>>~%more ~x0~%n0 ~x1~%a0 ~x2~%r0 ~x3~%n1 ~x4~%a1 ~x5~%r1 ~x6~%n2 ~x7~%a2 ~x8~%r2 ~x9~%<<<ASS-END inner>>>~%"
+      (acl2::if (acl2::consp acl2::f3) acl2::t acl2::nil)
+      (acl2::and (acl2::consp acl2::e0) (acl2::car acl2::e0))
+      (acl2::cdr (acl2::assoc-eq 'acl2::abort-causes acl2::d0))
+      (acl2::cdr (acl2::assoc-eq 'acl2::rules acl2::d0))
+      (acl2::and (acl2::consp acl2::e1) (acl2::car acl2::e1))
+      (acl2::cdr (acl2::assoc-eq 'acl2::abort-causes acl2::d1))
+      (acl2::cdr (acl2::assoc-eq 'acl2::rules acl2::d1))
+      (acl2::and (acl2::consp acl2::e2) (acl2::car acl2::e2))
+      (acl2::cdr (acl2::assoc-eq 'acl2::abort-causes acl2::d2))
+      (acl2::cdr (acl2::assoc-eq 'acl2::rules acl2::d2)))
+    (acl2::value :invisible)))"#;
+
+fn parse_inner(sub: &crate::session::Submission) -> (Vec<InnerEvent>, usize) {
+    let Some(body) = sub.block("inner") else { return (Vec::new(), 0) };
+    let pairs = keyed_block(body, &["more", "n0", "a0", "r0", "n1", "a1", "r1",
+                                    "n2", "a2", "r2"]);
+    let get = |k: &str| pairs.iter().find(|(pk, _)| pk == k)
+        .map(|(_, v)| v.trim().to_string()).filter(|v| !is_nil(v));
+    let mut out = Vec::new();
+    for (n, a, r) in [("n0", "a0", "r0"), ("n1", "a1", "r1"), ("n2", "a2", "r2")] {
+        if let Some(name) = get(n) {
+            out.push(InnerEvent { name, abort_causes: get(a), rules: get(r) });
+        }
+    }
+    // Only a fixed number of slots is read; say when there were more rather
+    // than let a client mistake a truncation for the whole story.
+    let total = out.len() + usize::from(get("more").is_some());
+    (out, total)
+}
 
 /// Report what ACL2 recorded about the event just executed.
 ///
@@ -484,6 +577,11 @@ impl Book {
                         line_end: u.line_end,
                         elapsed: sub.elapsed,
                         event_data: parse_event_data(&sub),
+                        inner: {
+                            let (i, _) = parse_inner(&sub);
+                            i
+                        },
+                        inner_total: parse_inner(&sub).1,
                         output_ref,
                         output_lines,
                     });
@@ -493,7 +591,7 @@ impl Book {
                     // probes never ran. Ask again in a separate submission:
                     // `gag-state-saved` and `last-event-data` are state
                     // globals and survive the failure.
-                    let (ed, cp) = self.probe_after_failure(deadline);
+                    let (ed, cp, inner, inner_total) = self.probe_after_failure(deadline);
                     let status = if sub.outcome == Outcome::StillRunning {
                         Status::DeadlineExceeded
                     } else if cp.proof_ran {
@@ -520,6 +618,8 @@ impl Book {
                         output_lines,
                         event_data: ed,
                         checkpoints: cp,
+                        inner,
+                        inner_total,
                     });
                     break;
                 }
@@ -533,7 +633,10 @@ impl Book {
     /// Best effort by design: this runs when something has already gone wrong,
     /// so a probe that itself fails must degrade to an empty report rather than
     /// masking the original failure with a second one.
-    fn probe_after_failure(&mut self, deadline: Duration) -> (EventData, Checkpoints) {
+    fn probe_after_failure(
+        &mut self,
+        deadline: Duration,
+    ) -> (EventData, Checkpoints, Vec<InnerEvent>, usize) {
         let ed = match self.session.submit(EVENT_DATA_PROBE, deadline) {
             Ok(sub) => parse_event_data(&sub),
             Err(_) => EventData::default(),
@@ -542,7 +645,11 @@ impl Book {
             Ok(sub) => parse_checkpoints(&sub),
             Err(_) => Checkpoints::default(),
         };
-        (ed, cp)
+        let (inner, inner_total) = match self.session.submit(INNER_EVENTS_PROBE, deadline) {
+            Ok(sub) => parse_inner(&sub),
+            Err(_) => (Vec::new(), 0),
+        };
+        (ed, cp, inner, inner_total)
     }
 
     /// Submit one unit together with its label and command-number probe.
@@ -565,7 +672,7 @@ impl Book {
         self.label_gen += 1;
         let label = self.label_gen;
         let body = format!(
-            "{CLEAR_STALE}\n{text}\n{EVENT_DATA_PROBE}\n\
+            "{CLEAR_STALE}\n{text}\n{EVENT_DATA_PROBE}\n{INNER_EVENTS_PROBE}\n\
              (acl2::with-output :off :all (acl2::deflabel {}))\n\
              (acl2::prog2$ (acl2::cw \"~%<<<ASS-DATA cmd ~x0>>>~%\" \
                (acl2::max-absolute-command-number (acl2::w acl2::state))) \

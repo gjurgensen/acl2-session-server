@@ -55,6 +55,13 @@ fn main() {
             None => println!("    {:<14}(not reported)", "rules"),
         }
         if let Some(w) = &e.warnings { wrap("warnings", w, 4, 70); }
+        for ev in &u.inner {
+            let r = ev.rules.as_deref().unwrap_or("nil");
+            wrap(&format!("  {}", ev.name), r, 4, 70);
+        }
+        if u.inner_total > u.inner.len() {
+            println!("    {:<14}({} shown of {}+)", "", u.inner.len(), u.inner_total);
+        }
         println!();
     }
 
@@ -73,6 +80,14 @@ fn main() {
             wrap(&format!("sub[{i}]/{}", c.n_sub), g, 4, 70);
         }
         if c.forced { println!("    {:<14}yes", "forced"); }
+        if let Some(ev) = f.failed_event() {
+            println!("    {:<14}{}", "failed event", ev.name);
+        }
+        for ev in &f.inner {
+            let mark = if ev.abort_causes.is_some() { "!" } else { " " };
+            println!("    {:<14}{mark} {} {}", "  inner", ev.name,
+                     ev.abort_causes.as_deref().unwrap_or(""));
+        }
         println!();
     }
 
