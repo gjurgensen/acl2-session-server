@@ -46,13 +46,20 @@ cargo build
 Syncs a book and prints the structured report for each top-level form. Add
 `--find <text>` or `--goal "Subgoal *1/2"` to slice a form's captured log.
 
-As an MCP server, configure the binary with the path to your ACL2:
+As an MCP server, install it and point it at your ACL2:
+
+```
+cargo install --path crates/acl2-session-mcp
+```
+
+That puts `acl2-session-mcp` in `~/.cargo/bin`. Configure your client with the
+path to your ACL2 image as its argument:
 
 ```json
 {
   "mcpServers": {
     "acl2": {
-      "command": "/path/to/acl2-session-mcp",
+      "command": "/home/you/.cargo/bin/acl2-session-mcp",
       "args": ["/path/to/saved_acl2"]
     }
   }
