@@ -568,7 +568,13 @@ struct PendingUnit {
 impl Book {
     /// Open `path` and start a session in its directory.
     pub fn open(acl2: &Path, path: &Path) -> Result<Book, SyncError> {
-        let dir = path.parent().unwrap_or(Path::new("."));
+        // `Path::new("book.lisp").parent()` is `Some("")`, not `None`, and a
+        // process cannot be started with an empty working directory. Any path
+        // with no directory component means the current one.
+        let dir = match path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new("."),
+        };
         let session = Session::start(acl2, dir)?;
         let mut b = Book {
             acl2: acl2.to_path_buf(),
@@ -1053,7 +1059,10 @@ impl Book {
         let units = split(&bytes).map_err(SyncError::Split)?;
         let keep = keep.min(units.len());
 
-        let dir = self.path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let dir = match self.path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
         // Assigning drops the old Session, whose Drop kills the child.
         self.session = Session::start(&self.acl2, &dir)?;
         self.admitted.clear();

@@ -6,16 +6,15 @@
 #                     invariant, form splitting, and structured extraction.
 #                     Knows nothing about MCP, JSON, or any transport.
 #
-#   acl2-session-mcp  the MCP server (arrives with its implementation). A thin
-#                     mapping from tool calls onto the core, owning its own
-#                     wire types.
+#   acl2-session-mcp  the MCP server. A thin mapping from tool calls onto the
+#                     core, owning its own wire types.
 #
 # An editor-facing interface is a plausible third crate. The core must stay
 # usable by one without dragging in the other's dependencies.
 
 [workspace]
 resolver = "3"
-members = ["crates/acl2-session"]
+members = ["crates/acl2-session", "crates/acl2-session-mcp"]
 
 [workspace.package]
 version = "0.0.1"

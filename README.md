@@ -2,7 +2,8 @@
 
 A file-anchored, structured interface to a live ACL2 session, exposed over MCP.
 
-Status: **early.** The core library works; the MCP interface is not written yet.
+Status: **early**, but working end to end: a book syncs, failures come back
+structured, and the MCP server speaks the protocol over stdio.
 
 ## What it is
 
@@ -35,13 +36,31 @@ result is a fast path over a complete log, never a replacement for it.
 
 ## Trying it
 
+Without MCP, to see the structured output directly:
+
 ```
 cargo build
 ./target/debug/acl2-session-syncfile <acl2-binary> <book.lisp>
 ```
 
 Syncs a book and prints the structured report for each top-level form. Add
-`--find <text>` to slice any form's captured log.
+`--find <text>` or `--goal "Subgoal *1/2"` to slice a form's captured log.
+
+As an MCP server, configure the binary with the path to your ACL2:
+
+```json
+{
+  "mcpServers": {
+    "acl2": {
+      "command": "/path/to/acl2-session-mcp",
+      "args": ["/path/to/saved_acl2"]
+    }
+  }
+}
+```
+
+Ten tools: `session_open`, `session_close`, `sessions`, `sync`, `eval`,
+`resume`, `status`, `interrupt`, `health`, `output`.
 
 ## Layout
 
@@ -49,7 +68,7 @@ Syncs a book and prints the structured report for each top-level form. Add
 crates/
   acl2-session/      core: ACL2 process, file-prefix invariant, form
                      splitting, structured extraction. No transport.
-  acl2-session-mcp/  MCP server. Not yet written.
+  acl2-session-mcp/  MCP server: wire types and a mapping onto the core.
 ```
 
 The core is transport-neutral because an editor is a plausible second client.

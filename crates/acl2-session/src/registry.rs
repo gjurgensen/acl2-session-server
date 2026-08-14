@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use crate::sync::{Book, SyncError};
 
@@ -65,11 +66,23 @@ impl From<SyncError> for RegistryError {
     }
 }
 
+/// A book plus the lock guarding it.
+///
+/// Locks are **per session**, not one lock over the registry, because
+/// `interrupt` has to work while a `sync` is in flight -- a single lock would
+/// make the deadline model useless, since the call you need in order to stop a
+/// runaway proof would be waiting behind the runaway proof.
+///
+/// Within one session the operations do serialise, but a deadline bounds how
+/// long any of them holds the lock: a `sync` returns once its deadline expires
+/// whether or not ACL2 has finished, so `interrupt` waits at most that long.
+pub type SharedBook = Arc<Mutex<Book>>;
+
 /// Several open books, each with its own ACL2 process.
 pub struct Registry {
     acl2: PathBuf,
     next: u64,
-    books: HashMap<SessionId, Book>,
+    books: HashMap<SessionId, SharedBook>,
 }
 
 impl Registry {
@@ -82,7 +95,7 @@ impl Registry {
         let book = Book::open(&self.acl2, file)?;
         self.next += 1;
         let id = SessionId(format!("s{}", self.next));
-        self.books.insert(id.clone(), book);
+        self.books.insert(id.clone(), Arc::new(Mutex::new(book)));
         Ok(id)
     }
 
@@ -94,9 +107,14 @@ impl Registry {
         self.books.remove(id).is_some()
     }
 
-    pub fn get(&mut self, id: &SessionId) -> Result<&mut Book, RegistryError> {
+    /// The book for `id`, if it is open.
+    ///
+    /// Returns the shared handle rather than a borrow, so the registry lock can
+    /// be released before the caller does any blocking work with the book.
+    pub fn get(&self, id: &SessionId) -> Result<SharedBook, RegistryError> {
         self.books
-            .get_mut(id)
+            .get(id)
+            .cloned()
             .ok_or_else(|| RegistryError::Unknown(id.clone()))
     }
 
@@ -105,7 +123,10 @@ impl Registry {
         let mut v: Vec<_> = self
             .books
             .iter()
-            .map(|(id, b)| (id.clone(), b.path().to_path_buf()))
+            .filter_map(|(id, b)| {
+                let p = b.lock().ok()?.path().to_path_buf();
+                Some((id.clone(), p))
+            })
             .collect();
         v.sort();
         v

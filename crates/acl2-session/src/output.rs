@@ -38,6 +38,18 @@ impl OutputRef {
     }
 }
 
+impl From<&str> for OutputRef {
+    /// Rebuild a handle from its string form.
+    ///
+    /// Needed because a handle makes a round trip through a client: it is
+    /// issued as text and comes back as text. This does not weaken the
+    /// guarantee, since a handle is only ever meaningful to the store that
+    /// issued it -- an invented one is simply unknown.
+    fn from(s: &str) -> Self {
+        OutputRef(s.to_string())
+    }
+}
+
 /// What part of an output to return.
 #[derive(Debug, Clone)]
 pub enum Slice {
