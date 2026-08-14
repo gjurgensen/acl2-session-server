@@ -722,11 +722,16 @@ impl Book {
     /// - `Busy` -- a form is in flight. Working as intended; wait, resume, or
     ///   interrupt. Asked of the session itself rather than of unit
     ///   bookkeeping, because an `eval` can be in flight with no unit attached.
-    /// - `Wedged` -- nothing should be running, yet a trivial round trip did
-    ///   not come back. The process is alive and its descriptor works, but it
-    ///   is not answering: ACL2 may have dropped into a raw-Lisp debugger, or
-    ///   something may have swallowed a completion sentinel. Recoverable by
+    /// - `Unresponsive` -- nothing should be running, yet a trivial round trip
+    ///   did not come back. The process is alive and its descriptor works, but
+    ///   it is not answering: ACL2 may have dropped into a raw-Lisp debugger,
+    ///   or something may have swallowed a completion sentinel. Recoverable by
     ///   interrupt or, failing that, by rebuild.
+    ///
+    ///   This is the one answer resting on reasoning rather than measurement:
+    ///   nothing in the test suite can wedge ACL2 on demand, so the branch is
+    ///   untested. It is also the answer that matters most when something has
+    ///   genuinely gone wrong.
     /// - `Dead` -- the descriptor itself failed. The process is gone; only a
     ///   rebuild will help.
     ///
@@ -738,7 +743,7 @@ impl Book {
         }
         match self.session.submit("(acl2::value :invisible)", deadline) {
             Ok(s) if s.outcome != Outcome::StillRunning => Health::Alive,
-            Ok(_) => Health::Wedged,
+            Ok(_) => Health::Unresponsive,
             Err(_) => Health::Dead,
         }
     }
@@ -1131,7 +1136,8 @@ pub enum Health {
     /// A form is in flight; the session is working, not stuck.
     Busy,
     /// Answered nothing within the deadline while claiming to be idle.
-    Wedged,
+    /// Distinct from `Busy`, which is silence we caused and expect.
+    Unresponsive,
     Dead,
 }
 
