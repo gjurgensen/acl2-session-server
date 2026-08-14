@@ -126,6 +126,24 @@ fn main() {
     report("sync through line 3 only", &o);
     expect(o.resolved_through == Some(1), "resolves to unit 1", &mut fails);
 
+    // Exercise rebuild-by-replay directly. Its real trigger -- a rollback that
+    // cannot be verified -- is not reproducible on demand, so drive the
+    // mechanism explicitly and check the world it leaves behind.
+    println!("── rebuild by replay (mechanism, driven directly)");
+    b.rebuild(4, DEADLINE).expect("rebuild");
+    println!("   rebuilds={}", b.rebuilds());
+    let o = b.sync(None, DEADLINE).expect("sync after rebuild");
+    println!(
+        "   after rebuild: reused={} admitted={} failed={}",
+        o.reused,
+        o.admitted.len(),
+        o.failed.is_some()
+    );
+    expect(b.rebuilds() == 1, "one rebuild recorded", &mut fails);
+    expect(o.reused == 4, "the replayed prefix is recognised as reusable", &mut fails);
+    expect(o.admitted.len() == 2 && o.failed.is_none(),
+           "the remaining 2 units are admitted on top", &mut fails);
+
     let _ = std::fs::remove_dir_all(&dir);
     if fails > 0 {
         eprintln!("\n{fails} expectation(s) not met");

@@ -58,6 +58,16 @@ pub struct SyncOutcome {
     pub rolled_back: usize,
     pub admitted: Vec<UnitReport>,
     pub failed: Option<FailureReport>,
+    /// True when the prefix had to be restored by discarding the ACL2 process
+    /// and replaying, rather than by undo.
+    ///
+    /// This should be rare. It is surfaced not as a warning -- an agent has no
+    /// use for one -- but so that the latency is *attributable*: a rebuild can
+    /// take minutes, and without this a deadline expiry looks like a slow
+    /// proof. An editor-facing client should turn the same signal into a
+    /// visible warning, since the redundant work is unexpected from a user's
+    /// point of view.
+    pub rebuilt: bool,
 }
 
 #[derive(Debug)]
@@ -66,6 +76,8 @@ pub enum SyncError {
     Split(SplitError),
     /// The undo itself was rejected by ACL2.
     RollbackFailed { output: String },
+    /// Replaying a unit that had previously been admitted failed.
+    ReplayFailed { line_start: usize, output: String },
     /// A rollback did not land where the recorded command number says it
     /// should. Per P3 the fast path is always verified, and a failed check
     /// must degrade to rebuilding from scratch rather than being trusted.
@@ -80,6 +92,10 @@ impl std::fmt::Display for SyncError {
             SyncError::RollbackFailed { output } => {
                 let first = output.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
                 write!(f, "rollback rejected by ACL2: {}", first.trim())
+            }
+            SyncError::ReplayFailed { line_start, output } => {
+                let first = output.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+                write!(f, "replay failed at line {line_start}: {}", first.trim())
             }
             SyncError::RollbackUnverified { expected, actual } => write!(
                 f,
@@ -98,10 +114,12 @@ impl From<io::Error> for SyncError {
 
 /// A session anchored to one file.
 pub struct Book {
+    acl2: PathBuf,
     path: PathBuf,
     session: Session,
     admitted: Vec<Admitted>,
     label_gen: u64,
+    rebuilds: usize,
 }
 
 impl Book {
@@ -110,10 +128,12 @@ impl Book {
         let dir = path.parent().unwrap_or(Path::new("."));
         let session = Session::start(acl2, dir)?;
         let mut b = Book {
+            acl2: acl2.to_path_buf(),
             path: path.to_path_buf(),
             session,
             admitted: Vec::new(),
             label_gen: 0,
+            rebuilds: 0,
         };
         // A baseline label, so "roll back to the empty prefix" is the same
         // operation as any other rollback rather than a special case.
@@ -123,6 +143,16 @@ impl Book {
 
     pub fn session(&mut self) -> &mut Session {
         &mut self.session
+    }
+
+    /// How many times this book has been rebuilt by replay.
+    ///
+    /// Expected to stay at zero. A non-zero and growing count means undo is
+    /// not behaving as assumed, which is a problem in its own right: replay is
+    /// correct but expensive, and a session doing it routinely is doing a
+    /// great deal of redundant proving.
+    pub fn rebuilds(&self) -> usize {
+        self.rebuilds
     }
 
     fn label_name(genid: u64) -> String {
@@ -170,33 +200,24 @@ impl Book {
 
         if keep < self.admitted.len() {
             out.rolled_back = self.admitted.len() - keep;
-            self.rollback_to(keep, deadline)?;
+            match self.rollback_to(keep, deadline) {
+                Ok(()) => {}
+                // P3: a fast path that cannot be verified degrades to replay
+                // rather than being trusted. Both an outright rejection and an
+                // unverifiable landing get the same treatment.
+                Err(SyncError::RollbackFailed { .. })
+                | Err(SyncError::RollbackUnverified { .. }) => {
+                    self.rebuild(keep, deadline)?;
+                    out.rebuilt = true;
+                }
+                Err(e) => return Err(e),
+            }
         }
 
         for (i, u) in units.iter().enumerate().take(target + 1).skip(keep) {
-            let text = String::from_utf8_lossy(&bytes[u.start..u.end]).into_owned();
-            self.label_gen += 1;
-            let label = self.label_gen;
-            // The unit, then our label, then the command number -- all in one
-            // submission, so a successful admit costs a single round trip and
-            // the bookkeeping cannot drift from the world.
-            let body = format!(
-                "{text}\n(acl2::deflabel {})\n\
-                 (acl2::prog2$ (acl2::cw \"~%<<<ASS-DATA cmd ~x0>>>~%\" \
-                   (acl2::max-absolute-command-number (acl2::w acl2::state))) \
-                   (acl2::value :invisible))",
-                Self::label_name(label)
-            );
-            let sub = self.session.submit(&body, deadline)?;
+            let sub = self.admit_unit(u, &bytes, deadline)?;
             match sub.outcome {
                 Outcome::Ok => {
-                    self.admitted.push(Admitted {
-                        hash: u.hash,
-                        line_start: u.line_start,
-                        line_end: u.line_end,
-                        label,
-                        command_number: sub.get("cmd").and_then(|v| v.parse().ok()),
-                    });
                     out.admitted.push(UnitReport {
                         index: i,
                         line_start: u.line_start,
@@ -221,6 +242,82 @@ impl Book {
             }
         }
         Ok(out)
+    }
+
+    /// Submit one unit together with its label and command-number probe.
+    ///
+    /// One round trip: the unit, our `deflabel`, and the command number travel
+    /// in a single submission, so the bookkeeping cannot drift from the world.
+    /// On success the unit is recorded in `admitted`.
+    fn admit_unit(
+        &mut self,
+        u: &Form,
+        bytes: &[u8],
+        deadline: Duration,
+    ) -> Result<crate::session::Submission, SyncError> {
+        let text = String::from_utf8_lossy(&bytes[u.start..u.end]).into_owned();
+        self.label_gen += 1;
+        let label = self.label_gen;
+        let body = format!(
+            "{text}\n(acl2::deflabel {})\n\
+             (acl2::prog2$ (acl2::cw \"~%<<<ASS-DATA cmd ~x0>>>~%\" \
+               (acl2::max-absolute-command-number (acl2::w acl2::state))) \
+               (acl2::value :invisible))",
+            Self::label_name(label)
+        );
+        let sub = self.session.submit(&body, deadline)?;
+        if sub.outcome == Outcome::Ok {
+            self.admitted.push(Admitted {
+                hash: u.hash,
+                line_start: u.line_start,
+                line_end: u.line_end,
+                label,
+                command_number: sub.get("cmd").and_then(|v| v.parse().ok()),
+            });
+        }
+        Ok(sub)
+    }
+
+    /// Discard the ACL2 process and replay the first `keep` units of the file.
+    ///
+    /// This is the fallback half of P3. Undo is the fast path, but correctness
+    /// must not rest on it, so every rollback is verified; when the check
+    /// fails, the world is restored *by construction* instead of by trusting
+    /// machinery just caught misbehaving.
+    ///
+    /// Note the distinction: a failed check does not mean the world is wrong,
+    /// only that we cannot confirm it is right. A wrong prefix is a silent
+    /// failure that makes a client report success about something not on disk,
+    /// so "unverified" and "wrong" get the same treatment.
+    ///
+    /// Cost runs opposite to intuition -- it is proportional to what is *kept*,
+    /// not what is undone. Rolling back one unit of a two-hundred-unit book
+    /// replays a hundred and ninety-nine.
+    pub fn rebuild(&mut self, keep: usize, deadline: Duration) -> Result<(), SyncError> {
+        let bytes = std::fs::read(&self.path)?;
+        let units = split(&bytes).map_err(SyncError::Split)?;
+        let keep = keep.min(units.len());
+
+        let dir = self.path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        // Assigning drops the old Session, whose Drop kills the child.
+        self.session = Session::start(&self.acl2, &dir)?;
+        self.admitted.clear();
+        self.label_gen = 0;
+        self.rebuilds += 1;
+        self.plant_base_label()?;
+
+        for u in units.iter().take(keep) {
+            let sub = self.admit_unit(u, &bytes, deadline)?;
+            if sub.outcome != Outcome::Ok {
+                // A unit that admitted before but not now means the world we
+                // were trying to restore was never reachable. Fail loudly.
+                return Err(SyncError::ReplayFailed {
+                    line_start: u.line_start,
+                    output: sub.output,
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Undo back to a prefix of length `keep`, then verify.
