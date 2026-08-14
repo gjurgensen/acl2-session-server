@@ -742,7 +742,7 @@ impl Book {
             return Health::Busy;
         }
         match self.session.submit("(acl2::value :invisible)", deadline) {
-            Ok(s) if s.outcome != Outcome::StillRunning => Health::Alive,
+            Ok(s) if s.outcome != Outcome::StillRunning => Health::Ready,
             Ok(_) => Health::Unresponsive,
             Err(_) => Health::Dead,
         }
@@ -1132,7 +1132,11 @@ impl Book {
 /// Whether a session is answering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Health {
-    Alive,
+    /// Idle and answering: a form can be submitted now.
+    ///
+    /// Named for what the client can do rather than for the process being
+    /// alive, since a `Busy` session is alive too.
+    Ready,
     /// A form is in flight; the session is working, not stuck.
     Busy,
     /// Answered nothing within the deadline while claiming to be idle.

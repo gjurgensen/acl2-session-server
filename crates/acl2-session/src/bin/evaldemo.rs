@@ -79,7 +79,7 @@ fn main() {
     expect(b.interrupt().expect("interrupt"), "and it can be interrupted", &mut fails);
 
     println!("\n── health");
-    expect(b.health(D) == Health::Alive, "session reports Alive", &mut fails);
+    expect(b.health(D) == Health::Ready, "session reports Alive", &mut fails);
 
     let _ = std::fs::remove_dir_all(&dir);
     if fails > 0 { eprintln!("\n{fails} expectation(s) not met"); std::process::exit(1); }
