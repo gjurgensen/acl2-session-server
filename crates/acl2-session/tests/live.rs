@@ -595,3 +595,50 @@ fn an_image_outside_a_checkout_can_still_certify() {
         "cert.pl must be found via the books directory ACL2 reports"
     );
 }
+
+/// A certification that outruns its deadline is continued by asking again.
+///
+/// The deadline bounds the call, not the build: cert.pl keeps going, and a
+/// second `certify` waits on the same build rather than starting a competing
+/// one. A large book takes minutes, so this is the normal path, not an edge
+/// case.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_certification_that_outruns_its_deadline_is_resumed_by_calling_again() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("cert-resume");
+    let book = dir.join("r.lisp");
+    std::fs::write(
+        &book,
+        "(in-package \"ACL2\")\n(defun m (x) x)\n(defthm m-id (equal (m x) x))\n",
+    )
+    .unwrap();
+    let mut b = Book::open(&acl2, &book).unwrap();
+
+    // Nothing finishes in a millisecond; perl's own startup outlasts it.
+    let first = b.certify(Duration::from_millis(1), 2).unwrap();
+    assert_eq!(first.status, acl2_session::cert::CertStatus::StillRunning);
+    assert!(first.output_ref.is_none(), "a partial log gets no handle");
+
+    // The build is visible while it runs, without waiting on it.
+    let seen = b.build_progress(5);
+    assert!(seen.is_some(), "a running build must show up in status");
+    assert_eq!(seen.unwrap().book, book);
+
+    // Asking again continues the same build through to its result.
+    let mut done = None;
+    for _ in 0..60 {
+        let r = b.certify(Duration::from_secs(10), 2).unwrap();
+        if r.status != acl2_session::cert::CertStatus::StillRunning {
+            done = Some(r);
+            break;
+        }
+    }
+    let r = done.expect("the build must finish");
+    assert_eq!(r.status, acl2_session::cert::CertStatus::Certified);
+    assert!(r.output_ref.is_some(), "the finished build hands back its log");
+    assert!(book.with_extension("cert").is_file());
+
+    // And it is over: nothing is left in flight to report.
+    assert!(b.build_progress(5).is_none(), "a finished build is not progress");
+}

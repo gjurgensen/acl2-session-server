@@ -392,8 +392,11 @@ pub struct Ack {
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct CertifyReply {
     /// `certified`, `failed`, or `still_running` if the deadline expired.
-    /// The build keeps going; call again to keep waiting, or `acl2_interrupt`
-    /// to stop it and everything it started.
+    ///
+    /// `still_running` means the build is unaffected and continuing. Call
+    /// `acl2_certify` again to keep waiting on it -- **not** `acl2_resume`,
+    /// which waits on the prover, a different process. `acl2_status` shows how
+    /// far it has got without waiting; `acl2_interrupt` stops it.
     pub outcome: String,
     /// The book that was asked for.
     pub book: String,

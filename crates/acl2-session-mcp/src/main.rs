@@ -343,7 +343,10 @@ impl Acl2Mcp {
         dependencies, using the same ACL2 image the session runs. Runs outside \
         the session against the file on disk, so the session's world is \
         untouched and stays usable. A book that syncs cleanly can still fail \
-        to certify -- certification is the check that catches it.")]
+        to certify -- certification is the check that catches it.\n\n\
+        If the deadline expires, the build carries on: call this again to keep \
+        waiting on the same build (not acl2_resume, which is for the prover), \
+        acl2_status to watch it without waiting, or acl2_interrupt to stop it.")]
     async fn acl2_certify(
         &self,
         Parameters(a): Parameters<CertifyArgs>,
