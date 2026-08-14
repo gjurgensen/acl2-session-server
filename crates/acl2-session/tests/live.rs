@@ -285,3 +285,45 @@ fn eval_leaves_the_world_alone_but_settings_stick() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Relative paths in a submitted form resolve against the book's directory.
+///
+/// Forms are submitted by `ld`-ing a temp file, and `ld` sets the connected
+/// book directory to the directory of the file it loads. Without an explicit
+/// `set-cbd` every relative `include-book` resolves against our temp directory
+/// instead -- so a real book syncs happily until its first
+/// `(include-book "internal/whatever")`, which then reports that a file under
+/// /tmp does not exist. Nothing in the suite had a relative path, which is why
+/// this survived until a real Kestrel book was pointed at it.
+#[test]
+#[ignore = "needs ACL2"]
+fn relative_paths_resolve_against_the_book_directory() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("cbd");
+    let book = dir.join("main.lisp");
+    // A sibling the book refers to by a relative path.
+    write(&dir.join("helper.lisp"), &["(in-package \"ACL2\")",
+                                      "(defconst *helper-marker* 42)"]);
+    write(&book, &["(in-package \"ACL2\")",
+                   "(cw \"CBD=[~s0]~%\" (cbd))",
+                   "(ld \"helper.lisp\")",
+                   "(cw \"MARKER=~x0~%\" *helper-marker*)"]);
+
+    let mut b = Book::open(&acl2, &book).expect("open");
+    let o = b.sync(None, D).expect("sync");
+    assert!(o.failed.is_none(), "a relative ld must resolve: {:?}",
+            o.failed.as_ref().map(|f| f.error_line.clone()));
+    assert_eq!(o.admitted.len(), 4);
+
+    let cbd = b.output(&o.admitted[1].output_ref, Slice::All).unwrap().text;
+    let want = dir.canonicalize().unwrap();
+    assert!(cbd.contains(want.to_str().unwrap()),
+            "cbd should be the book's directory, got: {cbd}");
+    assert!(!cbd.contains("acl2-session-"),
+            "cbd must not be the submission temp directory");
+
+    let marker = b.output(&o.admitted[3].output_ref, Slice::All).unwrap().text;
+    assert!(marker.contains("42"), "the sibling file was actually loaded");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

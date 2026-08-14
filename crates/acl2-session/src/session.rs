@@ -72,6 +72,11 @@ struct InFlight {
 pub struct Session {
     child: Child,
     master: OwnedFd,
+    /// The book's directory, absolute.
+    ///
+    /// Every submission re-establishes this as ACL2's connected book
+    /// directory. See `submit`.
+    cwd: PathBuf,
     /// Set while ACL2 is still working on a submitted form.
     ///
     /// A session drives one ACL2 over one pipe, so it is strictly
@@ -125,10 +130,14 @@ impl Session {
 
         let tmpdir = std::env::temp_dir().join(format!("acl2-session-{}", child.id()));
         std::fs::create_dir_all(&tmpdir)?;
+        // Absolute: it is interpolated into ACL2 source, where a relative path
+        // would be resolved against whatever cbd happened to be.
+        let cwd = std::fs::canonicalize(book_dir).unwrap_or_else(|_| book_dir.to_path_buf());
 
         let mut s = Session {
             child,
             master,
+            cwd,
             tmpdir,
             generation: 0,
             inflight: None,
@@ -200,13 +209,24 @@ impl Session {
         // OK is the last thing in the file, so `:ld-error-action :return!`
         // means a failing form never reaches it. DONE is printed by the REPL
         // afterwards and therefore always arrives.
+        // `set-cbd` first, and this is not optional. `ld` sets the connected
+        // book directory to the directory of the file it is loading, so
+        // without this every relative `include-book` in a submitted form would
+        // be resolved against our temp directory -- and relative includes are
+        // the norm in real books. The symptom is a book that syncs fine until
+        // its first `(include-book "internal/whatever")`, which reports that a
+        // file under /tmp does not exist.
+        //
         // `(value :invisible)` keeps ACL2 from printing the marker form's own
         // return value, which would otherwise leave a stray `nil` in the
         // captured output of every single form.
+        let cwd = self.cwd.display();
         std::fs::write(
             &path,
             format!(
-                "{form}\n(acl2::prog2$ (acl2::cw \"~%<<<ASS-OK {genid}>>>~%\") \
+                "(acl2::er-progn (acl2::set-cbd \"{cwd}/\") \
+                   (acl2::value :invisible))\n\
+                 {form}\n(acl2::prog2$ (acl2::cw \"~%<<<ASS-OK {genid}>>>~%\") \
                  (acl2::value :invisible))\n"
             ),
         )?;
@@ -443,6 +463,15 @@ fn strip_sentinels(s: &str, genid: u64) -> (String, Vec<(String, String)>, Vec<(
         }
         if let Some((_, body)) = open.as_mut() {
             body.push(l);
+            continue;
+        }
+        // Our planted labels: `with-output` hides their summary, but `ld`
+        // still echoes the event name as the form's value. It is our
+        // bookkeeping, not something ACL2 said about the user's form.
+        if l.trim_start().starts_with("acl2-session-mark-")
+            && l.trim().len() < 40
+            && l.trim()["acl2-session-mark-".len()..].chars().all(|c| c.is_ascii_digit())
+        {
             continue;
         }
         if let Some(rest) = l.find("<<<ASS-DATA ").map(|i| &l[i + 12..]) {
