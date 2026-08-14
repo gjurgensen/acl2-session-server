@@ -14,7 +14,7 @@ use std::time::Duration;
 use acl2_session::{Health, Registry, SessionId, Slice, WorldChange};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResult, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler, ServiceExt};
 use serde::Deserialize;
 
@@ -30,8 +30,12 @@ fn fail(e: impl std::fmt::Display) -> ErrorData {
     ErrorData::internal_error(e.to_string(), None)
 }
 
+/// Reply with real structured content rather than JSON stuffed into a text
+/// block, which is what the protocol offers now that clients can consume it.
 fn json<T: serde::Serialize>(v: T) -> Result<CallToolResult, ErrorData> {
-    Ok(CallToolResult::success(vec![Content::json(v)?]))
+    let value = serde_json::to_value(v)
+        .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+    Ok(CallToolResult::structured(value))
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -411,8 +415,11 @@ impl Acl2Mcp {
 #[tool_handler]
 impl ServerHandler for Acl2Mcp {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            instructions: Some(
+        // `ServerInfo` is non-exhaustive, so it is filled in rather than
+        // built with a struct expression.
+        let mut info = ServerInfo::default();
+        info.capabilities = ServerCapabilities::builder().enable_tools().build();
+        info.instructions = Some(
                 "Drives a live ACL2 session anchored to a .lisp file.\n\n\
                  Workflow: open a session on the book, edit the file with ordinary \
                  tools, then sync. The server works out what changed. Sync stops at \
@@ -421,11 +428,9 @@ impl ServerHandler for Acl2Mcp {
                  The structured results are a projection over a complete log. When \
                  they do not explain a failure, read the log with acl2_output \
                  rather than assuming the detail is unavailable."
-                    .into(),
-            ),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            ..Default::default()
-        }
+                .into(),
+        );
+        info
     }
 }
 

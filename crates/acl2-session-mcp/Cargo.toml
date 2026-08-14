@@ -12,7 +12,7 @@ categories.workspace = true
 
 [dependencies]
 acl2-session = { path = "../acl2-session", version = "0.0.1" }
-rmcp = { version = "0.9", features = ["server", "transport-io"] }
+rmcp = { version = "3", features = ["server", "transport-io"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
