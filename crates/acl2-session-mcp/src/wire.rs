@@ -26,19 +26,33 @@ pub struct InnerEvent {
     /// Present only on the inner event that failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub abort_causes: Option<String>,
-    /// Runes this inner event used. Answers questions like "did the
-    /// prep-lemma actually get used?", which the outer form cannot.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rules: Option<String>,
+    /// Runes this inner event used, one per entry. Answers questions like
+    /// "did the prep-lemma actually get used?", which the outer form cannot.
+    ///
+    /// Reported on failures, where the rules are evidence about a proof you
+    /// are debugging. On a form that went in, see `rules_of` below.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<String>,
 }
 
-impl From<&core::InnerEvent> for InnerEvent {
-    fn from(e: &core::InnerEvent) -> Self {
-        InnerEvent {
-            name: e.name.clone(),
-            abort_causes: e.abort_causes.clone(),
-            rules: e.rules.clone(),
-        }
+/// An inner event of a form that failed: rules included.
+fn inner_failed(e: &core::InnerEvent) -> InnerEvent {
+    InnerEvent {
+        name: e.name.clone(),
+        abort_causes: e.abort_causes.clone(),
+        rules: e.rules.clone(),
+    }
+}
+
+/// An inner event of a form that was admitted: what it introduced, no more.
+///
+/// The rules are dropped here rather than at the source: the core still has
+/// them, and a different client may want them. See the note on `Admitted`.
+fn inner_admitted(e: &core::InnerEvent) -> InnerEvent {
+    InnerEvent {
+        name: e.name.clone(),
+        abort_causes: e.abort_causes.clone(),
+        rules: Vec::new(),
     }
 }
 
@@ -65,21 +79,22 @@ pub struct Checkpoints {
 }
 
 /// A form that was admitted.
+///
+/// Facts about the event, plus a handle to the evidence. Two things ACL2
+/// reports are deliberately *not* here, because on a form that went in they
+/// are bulk rather than news, and a sync reports every form that went in:
+/// the rules the proof used, and the prover-step count. Both are per form in
+/// the log, so ask the one form you care about --
+/// `acl2_output output_ref:"<this form's>" mode:"find" text:"Rules:"`, or
+/// `text:"Prover steps"`. Failures keep both, where they are evidence.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct Admitted {
     pub index: usize,
     pub line_start: usize,
     pub line_end: usize,
     pub elapsed_ms: u128,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prover_steps: Option<u64>,
-    /// Runes the proof used.
-    ///
-    /// Absent for compound forms such as `define` and `defrule`: ACL2 does not
-    /// aggregate rules for the outer event. Look at `inner` instead, which
-    /// reports them per inner event.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rules: Option<String>,
+    /// Present only when ACL2 warned about something -- unlike rules, a
+    /// warning is an exception rather than a fact every form carries.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warnings: Option<String>,
     pub inner: Vec<InnerEvent>,
@@ -174,10 +189,8 @@ pub fn admitted(u: &core::sync::UnitReport) -> Admitted {
         line_start: u.line_start,
         line_end: u.line_end,
         elapsed_ms: u.elapsed.as_millis(),
-        prover_steps: u.event_data.prover_steps,
-        rules: u.event_data.rules.clone(),
         warnings: u.event_data.warnings.clone(),
-        inner: u.inner.iter().map(InnerEvent::from).collect(),
+        inner: u.inner.iter().map(inner_admitted).collect(),
         output_ref: u.output_ref.to_string(),
         output_lines: u.output_lines,
     }
@@ -205,7 +218,7 @@ pub fn failed(f: &core::sync::FailureReport) -> Failed {
             forced: f.checkpoints.forced,
             pre_revert: f.checkpoints.pre_revert,
         },
-        inner: f.inner.iter().map(InnerEvent::from).collect(),
+        inner: f.inner.iter().map(inner_failed).collect(),
         failed_event: f.failed_event().map(|e| e.name.clone()),
         output_ref: f.output_ref.to_string(),
         output_lines: f.output_lines,

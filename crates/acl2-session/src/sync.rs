@@ -38,13 +38,19 @@ struct Admitted {
 ///
 /// Values are ACL2-printed text. Deliberately: the *envelope* is structured --
 /// each fact is its own field and can never be elided by a truncated blob --
-/// while the values stay in the notation a reader of ACL2 already knows. There
-/// is no gain in re-encoding a rune list as JSON.
+/// while the values stay in the notation a reader of ACL2 already knows.
+///
+/// `rules` is the exception, and used not to be. Holding it as one printed
+/// blob meant holding ACL2's *layout*: line breaks and alignment chosen for
+/// whatever width the prover formatted for, which a client then had to parse
+/// back before it could so much as filter by rule class. A rune list is
+/// genuinely a list, so it is carried as one -- read element-wise from the
+/// probe rather than recovered from the picture.
 #[derive(Debug, Clone, Default)]
 pub struct EventData {
     pub prover_steps: Option<u64>,
-    /// Runes the proof used.
-    pub rules: Option<String>,
+    /// Runes the proof used, one per entry.
+    pub rules: Vec<String>,
     pub warnings: Option<String>,
     /// `(prove print proof-tree other)`, in seconds.
     pub time: Option<String>,
@@ -81,7 +87,8 @@ pub struct InnerEvent {
     pub name: String,
     /// Non-empty when this is the inner event that failed.
     pub abort_causes: Option<String>,
-    pub rules: Option<String>,
+    /// Runes this inner event used, one per entry.
+    pub rules: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -384,29 +391,55 @@ const INNER_EVENTS_PROBE: &str = r#"(acl2::let*
    (acl2::d1 (acl2::and (acl2::consp acl2::e1) (acl2::car (acl2::cdr acl2::e1))))
    (acl2::d2 (acl2::and (acl2::consp acl2::e2) (acl2::car (acl2::cdr acl2::e2)))))
   (acl2::prog2$
-    (acl2::cw "~%<<<ASS-BEGIN inner>>>~%more ~x0~%n0 ~x1~%a0 ~x2~%r0 ~x3~%n1 ~x4~%a1 ~x5~%r1 ~x6~%n2 ~x7~%a2 ~x8~%r2 ~x9~%<<<ASS-END inner>>>~%"
+    (acl2::cw "~%<<<ASS-BEGIN inner>>>~%more ~x0~%n0 ~x1~%a0 ~x2~%n1 ~x3~%a1 ~x4~%n2 ~x5~%a2 ~x6~%"
       (acl2::if (acl2::consp acl2::f3) acl2::t acl2::nil)
       (acl2::and (acl2::consp acl2::e0) (acl2::car acl2::e0))
       (acl2::cdr (acl2::assoc-eq 'acl2::abort-causes acl2::d0))
-      (acl2::cdr (acl2::assoc-eq 'acl2::rules acl2::d0))
       (acl2::and (acl2::consp acl2::e1) (acl2::car acl2::e1))
       (acl2::cdr (acl2::assoc-eq 'acl2::abort-causes acl2::d1))
-      (acl2::cdr (acl2::assoc-eq 'acl2::rules acl2::d1))
       (acl2::and (acl2::consp acl2::e2) (acl2::car acl2::e2))
-      (acl2::cdr (acl2::assoc-eq 'acl2::abort-causes acl2::d2))
-      (acl2::cdr (acl2::assoc-eq 'acl2::rules acl2::d2)))
-    (acl2::value :invisible)))"#;
+      (acl2::cdr (acl2::assoc-eq 'acl2::abort-causes acl2::d2)))
+    (acl2::prog2$
+      (acl2::cw "~*0" (acl2::list "" "r0rune ~x*~%" "r0rune ~x*~%" "r0rune ~x*~%"
+                        (acl2::cdr (acl2::assoc-eq 'acl2::rules acl2::d0))))
+      (acl2::prog2$
+        (acl2::cw "~*0" (acl2::list "" "r1rune ~x*~%" "r1rune ~x*~%" "r1rune ~x*~%"
+                          (acl2::cdr (acl2::assoc-eq 'acl2::rules acl2::d1))))
+        (acl2::prog2$
+          (acl2::cw "~*0" (acl2::list "" "r2rune ~x*~%" "r2rune ~x*~%" "r2rune ~x*~%"
+                            (acl2::cdr (acl2::assoc-eq 'acl2::rules acl2::d2))))
+          (acl2::prog2$
+            (acl2::cw "<<<ASS-END inner>>>~%")
+            (acl2::value :invisible)))))))"#;
+
+/// Every value recorded under a repeated key, with ACL2's wrapping undone.
+///
+/// The probes print list-valued data one element per line with a distinguishing
+/// prefix, rather than letting `~x` lay out the whole list. A long rune still
+/// wraps, but only onto lines that do not carry the prefix, so the item
+/// boundaries survive regardless of the width ACL2 formatted for -- which is
+/// what makes this a list we can hand over as a list, instead of a picture of
+/// one that a client would have to parse back.
+fn items(pairs: &[(String, String)], key: &str) -> Vec<String> {
+    pairs
+        .iter()
+        .filter(|(k, _)| k == key)
+        .map(|(_, v)| v.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|v| !v.is_empty() && !is_nil(v))
+        .collect()
+}
 
 fn parse_inner(sub: &crate::session::Submission) -> (Vec<InnerEvent>, usize) {
     let Some(body) = sub.block("inner") else { return (Vec::new(), 0) };
-    let pairs = keyed_block(body, &["more", "n0", "a0", "r0", "n1", "a1", "r1",
-                                    "n2", "a2", "r2"]);
+    let pairs = keyed_block(body, &["more", "n0", "a0", "n1", "a1", "n2", "a2",
+                                    "r0rune", "r1rune", "r2rune"]);
     let get = |k: &str| pairs.iter().find(|(pk, _)| pk == k)
         .map(|(_, v)| v.trim().to_string()).filter(|v| !is_nil(v));
     let mut out = Vec::new();
-    for (n, a, r) in [("n0", "a0", "r0"), ("n1", "a1", "r1"), ("n2", "a2", "r2")] {
+    for (n, a, r) in [("n0", "a0", "r0rune"), ("n1", "a1", "r1rune"),
+                      ("n2", "a2", "r2rune")] {
         if let Some(name) = get(n) {
-            out.push(InnerEvent { name, abort_causes: get(a), rules: get(r) });
+            out.push(InnerEvent { name, abort_causes: get(a), rules: items(&pairs, r) });
         }
     }
     // Only a fixed number of slots is read; say when there were more rather
@@ -421,12 +454,17 @@ fn parse_inner(sub: &crate::session::Submission) -> (Vec<InnerEvent>, usize) {
 /// immediately preceding event, and planting a label first would make it
 /// describe the label.
 const EVENT_DATA_PROBE: &str = r#"(acl2::prog2$
-  (acl2::cw "~%<<<ASS-BEGIN evd>>>~%steps ~x0~%rules ~x1~%warnings ~x2~%time ~x3~%<<<ASS-END evd>>>~%"
+  (acl2::cw "~%<<<ASS-BEGIN evd>>>~%steps ~x0~%warnings ~x1~%time ~x2~%"
     (acl2::get-event-data 'acl2::prover-steps-counted acl2::state)
-    (acl2::get-event-data 'acl2::rules acl2::state)
     (acl2::get-event-data 'acl2::warnings acl2::state)
     (acl2::get-event-data 'acl2::time acl2::state))
-  (acl2::value :invisible))"#;
+  (acl2::prog2$
+    (acl2::cw "~*0"
+      (acl2::list "" "rule ~x*~%" "rule ~x*~%" "rule ~x*~%"
+        (acl2::get-event-data 'acl2::rules acl2::state)))
+    (acl2::prog2$
+      (acl2::cw "<<<ASS-END evd>>>~%")
+      (acl2::value :invisible))))"#;
 
 /// Report the key checkpoints of the most recent failed proof.
 ///
@@ -565,7 +603,7 @@ fn parse_event_data(sub: &crate::session::Submission) -> EventData {
     let Some(body) = sub.block("evd") else { return e };
     // ACL2 wraps long values at its right margin, so a value runs until the
     // next known key rather than to end of line.
-    let done = keyed_block(body, &["steps", "rules", "warnings", "time"]);
+    let done = keyed_block(body, &["steps", "warnings", "time", "rule"]);
     let pick = |k: &str| -> Option<String> {
         done.iter()
             .find(|(dk, _)| dk == k)
@@ -573,7 +611,7 @@ fn parse_event_data(sub: &crate::session::Submission) -> EventData {
             .filter(|v| !is_nil(v))
     };
     e.prover_steps = pick("steps").and_then(|v| v.parse().ok());
-    e.rules = pick("rules");
+    e.rules = items(&done, "rule");
     e.warnings = pick("warnings");
     e.time = pick("time");
     e
@@ -1262,6 +1300,37 @@ fn resolve_target(units: &[Form], through_line: Option<usize>) -> Option<usize> 
 
 #[cfg(test)]
 mod tests {
+    /// A rune too long for ACL2's margin wraps, and must still come back as
+    /// one item. This is the exact layout ACL2 produced for these three.
+    #[test]
+    fn a_wrapped_rune_stays_one_item() {
+        let body = "rule (:definition endp)\n\
+                    rule \n\
+                    (:forward-chaining\n\
+                    \x20    tree-empty-p-when-not-tree-empty-p-of-tree->right-forward-chaining)\n\
+                    \n\
+                    rule (:fake-rune-for-type-set nil)\n";
+        let pairs = super::keyed_block(body, &["rule"]);
+        let got = super::items(&pairs, "rule");
+        assert_eq!(
+            got,
+            vec![
+                "(:definition endp)",
+                "(:forward-chaining tree-empty-p-when-not-tree-empty-p-of-tree->right-forward-chaining)",
+                "(:fake-rune-for-type-set nil)",
+            ],
+            "item boundaries must survive ACL2's wrapping"
+        );
+        assert!(got.iter().all(|r| !r.contains('\n')),
+                "a rune must not carry ACL2's line breaks");
+    }
+
+    #[test]
+    fn an_empty_rune_list_yields_no_items() {
+        let pairs = super::keyed_block("steps 3\n", &["steps", "rule"]);
+        assert!(super::items(&pairs, "rule").is_empty());
+    }
+
     /// ACL2 fill-wraps its errors, so the message is not one line.
     #[test]
     fn an_error_message_survives_acl2s_line_wrapping() {

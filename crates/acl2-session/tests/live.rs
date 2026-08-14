@@ -447,3 +447,40 @@ fn an_ordinary_failure_still_reports_top_stack_checkpoints() {
         c.top
     );
 }
+
+/// Rules come back as a list of runes, not as a picture of one.
+#[test]
+#[ignore = "needs ACL2"]
+fn rules_are_reported_as_separate_runes() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("runes");
+    let file = dir.join("r.lisp");
+    std::fs::write(
+        &file,
+        "(in-package \"ACL2\")\n\
+         (defun my-app (x y)\n\
+           (if (endp x) y (cons (car x) (my-app (cdr x) y))))\n\
+         (defthm true-listp-of-my-app\n\
+           (implies (true-listp y) (true-listp (my-app x y))))\n",
+    )
+    .unwrap();
+    let mut b = Book::open(&acl2, &file).unwrap();
+    let o = b.sync(None, Duration::from_secs(120)).unwrap();
+    assert!(o.failed.is_none(), "this book should go in");
+
+    let thm = o.admitted.last().expect("the defthm");
+    let rules = &thm.event_data.rules;
+    assert!(rules.len() > 1, "expected several runes, got {rules:?}");
+    assert!(
+        rules.iter().all(|r| !r.contains('\n')),
+        "a rune must not carry ACL2's line breaks: {rules:?}"
+    );
+    assert!(
+        rules.iter().all(|r| r.starts_with('(') && r.ends_with(')')),
+        "each item must be one whole rune: {rules:?}"
+    );
+    assert!(
+        rules.iter().any(|r| r.contains(":induction my-app")),
+        "expected the induction rune among {rules:?}"
+    );
+}

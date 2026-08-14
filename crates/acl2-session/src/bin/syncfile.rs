@@ -57,14 +57,14 @@ fn main() {
         let e = &u.event_data;
         if let Some(s) = e.prover_steps { println!("    {:<14}{s}", "steps"); }
         if let Some(t) = &e.time { wrap("time", t, 4, 70); }
-        match &e.rules {
-            Some(r) => wrap("rules", r, 4, 70),
-            None => println!("    {:<14}(not reported)", "rules"),
+        if e.rules.is_empty() {
+            println!("    {:<14}(not reported)", "rules");
+        } else {
+            wrap("rules", &e.rules.join(" "), 4, 70);
         }
         if let Some(w) = &e.warnings { wrap("warnings", w, 4, 70); }
         for ev in &u.inner {
-            let r = ev.rules.as_deref().unwrap_or("nil");
-            wrap(&format!("  {}", ev.name), r, 4, 70);
+            wrap(&format!("  {}", ev.name), &ev.rules.join(" "), 4, 70);
         }
         if u.inner_total > u.inner.len() {
             println!("    {:<14}({} shown of {}+)", "", u.inner.len(), u.inner_total);
