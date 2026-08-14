@@ -330,7 +330,12 @@ const CLEAR_STALE: &str = "(acl2::pprogn \
 /// structured envelope. Only PROVE is removed, so any other inhibition they
 /// chose is respected, and gag-mode is left alone -- `:goals` still yields the
 /// induction narrative while avoiding the six-figure waterfall dumps.
-const OWN_OUTPUT: &str = "(acl2::er-progn     (acl2::set-inhibit-output-lst       (acl2::remove-eq 'acl2::prove (acl2::@ acl2::inhibit-output-lst)))     (acl2::value acl2::nil))";
+const OWN_OUTPUT: &str = "(acl2::prog2$ \
+    (acl2::cw \"~%<<<ASS-DATA inhibit ~x0>>>~%\" (acl2::@ acl2::inhibit-output-lst)) \
+    (acl2::er-progn \
+      (acl2::set-inhibit-output-lst \
+        (acl2::remove-eq 'acl2::prove (acl2::@ acl2::inhibit-output-lst))) \
+      (acl2::value acl2::nil)))";
 
 /// Report the events ACL2 recorded *inside* this unit.
 ///
@@ -537,6 +542,8 @@ pub struct Book {
     base_command_number: Option<i64>,
     /// Set when an undo could not be verified; the next sync rebuilds.
     dirty: bool,
+    /// `inhibit-output-lst` as inherited, before the server removed PROVE.
+    inherited_inhibit: Option<String>,
 }
 
 /// Enough to finish recording a unit whose deadline expired mid-flight.
@@ -565,10 +572,12 @@ impl Book {
             pending: None,
             base_command_number: None,
             dirty: false,
+            inherited_inhibit: None,
         };
         // A baseline label, so "roll back to the empty prefix" is the same
         // operation as any other rollback rather than a special case.
-        b.session.submit(OWN_OUTPUT, Duration::from_secs(60))?;
+        let sub = b.session.submit(OWN_OUTPUT, Duration::from_secs(60))?;
+        b.inherited_inhibit = sub.get("inhibit").map(str::to_string);
         b.plant_base_label()?;
         Ok(b)
     }
@@ -602,6 +611,29 @@ impl Book {
         let sub = self.session.submit(&body, Duration::from_secs(60))?;
         self.base_command_number = sub.get("cmd").and_then(|v| v.parse().ok());
         Ok(())
+    }
+
+    /// `inhibit-output-lst` as the user's environment left it, before the
+    /// server removed PROVE from it.
+    ///
+    /// Exposed so a client rendering the log to a human can respect what the
+    /// user actually asked for. The server over-captures on purpose -- PROVE
+    /// inhibition silently disables output saving, losing the induction
+    /// narrative permanently -- but over-capturing is not a licence to
+    /// over-display.
+    pub fn inherited_inhibit_output(&self) -> Option<&str> {
+        self.inherited_inhibit.as_deref()
+    }
+
+    /// Whether the server had to re-enable PROVE output to capture proofs.
+    ///
+    /// True means the log contains prover output the user's own session would
+    /// have suppressed; a human-facing client should say so rather than just
+    /// showing it.
+    pub fn prove_output_overridden(&self) -> bool {
+        self.inherited_inhibit
+            .as_deref()
+            .map_or(false, |v| v.to_lowercase().contains("prove"))
     }
 
     /// The command number the world should be at with the current prefix.

@@ -41,6 +41,12 @@ fn main() {
     let mut b = Book::open(&acl2, &book).expect("open book");
     let o = b.sync(None, Duration::from_secs(300)).expect("sync");
 
+    if b.prove_output_overridden() {
+        println!(
+            "note: PROVE output re-enabled for capture (inherited inhibit-output-lst was {})",
+            b.inherited_inhibit_output().unwrap_or("?")
+        );
+    }
     println!("\n{}  ({} units synced)\n", book.display(),
              o.admitted.len() + usize::from(o.failed.is_some()));
 
