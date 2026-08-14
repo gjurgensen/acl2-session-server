@@ -123,13 +123,30 @@ struct Entry {
 /// of megabytes, and "I can go back and look" is worth far more than the bytes.
 pub struct OutputStore {
     dir: PathBuf,
-    session: u64,
+    session: String,
     next: u64,
     index: HashMap<String, Entry>,
 }
 
 impl OutputStore {
-    pub fn new(session: u64) -> io::Result<OutputStore> {
+    /// A store of its own, sharing nothing with any other.
+    ///
+    /// The id is minted here rather than supplied, because a caller that
+    /// derives one can collide. This previously took the process id, which was
+    /// unique while one process held one session -- and stopped being unique
+    /// the moment a registry held several. Two sessions then shared a directory
+    /// *and* a key space, so each handed out `s<pid>:f1`, and asking one
+    /// session for its own handle silently returned another session's output.
+    /// Worse, closing either session removed the shared directory and broke
+    /// every other session's handles.
+    pub fn new() -> io::Result<OutputStore> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let session = format!(
+            "{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::SeqCst)
+        );
         let dir = std::env::temp_dir().join(format!("acl2-session-out-{session}"));
         std::fs::create_dir_all(&dir)?;
         Ok(OutputStore { dir, session, next: 0, index: HashMap::new() })
@@ -233,13 +250,8 @@ impl Drop for OutputStore {
 mod tests {
     use super::*;
 
-    /// A store per test. Tests run in parallel and every store owns (and on
-    /// drop deletes) its own directory, so they must not share a session id.
     fn store() -> OutputStore {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static N: AtomicU64 = AtomicU64::new(0);
-        let id = (std::process::id() as u64) * 1000 + N.fetch_add(1, Ordering::SeqCst);
-        OutputStore::new(id).unwrap()
+        OutputStore::new().unwrap()
     }
 
     const BODY: &str = "one\ntwo\nSubgoal *1/2\nfour\nfive\nsix\nSubgoal *1/1\neight";
@@ -362,6 +374,26 @@ Q.E.D.";
         assert!(!is_goal_header("Goal of NIL, see :DOC nil-goal"));
         assert!(!is_goal_header("(implies (not (consp x)) (not x))"));
         assert!(!is_goal_header(""));
+    }
+
+    /// Two stores must share neither a key space nor a directory: one session
+    /// asking for its own handle must never receive another session's output,
+    /// and closing one must not break the other.
+    #[test]
+    fn stores_are_independent() {
+        let mut a = store();
+        let mut b = store();
+        let ra = a.put("from A").unwrap();
+        let rb = b.put("from B").unwrap();
+        assert_ne!(ra, rb, "first handles of two stores must differ");
+        assert_eq!(a.get(&ra, Slice::All).unwrap().text, "from A");
+        assert_eq!(b.get(&rb, Slice::All).unwrap().text, "from B");
+        // A's handle means nothing to B, rather than meaning the wrong thing.
+        assert!(b.get(&ra, Slice::All).is_err());
+
+        drop(b);
+        assert_eq!(a.get(&ra, Slice::All).unwrap().text, "from A",
+                   "closing one session must not disturb another");
     }
 
     #[test]
