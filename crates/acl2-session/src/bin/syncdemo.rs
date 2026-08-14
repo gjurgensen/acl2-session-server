@@ -192,11 +192,33 @@ fn main() {
     expect(!f.checkpoints.sub.is_empty() || !f.checkpoints.top.is_empty(),
            "checkpoints survive nesting", &mut fails);
 
+    // Stale-state regression. A failure that runs no prover -- here a bad
+    // include-book -- must not inherit the checkpoints of a proof that failed
+    // earlier in the same session. gag-state-saved and last-event-data persist
+    // until overwritten, and such a failure overwrites neither.
+    write(&book, &["(in-package \"ACL2\")", f_alpha,
+                   "(defthm stale-bait (equal (alpha x) x))"]);
+    let o = b.sync(None, DEADLINE).expect("sync 9a");
+    report(&b, "prime the stale state with a failed proof", &o);
+    expect(o.failed.as_ref().map_or(false, |f| !f.checkpoints.top.is_empty()),
+           "the proof failure does report checkpoints", &mut fails);
+
+    write(&book, &["(in-package \"ACL2\")", f_alpha,
+                   "(defthm stale-bait (equal (alpha nil) nil))",
+                   "(include-book \"no/such/book/anywhere\" :dir :system)"]);
+    let o = b.sync(None, DEADLINE).expect("sync 9b");
+    report(&b, "a non-proof failure must not inherit them", &o);
+    let f = o.failed.as_ref().expect("the include-book fails");
+    expect(f.checkpoints.top.is_empty() && f.checkpoints.sub.is_empty(),
+           "no checkpoints are attributed to the include-book failure", &mut fails);
+    expect(f.checkpoints.abort_cause.is_none(),
+           "and no abort cause is invented for it", &mut fails);
+
     // Exercise rebuild-by-replay directly. Its real trigger -- a rollback that
     // cannot be verified -- is not reproducible on demand, so drive the
     // mechanism explicitly and check the world it leaves behind.
     println!("── rebuild by replay (mechanism, driven directly)");
-    b.rebuild(4, DEADLINE).expect("rebuild");
+    b.rebuild(2, DEADLINE).expect("rebuild");
     println!("   rebuilds={}", b.rebuilds());
     let o = b.sync(None, DEADLINE).expect("sync after rebuild");
     println!(
@@ -206,12 +228,9 @@ fn main() {
         o.failed.is_some()
     );
     expect(b.rebuilds() == 1, "one rebuild recorded", &mut fails);
-    expect(o.reused == 4, "the replayed prefix is recognised as reusable", &mut fails);
-    // The file now ends with the deliberately failing encapsulate, so the two
-    // good units go on top and the run stops at it -- same as before rebuild.
-    expect(o.admitted.len() == 2, "the two good units are admitted on top", &mut fails);
-    expect(o.failed.as_ref().map(|f| f.index) == Some(6),
-           "and the run stops at the failing encapsulate", &mut fails);
+    expect(o.reused == 2, "the replayed prefix is recognised as reusable", &mut fails);
+    expect(o.failed.as_ref().map(|f| f.index) == Some(3),
+           "and the run stops at the failing include-book again", &mut fails);
 
     let _ = std::fs::remove_dir_all(&dir);
     if fails > 0 {

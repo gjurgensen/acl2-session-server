@@ -186,6 +186,18 @@ impl From<io::Error> for SyncError {
     }
 }
 
+/// Clear the state ACL2 leaves behind from earlier events.
+///
+/// `gag-state-saved` and `last-event-data` persist until something overwrites
+/// them, and a failure that ran no prover -- a bad `include-book`, a translate
+/// error -- overwrites neither. Without this, such a failure inherits the
+/// previous proof's checkpoints and rules and reports them as its own.
+/// Measured: a failing `include-book` after a failed `defthm` still reported
+/// `(EQUAL (ALPHA X) X)` as its checkpoint.
+///
+/// Both are state globals, so clearing them does not touch the world.
+const CLEAR_STALE: &str = "(acl2::pprogn     (acl2::f-put-global 'acl2::gag-state-saved acl2::nil acl2::state)     (acl2::f-put-global 'acl2::last-event-data acl2::nil acl2::state)     (acl2::value :invisible))";
+
 /// Report what ACL2 recorded about the event just executed.
 ///
 /// Must run *before* the `deflabel`: `get-event-data` describes the
@@ -493,7 +505,7 @@ impl Book {
         self.label_gen += 1;
         let label = self.label_gen;
         let body = format!(
-            "{text}\n{EVENT_DATA_PROBE}\n\
+            "{CLEAR_STALE}\n{text}\n{EVENT_DATA_PROBE}\n\
              (acl2::with-output :off :all (acl2::deflabel {}))\n\
              (acl2::prog2$ (acl2::cw \"~%<<<ASS-DATA cmd ~x0>>>~%\" \
                (acl2::max-absolute-command-number (acl2::w acl2::state))) \
