@@ -12,9 +12,10 @@
 // This module is pure logic; all FFI lives in pty.rs and session.rs.
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use crate::session::{Outcome, Session};
+use crate::session::{Outcome, Session, SessionControl};
 use crate::output::{OutputRef, OutputSlice, OutputStore, Slice};
 use crate::split::{split, Form, SplitError};
 
@@ -30,7 +31,52 @@ struct Admitted {
     /// `max-absolute-command-number` immediately after admission, used to
     /// verify that a rollback landed where we believe it did.
     command_number: Option<i64>,
+    /// `current-package` immediately after admission. Recorded because the
+    /// reader's package is *state*, not world: `ubu!` will not restore it, so
+    /// a rollback across a sticky `(in-package ...)` re-establishes it from
+    /// here.
+    package: Option<String>,
     output_ref: OutputRef,
+}
+
+/// How far the deadline of one call has been spent.
+///
+/// One deadline bounds the whole call -- the tool docs promise exactly that --
+/// so every submission a call makes draws down the same budget. Passing the
+/// full deadline to each unit instead made a 100-unit book of 19-second proofs
+/// under `deadline_seconds: 20` run for over half an hour.
+///
+/// Public because `rebuild` is, and a caller invoking a rebuild directly
+/// supplies the budget the replay draws down.
+pub struct Budget {
+    total: Duration,
+    started: Instant,
+}
+
+/// The floor under bookkeeping submissions -- rollbacks and the post-failure
+/// probes. A submission sent with a zero deadline still goes in flight and
+/// instantly times out, wedging the session behind our own bookkeeping; and a
+/// genuine failure at budget exhaustion would lose its envelope. These are
+/// sub-second in practice, so the floor is the bound on how far a call can
+/// overrun its deadline, not a cost every call pays.
+const PROBE_FLOOR: Duration = Duration::from_secs(10);
+
+impl Budget {
+    pub fn new(total: Duration) -> Budget {
+        Budget { total, started: Instant::now() }
+    }
+
+    /// What is left for proof work. Zero is meaningful: a unit submitted with
+    /// nothing left goes in flight and reports as such, which is the correct
+    /// shape -- ACL2 keeps working and the caller resumes.
+    fn remaining(&self) -> Duration {
+        self.total.saturating_sub(self.started.elapsed())
+    }
+
+    /// What is left, floored for bookkeeping. See [`PROBE_FLOOR`].
+    fn floored(&self) -> Duration {
+        self.remaining().max(PROBE_FLOOR)
+    }
 }
 
 /// What ACL2 recorded about an event, read from `get-event-data` rather than
@@ -48,12 +94,33 @@ struct Admitted {
 /// probe rather than recovered from the picture.
 #[derive(Debug, Clone, Default)]
 pub struct EventData {
-    pub prover_steps: Option<u64>,
+    /// Signed, and the sign is load-bearing: ACL2 records a step-limited
+    /// event as the *negative* of its limit -- `-200` for "exceeded a limit
+    /// of 200". An unsigned parse silently dropped the field, making a
+    /// step-limited failure indistinguishable from an ordinary one, which is
+    /// precisely the diverging-versus-slow distinction the limit exists for.
+    pub prover_steps: Option<i64>,
     /// Runes the proof used, one per entry.
     pub rules: Vec<String>,
     pub warnings: Option<String>,
     /// `(prove print proof-tree other)`, in seconds.
     pub time: Option<String>,
+    /// Hints that fired, one per entry -- `((:use lemma))` and friends.
+    /// Answers "did my hint do anything", which otherwise needs the log.
+    pub hint_events: Vec<String>,
+    /// Rules that caused case splits, when ACL2 recorded any. The "why did
+    /// this explode into cases" answer.
+    pub splitter_rules: Vec<String>,
+}
+
+impl EventData {
+    /// The prover step limit this event ran out of, when it did.
+    pub fn step_limit_reached(&self) -> Option<u64> {
+        match self.prover_steps {
+            Some(n) if n < 0 => Some(n.unsigned_abs()),
+            _ => None,
+        }
+    }
 }
 
 // NOTE on compound forms -- `progn`, `encapsulate`, and every macro that
@@ -89,6 +156,36 @@ pub struct InnerEvent {
     pub abort_causes: Option<String>,
     /// Runes this inner event used, one per entry.
     pub rules: Vec<String>,
+    /// The event's kind -- `defun`, `defthm`, `verify-guards` -- read from
+    /// what ACL2 recorded, so a failure can say *what kind of thing* failed
+    /// without touching prover prose.
+    pub kind: Option<String>,
+    /// Whether ACL2 recorded a `namex` for this event. The failing event is
+    /// the one *without* one -- it never got far enough to name anything --
+    /// which identifies it even when no proof aborted (a translate-level
+    /// failure has no `abort-causes` at all). `None` past the detail slots.
+    pub has_namex: Option<bool>,
+    /// This event's own prove time, `(prove print proof-tree other)`. For a
+    /// `defines` clique this is "which member was slow", which the outer
+    /// aggregate cannot say.
+    pub time: Option<String>,
+    /// Signed for the same reason as [`EventData::prover_steps`].
+    pub prover_steps: Option<i64>,
+}
+
+/// One key checkpoint: the goal's name and its term.
+#[derive(Debug, Clone)]
+pub struct Checkpoint {
+    /// The goal's name as ACL2 prints it -- `Subgoal *1/2''` -- read from the
+    /// gag state's clause-id. This is exactly what a goal-addressed output
+    /// slice takes, so a client is never reduced to guessing names out of the
+    /// log the envelope was supposed to spare it.
+    pub goal: Option<String>,
+    /// The goal itself, prettified as ACL2 would print it. Layout -- line
+    /// breaks and indentation -- is kept deliberately: it is structure for
+    /// the reader, collapsing it is trivial for a client, and recovering it
+    /// is impossible.
+    pub term: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -96,13 +193,13 @@ pub struct Checkpoints {
     /// Whether `gag-state-saved` was populated at all -- i.e. whether a proof
     /// actually ran. This is what separates `ProofFailure` from `Rejected`.
     pub proof_ran: bool,
-    /// Goals at the top level, prettified as ACL2 would print them.
+    /// Goals at the top level.
     ///
     /// When `pre_revert` is set these are the checkpoints from *before* the
     /// proof reverted to induction, since that is where ACL2 keeps them.
-    pub top: Vec<String>,
+    pub top: Vec<Checkpoint>,
     /// Goals under a top-level induction.
-    pub sub: Vec<String>,
+    pub sub: Vec<Checkpoint>,
     /// How many the prover actually pushed. May exceed the number reported:
     /// the probe reads a fixed number of slots, and the counts say so rather
     /// than letting the client mistake a truncation for the whole story.
@@ -201,8 +298,16 @@ impl FailureReport {
     /// For a bare `defthm` this is the unit itself and adds nothing; for a
     /// `defrule` with prep-lemmas it distinguishes a failing prep-lemma from a
     /// failing main theorem, which the checkpoints alone cannot.
+    ///
+    /// An aborted proof carries `abort-causes`; a translate-level failure
+    /// carries nothing at all -- what identifies it is the *missing* `namex`,
+    /// since the event never got far enough to name anything. Both are
+    /// checked, in that order.
     pub fn failed_event(&self) -> Option<&InnerEvent> {
-        self.inner.iter().find(|e| e.abort_causes.is_some())
+        self.inner
+            .iter()
+            .find(|e| e.abort_causes.is_some())
+            .or_else(|| self.inner.iter().find(|e| e.has_namex == Some(false)))
     }
 }
 
@@ -250,6 +355,40 @@ pub struct EvalResult {
     pub output_ref: OutputRef,
     pub output_lines: usize,
     pub elapsed: Duration,
+}
+
+/// What an interrupt accomplished.
+#[derive(Debug)]
+pub struct InterruptReport {
+    /// The session answered a round-trip after the signal; it is usable.
+    pub ok: bool,
+    /// What ACL2 recorded about the interrupted form. Present when the
+    /// interrupt landed, something was actually in flight, and the recorded
+    /// abort cause really names an interrupt -- an eval body runs no
+    /// stale-state clearing, so anything less specific could describe some
+    /// earlier event.
+    pub interrupted: Option<InterruptEnvelope>,
+}
+
+/// The envelope of an interrupted form: what it was, how long it ran, and
+/// where it stood. The partial output is the record; this is the summary that
+/// used to be a bare `true`.
+#[derive(Debug)]
+pub struct InterruptEnvelope {
+    /// Contains `interrupt` by construction; carried for the client.
+    pub abort_cause: Option<String>,
+    /// The interrupted event, evisc-abbreviated. An outline, not the form.
+    pub event: Option<String>,
+    /// `(prove print proof-tree other)` seconds up to the interrupt.
+    pub time: Option<String>,
+    pub prover_steps: Option<i64>,
+    /// Whatever the prover had pushed when interrupted. Empty stacks are the
+    /// common case for an executable-counterpart grind; a waterfall interrupt
+    /// can carry real checkpoints.
+    pub checkpoints: Checkpoints,
+    /// Handle to the partial output captured before the signal.
+    pub output_ref: Option<OutputRef>,
+    pub output_lines: usize,
 }
 
 /// What resuming an in-flight unit produced.
@@ -366,14 +505,34 @@ const CLEAR_STALE: &str = "(acl2::pprogn \
 /// structured envelope. Only PROVE is removed, so any other inhibition they
 /// chose is respected, and gag-mode is left alone -- `:goals` still yields the
 /// induction narrative while avoiding the six-figure waterfall dumps.
+///
+/// The two recorded values travel in a BEGIN/END block, not one-line markers:
+/// ACL2's fmt wraps `~x` at the right margin, and a one-line marker whose
+/// value wraps loses its `>>>` and silently drops the datum. A books path
+/// deeper than the margin did exactly that, leaving `books_dir` empty and
+/// `certify` falling back to the checkout walk. The block parser tolerates
+/// wrapping by construction.
 const OWN_OUTPUT: &str = "(acl2::prog2$ \
-    (acl2::cw \"~%<<<ASS-DATA inhibit ~x0>>>~%<<<ASS-DATA sbd ~x1>>>~%\" \
+    (acl2::cw \"~%<<<ASS-BEGIN env>>>~%inhibit ~x0~%sbd ~x1~%<<<ASS-END env>>>~%\" \
       (acl2::@ acl2::inhibit-output-lst) \
       (acl2::system-books-dir acl2::state)) \
     (acl2::er-progn \
       (acl2::set-inhibit-output-lst \
         (acl2::remove-eq 'acl2::prove (acl2::@ acl2::inhibit-output-lst))) \
       (acl2::value acl2::nil)))";
+
+/// Report the command number and current package, one short marker each.
+///
+/// `cmd` is how every fast path is verified (P3): rollback and eval-undo
+/// check the world landed where the record says. `pkg` records the one thing
+/// `ubu!` cannot restore -- the reader's package is state, not world -- so
+/// rollback re-establishes it explicitly. Both values are short; the one-line
+/// marker protocol is safe for them (see `Submission::data`).
+const CMD_PROBE: &str = "(acl2::prog2$ \
+    (acl2::cw \"~%<<<ASS-DATA cmd ~x0>>>~%<<<ASS-DATA pkg ~x1>>>~%\" \
+      (acl2::max-absolute-command-number (acl2::w acl2::state)) \
+      (acl2::f-get-global 'acl2::current-package acl2::state)) \
+    (acl2::value :invisible))";
 
 /// Report the events ACL2 recorded *inside* this unit.
 ///
@@ -397,6 +556,13 @@ const OWN_OUTPUT: &str = "(acl2::prog2$ \
 /// violation that fails the *unit* the probe is spliced into, not just the
 /// probe. Measured: `(alistp (@ event-data-fal))` is `nil` after two events,
 /// while `(strip-cars (true-list-fix ...))` gives both names.
+///
+/// Per detail slot, alongside the rules and abort causes: the event's kind
+/// (from `event`, falling back to `form` when its head is a symbol -- the
+/// `verify-guards` entry records its form as a fmt string), whether a `namex`
+/// was recorded (the failing entry is the one without), and the entry's own
+/// `time` and `prover-steps-counted` -- which member of a clique was slow,
+/// which the aggregate outer numbers cannot say.
 const INNER_EVENTS_PROBE: &str = r#"(acl2::let*
   ((acl2::f0 (acl2::@ acl2::event-data-fal))
    (acl2::e0 (acl2::and (acl2::consp acl2::f0) (acl2::car acl2::f0)))
@@ -406,7 +572,13 @@ const INNER_EVENTS_PROBE: &str = r#"(acl2::let*
    (acl2::e2 (acl2::and (acl2::consp acl2::f2) (acl2::car acl2::f2)))
    (acl2::d0 (acl2::and (acl2::consp acl2::e0) (acl2::car (acl2::cdr acl2::e0))))
    (acl2::d1 (acl2::and (acl2::consp acl2::e1) (acl2::car (acl2::cdr acl2::e1))))
-   (acl2::d2 (acl2::and (acl2::consp acl2::e2) (acl2::car (acl2::cdr acl2::e2)))))
+   (acl2::d2 (acl2::and (acl2::consp acl2::e2) (acl2::car (acl2::cdr acl2::e2))))
+   (acl2::ev0 (acl2::cdr (acl2::assoc-eq 'acl2::event acl2::d0)))
+   (acl2::ev1 (acl2::cdr (acl2::assoc-eq 'acl2::event acl2::d1)))
+   (acl2::ev2 (acl2::cdr (acl2::assoc-eq 'acl2::event acl2::d2)))
+   (acl2::fo0 (acl2::cdr (acl2::assoc-eq 'acl2::form acl2::d0)))
+   (acl2::fo1 (acl2::cdr (acl2::assoc-eq 'acl2::form acl2::d1)))
+   (acl2::fo2 (acl2::cdr (acl2::assoc-eq 'acl2::form acl2::d2))))
   (acl2::prog2$
     (acl2::cw "~%<<<ASS-BEGIN inner>>>~%")
     (acl2::prog2$
@@ -422,16 +594,63 @@ const INNER_EVENTS_PROBE: &str = r#"(acl2::let*
           (acl2::cw "~*0" (acl2::list "" "r2rune ~x*~%" "r2rune ~x*~%" "r2rune ~x*~%"
                             (acl2::cdr (acl2::assoc-eq 'acl2::rules acl2::d2))))
           (acl2::prog2$
-            (acl2::cw "a0 ~x0~%a1 ~x1~%a2 ~x2~%<<<ASS-END inner>>>~%"
+            (acl2::cw "a0 ~x0~%a1 ~x1~%a2 ~x2~%k0 ~x3~%k1 ~x4~%k2 ~x5~%nx0 ~x6~%nx1 ~x7~%nx2 ~x8~%"
               (acl2::cdr (acl2::assoc-eq 'acl2::abort-causes acl2::d0))
               (acl2::cdr (acl2::assoc-eq 'acl2::abort-causes acl2::d1))
-              (acl2::cdr (acl2::assoc-eq 'acl2::abort-causes acl2::d2)))
-            (acl2::value :invisible))))))))"#;
+              (acl2::cdr (acl2::assoc-eq 'acl2::abort-causes acl2::d2))
+              (acl2::or (acl2::and (acl2::consp acl2::ev0) (acl2::car acl2::ev0))
+                        (acl2::and (acl2::consp acl2::fo0)
+                                   (acl2::symbolp (acl2::car acl2::fo0))
+                                   (acl2::car acl2::fo0)))
+              (acl2::or (acl2::and (acl2::consp acl2::ev1) (acl2::car acl2::ev1))
+                        (acl2::and (acl2::consp acl2::fo1)
+                                   (acl2::symbolp (acl2::car acl2::fo1))
+                                   (acl2::car acl2::fo1)))
+              (acl2::or (acl2::and (acl2::consp acl2::ev2) (acl2::car acl2::ev2))
+                        (acl2::and (acl2::consp acl2::fo2)
+                                   (acl2::symbolp (acl2::car acl2::fo2))
+                                   (acl2::car acl2::fo2)))
+              (acl2::if (acl2::assoc-eq 'acl2::namex acl2::d0) 'acl2::yes 'acl2::no)
+              (acl2::if (acl2::assoc-eq 'acl2::namex acl2::d1) 'acl2::yes 'acl2::no)
+              (acl2::if (acl2::assoc-eq 'acl2::namex acl2::d2) 'acl2::yes 'acl2::no))
+            (acl2::prog2$
+              (acl2::cw "t0 ~x0~%t1 ~x1~%t2 ~x2~%s0 ~x3~%s1 ~x4~%s2 ~x5~%<<<ASS-END inner>>>~%"
+                (acl2::cdr (acl2::assoc-eq 'acl2::time acl2::d0))
+                (acl2::cdr (acl2::assoc-eq 'acl2::time acl2::d1))
+                (acl2::cdr (acl2::assoc-eq 'acl2::time acl2::d2))
+                (acl2::cdr (acl2::assoc-eq 'acl2::prover-steps-counted acl2::d0))
+                (acl2::cdr (acl2::assoc-eq 'acl2::prover-steps-counted acl2::d1))
+                (acl2::cdr (acl2::assoc-eq 'acl2::prover-steps-counted acl2::d2)))
+              (acl2::value :invisible)))))))))"#;
 
 /// ACL2 prints a string with `~x` in quotes; the value is the text inside.
 fn unquote(v: &str) -> Option<String> {
     let t = v.trim();
     t.strip_prefix('"').and_then(|t| t.strip_suffix('"')).map(str::to_string)
+}
+
+/// The package a unit switches to, when the unit is a bare top-level
+/// `(in-package "P")` and nothing else.
+///
+/// Lexical on purpose: this decides only whether the *second phase* runs, and
+/// the second phase re-issues a form the wrapper already admitted. The head
+/// symbol may arrive qualified or oddly cased. A package name containing `"`
+/// or `\` is declined rather than escaped -- such a unit then simply behaves
+/// as before the second phase existed (the switch reverts).
+fn in_package_target(text: &[u8]) -> Option<String> {
+    let n = crate::split::normalize(text);
+    let s = std::str::from_utf8(&n).ok()?.trim().to_string();
+    let body = s.strip_prefix('(')?.strip_suffix(')')?;
+    let mut it = body.splitn(2, ' ');
+    if symbol_name_of(it.next()?) != "in-package" {
+        return None;
+    }
+    let name = it.next()?.trim();
+    let name = name.strip_prefix('"')?.strip_suffix('"')?;
+    if name.is_empty() || name.contains('"') || name.contains('\\') {
+        return None;
+    }
+    Some(name.to_string())
 }
 
 /// How many inner events the probe reads detail (abort causes, rules) for.
@@ -467,10 +686,22 @@ fn items(pairs: &[(String, String)], key: &str) -> Vec<String> {
         .collect()
 }
 
+/// A probe-printed symbol, case- and package-insensitively: `DEFUN`,
+/// `ACL2::DEFUN` and `defun` are all the same answer. Symbols print
+/// package-qualified whenever the session's current package does not see
+/// them, so a parser keying on the printed text must strip the qualifier.
+fn symbol_name_of(v: &str) -> String {
+    let t = v.trim();
+    let t = t.rsplit("::").next().unwrap_or(t);
+    t.to_ascii_lowercase()
+}
+
 fn parse_inner(sub: &crate::session::Submission) -> (Vec<InnerEvent>, usize) {
     let Some(body) = sub.block("inner") else { return (Vec::new(), 0) };
     let pairs = keyed_block(body, &["iname", "a0", "a1", "a2",
-                                    "r0rune", "r1rune", "r2rune"]);
+                                    "r0rune", "r1rune", "r2rune",
+                                    "k0", "k1", "k2", "nx0", "nx1", "nx2",
+                                    "t0", "t1", "t2", "s0", "s1", "s2"]);
     let get = |k: &str| pairs.iter().find(|(pk, _)| pk == k)
         .map(|(_, v)| v.trim().to_string()).filter(|v| !is_nil(v));
     // Every name, not a sample of them. A `defines` clique introduces far more
@@ -487,22 +718,34 @@ fn parse_inner(sub: &crate::session::Submission) -> (Vec<InnerEvent>, usize) {
     // a `progn` of four theorems whose fourth fails: names come back
     // `(p4-bogus p3 p2 p1)` with the abort cause at slot 0, not slot 3.
     //
-    // What the limit does cost is the rules used by *non-failing* inner events
+    // What the limit does cost is the detail of *non-failing* inner events
     // past the third, on a form that failed. Raising it means more `~*` passes,
     // one per slot. Either way a reader must be told where the detail stops,
     // since an entry with no rules is otherwise indistinguishable from one
     // whose rules were never read -- see `INNER_DETAIL_SLOTS`.
-    let detail = [("a0", "r0rune"), ("a1", "r1rune"), ("a2", "r2rune")];
+    let detail = [("a0", "r0rune", "k0", "nx0", "t0", "s0"),
+                  ("a1", "r1rune", "k1", "nx1", "t1", "s1"),
+                  ("a2", "r2rune", "k2", "nx2", "t2", "s2")];
     debug_assert_eq!(detail.len(), INNER_DETAIL_SLOTS);
     let mut out = Vec::new();
     for (i, name) in names.iter().enumerate() {
         // Names are cheap and complete; the per-event detail is not, and is
         // read for the first few only.
-        let (a, r) = detail.get(i).copied().unwrap_or(("", ""));
+        let d = detail.get(i).copied();
         out.push(InnerEvent {
             name: name.clone(),
-            abort_causes: if a.is_empty() { None } else { get(a) },
-            rules: if r.is_empty() { Vec::new() } else { items(&pairs, r) },
+            abort_causes: d.and_then(|(a, ..)| get(a)),
+            rules: d.map_or(Vec::new(), |(_, r, ..)| items(&pairs, r)),
+            kind: d.and_then(|(_, _, k, ..)| get(k)).map(|v| symbol_name_of(&v)),
+            // Printed as yes/no rather than t/nil, because a nil would be
+            // indistinguishable here from the value having gone missing.
+            has_namex: d
+                .and_then(|(_, _, _, nx, ..)| get(nx))
+                .map(|v| symbol_name_of(&v) == "yes"),
+            time: d
+                .and_then(|(.., t, _)| get(t))
+                .map(|v| v.split_whitespace().collect::<Vec<_>>().join(" ")),
+            prover_steps: d.and_then(|(.., s)| get(s)).and_then(|v| v.parse().ok()),
         });
     }
     let total = out.len();
@@ -524,8 +767,16 @@ const EVENT_DATA_PROBE: &str = r#"(acl2::prog2$
       (acl2::list "" "rule ~x*~%" "rule ~x*~%" "rule ~x*~%"
         (acl2::get-event-data 'acl2::rules acl2::state)))
     (acl2::prog2$
-      (acl2::cw "<<<ASS-END evd>>>~%")
-      (acl2::value :invisible))))"#;
+      (acl2::cw "~*0"
+        (acl2::list "" "hint ~x*~%" "hint ~x*~%" "hint ~x*~%"
+          (acl2::get-event-data 'acl2::hint-events acl2::state)))
+      (acl2::prog2$
+        (acl2::cw "~*0"
+          (acl2::list "" "splitter ~x*~%" "splitter ~x*~%" "splitter ~x*~%"
+            (acl2::get-event-data 'acl2::splitter-rules acl2::state)))
+        (acl2::prog2$
+          (acl2::cw "<<<ASS-END evd>>>~%")
+          (acl2::value :invisible))))))"#;
 
 /// Report the key checkpoints of the most recent failed proof.
 ///
@@ -538,9 +789,15 @@ const EVENT_DATA_PROBE: &str = r#"(acl2::prog2$
 /// session. Nothing would ever have mentioned those functions, but "would
 /// never" is not a guarantee, and the names were a real collision surface.
 ///
-/// Split across two `cw` calls because ACL2's fmt directives index arguments
-/// `~x0` to `~x9` only -- eleven values do not fit in one call, and `~xa` is
-/// not an argument reference at all.
+/// Split across several `cw` calls because ACL2's fmt directives index
+/// arguments `~x0` to `~x9` only -- and `~xa` is not an argument reference at
+/// all.
+///
+/// Each slot reports its goal *name* alongside the term, rendered by
+/// `tilde-@-clause-id-phrase` from the gag-info's clause-id -- `Subgoal
+/// *1/2''` exactly as ACL2 prints it, which is exactly what a goal-addressed
+/// output slice takes. Empty when the slot is empty, so the parser can tell
+/// "no name" from "no checkpoint".
 ///
 /// A fixed number of slots is read rather than mapping over the stacks,
 /// because `state` is not available inside a `loop$` body and defining a
@@ -575,14 +832,52 @@ const CHECKPOINT_PROBE: &str = r#"(acl2::let*
       (acl2::abort-info-cause acl2::ai)
       (acl2::if acl2::as acl2::t acl2::nil))
     (acl2::prog2$
-      (acl2::cw "top0 ~x0~%top1 ~x1~%top2 ~x2~%sub0 ~x3~%sub1 ~x4~%sub2 ~x5~%<<<ASS-END ckpt>>>~%"
+      (acl2::cw "top0 ~x0~%top1 ~x1~%top2 ~x2~%sub0 ~x3~%sub1 ~x4~%sub2 ~x5~%"
         (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 0 acl2::tp) :clause) acl2::nil acl2::wr)
         (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 1 acl2::tp) :clause) acl2::nil acl2::wr)
         (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 2 acl2::tp) :clause) acl2::nil acl2::wr)
         (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 0 acl2::sb) :clause) acl2::nil acl2::wr)
         (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 1 acl2::sb) :clause) acl2::nil acl2::wr)
         (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 2 acl2::sb) :clause) acl2::nil acl2::wr))
-      (acl2::value :invisible))))"#;
+      (acl2::prog2$
+        (acl2::cw "tid0 ~@0~%tid1 ~@1~%tid2 ~@2~%sid0 ~@3~%sid1 ~@4~%sid2 ~@5~%<<<ASS-END ckpt>>>~%"
+          (acl2::if (acl2::nth 0 acl2::tp)
+            (acl2::tilde-@-clause-id-phrase (acl2::access acl2::gag-info (acl2::nth 0 acl2::tp) :clause-id)) "")
+          (acl2::if (acl2::nth 1 acl2::tp)
+            (acl2::tilde-@-clause-id-phrase (acl2::access acl2::gag-info (acl2::nth 1 acl2::tp) :clause-id)) "")
+          (acl2::if (acl2::nth 2 acl2::tp)
+            (acl2::tilde-@-clause-id-phrase (acl2::access acl2::gag-info (acl2::nth 2 acl2::tp) :clause-id)) "")
+          (acl2::if (acl2::nth 0 acl2::sb)
+            (acl2::tilde-@-clause-id-phrase (acl2::access acl2::gag-info (acl2::nth 0 acl2::sb) :clause-id)) "")
+          (acl2::if (acl2::nth 1 acl2::sb)
+            (acl2::tilde-@-clause-id-phrase (acl2::access acl2::gag-info (acl2::nth 1 acl2::sb) :clause-id)) "")
+          (acl2::if (acl2::nth 2 acl2::sb)
+            (acl2::tilde-@-clause-id-phrase (acl2::access acl2::gag-info (acl2::nth 2 acl2::sb) :clause-id)) ""))
+        (acl2::value :invisible)))))"#;
+
+/// What ACL2 recorded about the form that was just interrupted.
+///
+/// `last-event-data` survives an interrupt on current ACL2: measured,
+/// `(abort-causes interrupt)`, the true elapsed prove time, and the
+/// interrupted event are all present. (An earlier measurement on an older
+/// build recorded the contrary; it no longer holds.) The event form can be
+/// arbitrarily large, so it prints under an evisc tuple -- this is an
+/// envelope, not the record; the record is the partial capture.
+///
+/// The caller trusts this only when `iabort` actually names an interrupt:
+/// an eval body runs no `CLEAR_STALE`, so after interrupting one of those,
+/// `last-event-data` may still describe some earlier event.
+const INTERRUPT_PROBE: &str = r#"(acl2::prog2$
+  (acl2::cw "~%<<<ASS-BEGIN intr>>>~%iabort ~x0~%itime ~x1~%isteps ~x2~%"
+    (acl2::get-event-data 'acl2::abort-causes acl2::state)
+    (acl2::get-event-data 'acl2::time acl2::state)
+    (acl2::get-event-data 'acl2::prover-steps-counted acl2::state))
+  (acl2::prog2$
+    (acl2::cw "ievent ~Y01~%<<<ASS-END intr>>>~%"
+      (acl2::or (acl2::get-event-data 'acl2::event acl2::state)
+                (acl2::get-event-data 'acl2::form acl2::state))
+      (acl2::evisc-tuple 3 8 acl2::nil acl2::nil))
+    (acl2::value :invisible)))"#;
 
 /// Split a `key value` block into pairs, tolerating values that ACL2 wrapped
 /// across lines.
@@ -617,7 +912,8 @@ fn parse_checkpoints(sub: &crate::session::Submission) -> Checkpoints {
     let mut c = Checkpoints::default();
     let Some(body) = sub.block("ckpt") else { return c };
     let keys = ["gag", "ntop", "nsub", "forced", "abort", "reverted",
-                "top0", "top1", "top2", "sub0", "sub1", "sub2"];
+                "top0", "top1", "top2", "sub0", "sub1", "sub2",
+                "tid0", "tid1", "tid2", "sid0", "sid1", "sid2"];
     let pairs = keyed_block(body, &keys);
     let get = |k: &str| pairs.iter().find(|(pk, _)| pk == k).map(|(_, v)| v.trim().to_string());
     c.proof_ran = get("gag").map_or(false, |v| !is_nil(&v));
@@ -626,14 +922,24 @@ fn parse_checkpoints(sub: &crate::session::Submission) -> Checkpoints {
     c.forced = get("forced").map_or(false, |v| !is_nil(&v));
     c.abort_cause = get("abort").filter(|v| !is_nil(v));
     c.pre_revert = get("reverted").map_or(false, |v| !is_nil(&v));
-    for k in ["top0", "top1", "top2"] {
-        if let Some(v) = get(k).filter(|v| !is_nil(v)) {
-            c.top.push(v);
+    // The goal name arrives on one line; collapse any residual whitespace so
+    // it can be handed straight to a goal-addressed output slice.
+    let goal_of = |k: &str| {
+        get(k)
+            .map(|g| g.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|g| !g.is_empty() && !is_nil(g))
+    };
+    // A term that prettyprints as the literal `nil` is dropped here while
+    // `n_top`/`n_sub` still count it -- the counts are authoritative, the
+    // filter is what keeps genuinely empty slots out.
+    for (term_k, id_k) in [("top0", "tid0"), ("top1", "tid1"), ("top2", "tid2")] {
+        if let Some(v) = get(term_k).filter(|v| !is_nil(v)) {
+            c.top.push(Checkpoint { goal: goal_of(id_k), term: v });
         }
     }
-    for k in ["sub0", "sub1", "sub2"] {
-        if let Some(v) = get(k).filter(|v| !is_nil(v)) {
-            c.sub.push(v);
+    for (term_k, id_k) in [("sub0", "sid0"), ("sub1", "sid1"), ("sub2", "sid2")] {
+        if let Some(v) = get(term_k).filter(|v| !is_nil(v)) {
+            c.sub.push(Checkpoint { goal: goal_of(id_k), term: v });
         }
     }
     c
@@ -645,11 +951,17 @@ fn parse_checkpoints(sub: &crate::session::Submission) -> Checkpoints {
 /// line cut the message mid-sentence -- and worse, could keep a `See :DOC`
 /// while dropping the topic it pointed at. The message runs to the next blank
 /// line, which is where ACL2 ends the paragraph.
+///
+/// The *last* error paragraph, not the first. A unit can print errors without
+/// failing -- `must-fail` and the std testing utilities do exactly that, and
+/// they sit inside `progn`s in real books -- so the first error in a compound
+/// unit may be an expected decoy. The genuine failure is the one the `ld`
+/// stopped at, and nothing prints an error after it.
 pub(crate) fn error_message(output: &str) -> Option<String> {
-    let mut lines = output.lines().skip_while(|l| !l.contains("ACL2 Error"));
-    let first = lines.next()?;
-    let mut msg = first.trim().to_string();
-    for l in lines {
+    let lines: Vec<&str> = output.lines().collect();
+    let at = lines.iter().rposition(|l| l.contains("ACL2 Error"))?;
+    let mut msg = lines[at].trim().to_string();
+    for l in &lines[at + 1..] {
         if l.trim().is_empty() {
             break;
         }
@@ -664,15 +976,18 @@ fn parse_event_data(sub: &crate::session::Submission) -> EventData {
     let Some(body) = sub.block("evd") else { return e };
     // ACL2 wraps long values at its right margin, so a value runs until the
     // next known key rather than to end of line.
-    let done = keyed_block(body, &["steps", "warnings", "time", "rule"]);
+    let done = keyed_block(body, &["steps", "warnings", "time", "rule", "hint", "splitter"]);
     let pick = |k: &str| -> Option<String> {
         done.iter()
             .find(|(dk, _)| dk == k)
             .map(|(_, v)| v.trim().to_string())
             .filter(|v| !is_nil(v))
     };
+    // `parse::<i64>()`: the sign carries the step-limit signal. See the field.
     e.prover_steps = pick("steps").and_then(|v| v.parse().ok());
     e.rules = items(&done, "rule");
+    e.hint_events = items(&done, "hint");
+    e.splitter_rules = items(&done, "splitter");
     e.warnings = pick("warnings");
     e.time = pick("time");
     e
@@ -683,6 +998,10 @@ pub struct Book {
     acl2: PathBuf,
     path: PathBuf,
     session: Session,
+    /// Shared with lock-free readers (abort, status). Created once here and
+    /// threaded into every session this book starts, so a rebuild does not
+    /// orphan the handle a registry already handed out.
+    control: Arc<SessionControl>,
     admitted: Vec<Admitted>,
     label_gen: u64,
     rebuilds: usize,
@@ -691,6 +1010,9 @@ pub struct Book {
     pending: Option<PendingUnit>,
     /// Command number just after the base label, i.e. the empty prefix.
     base_command_number: Option<i64>,
+    /// `current-package` at the empty prefix, as the customization left it.
+    /// The rollback target when everything is undone.
+    base_package: Option<String>,
     /// Set when an undo could not be verified; the next sync rebuilds.
     dirty: bool,
     /// `inhibit-output-lst` as inherited, before the server removed PROVE.
@@ -723,6 +1045,11 @@ struct PendingUnit {
     line_start: usize,
     line_end: usize,
     label: u64,
+    /// The package this unit switches to, when it is a top-level
+    /// `(in-package ...)` that will need its second phase on completion.
+    /// Detected at submission, because the file may change on disk while the
+    /// unit runs.
+    in_package: Option<String>,
 }
 
 impl Book {
@@ -741,34 +1068,68 @@ impl Book {
                 format!("no such book: {}", path.display()),
             )));
         }
-        let session = Session::start(acl2, dir)?;
+        let control = SessionControl::new();
+        let session = Session::start(acl2, dir, control.clone())?;
         let mut b = Book {
             acl2: acl2.to_path_buf(),
             path: path.to_path_buf(),
             session,
+            control,
             admitted: Vec::new(),
             label_gen: 0,
             rebuilds: 0,
             outputs: OutputStore::new()?,
             pending: None,
             base_command_number: None,
+            base_package: None,
             dirty: false,
             inherited_inhibit: None,
             books_dir: None,
             in_flight_output: None,
             build: None,
         };
+        b.post_start_setup()?;
+        Ok(b)
+    }
+
+    /// Everything a fresh ACL2 needs before its first unit.
+    ///
+    /// One function, called from `open` and from `rebuild`, so the recovery
+    /// path cannot drift from the first-start path. A rebuild that skipped
+    /// `OWN_OUTPUT` quietly re-inhibited PROVE under a `(quiet)`
+    /// customization -- losing the induction narrative from every capture
+    /// after the first rebuild, a failure already on record,
+    /// reintroduced by the recovery path -- and kept reporting the
+    /// pre-rebuild environment answers.
+    fn post_start_setup(&mut self) -> Result<(), SyncError> {
+        let sub = self.session.submit(OWN_OUTPUT, Duration::from_secs(60))?;
+        if let Some(body) = sub.block("env") {
+            let pairs = keyed_block(body, &["inhibit", "sbd"]);
+            let get = |k: &str| {
+                pairs
+                    .iter()
+                    .find(|(pk, _)| pk == k)
+                    .map(|(_, v)| v.trim().to_string())
+            };
+            // The inhibit list may wrap; collapse it back to one line.
+            self.inherited_inhibit =
+                get("inhibit").map(|v| v.split_whitespace().collect::<Vec<_>>().join(" "));
+            // A path is a single string atom: fmt may break *before* it, but
+            // never inside it, so after the join it is whole.
+            self.books_dir = get("sbd").as_deref().and_then(unquote).map(PathBuf::from);
+        }
         // A baseline label, so "roll back to the empty prefix" is the same
         // operation as any other rollback rather than a special case.
-        let sub = b.session.submit(OWN_OUTPUT, Duration::from_secs(60))?;
-        b.inherited_inhibit = sub.get("inhibit").map(str::to_string);
-        b.books_dir = sub.get("sbd").and_then(unquote).map(PathBuf::from);
-        b.plant_base_label()?;
-        Ok(b)
+        self.plant_base_label()
     }
 
     pub fn session(&mut self) -> &mut Session {
         &mut self.session
+    }
+
+    /// The control block shared with lock-free readers. See `SessionControl`.
+    pub fn control(&self) -> Arc<SessionControl> {
+        self.control.clone()
     }
 
     /// How many times this book has been rebuilt by replay.
@@ -781,21 +1142,34 @@ impl Book {
         self.rebuilds
     }
 
+    /// Package-qualified, and that is load-bearing: a label name interns in
+    /// whatever package is current when its `deflabel` is *read*, and the
+    /// session's package can now change mid-file (a sticky `in-package`).
+    /// Unqualified names would put labels planted before and after the switch
+    /// in different packages, and a rollback across the switch would then ask
+    /// `ubu!` for a symbol that names nothing.
     fn label_name(genid: u64) -> String {
-        format!("acl2-session-mark-{genid}")
+        format!("acl2::acl2-session-mark-{genid}")
     }
 
     fn plant_base_label(&mut self) -> Result<(), SyncError> {
         let body = format!(
-            "(acl2::with-output :off :all (acl2::deflabel {}))\n\
-             (acl2::prog2$ (acl2::cw \"~%<<<ASS-DATA cmd ~x0>>>~%\" \
-               (acl2::max-absolute-command-number (acl2::w acl2::state))) \
-               (acl2::value :invisible))",
+            "(acl2::with-output :off :all (acl2::deflabel {}))\n{CMD_PROBE}",
             Self::label_name(0)
         );
         let sub = self.session.submit(&body, Duration::from_secs(60))?;
         self.base_command_number = sub.get("cmd").and_then(|v| v.parse().ok());
+        self.base_package = sub.get("pkg").and_then(unquote);
         Ok(())
+    }
+
+    /// The session's persistent package with the current prefix: what the
+    /// last admitted unit left current, or the base if nothing is admitted.
+    fn current_package(&self) -> Option<&str> {
+        match self.admitted.last() {
+            Some(a) => a.package.as_deref(),
+            None => self.base_package.as_deref(),
+        }
     }
 
     /// `inhibit-output-lst` as the user's environment left it, before the
@@ -854,11 +1228,7 @@ impl Book {
         if self.session.is_running() {
             return Err(SyncError::Busy { index: self.running_unit() });
         }
-        let body = format!(
-            "{form}\n(acl2::prog2$ (acl2::cw \"~%<<<ASS-DATA cmd ~x0>>>~%\" \
-               (acl2::max-absolute-command-number (acl2::w acl2::state))) \
-               (acl2::value :invisible))"
-        );
+        let body = format!("{form}\n{CMD_PROBE}");
         let sub = self.session.submit(&body, deadline)?;
         self.finish_eval(sub, deadline)
     }
@@ -878,9 +1248,11 @@ impl Book {
         if let (Some(a), Some(e)) = (after, self.expected_command_number()) {
             if a != e {
                 // Events were introduced. Undo back to the prefix, which is
-                // where the last planted label sits.
+                // where the last planted label sits. Floored: the undo must
+                // run whatever is left of the deadline, because skipping it
+                // leaves events the caller was promised would not persist.
                 let keep = self.admitted.len();
-                world_change = match self.rollback_to(keep, deadline) {
+                world_change = match self.rollback_to(keep, deadline.max(PROBE_FLOOR)) {
                     Ok(()) => WorldChange::Undone,
                     Err(SyncError::RollbackFailed { .. })
                     | Err(SyncError::RollbackUnverified { .. }) => {
@@ -900,10 +1272,9 @@ impl Book {
         })
     }
 
-    /// Round-trip a trivial form to see whether the session is responsive.
-    /// Round-trip a trivial form to see whether the session is responsive.
+    /// Whether the session is answering, without ever making it worse.
     ///
-    /// The three failure answers are genuinely different actions:
+    /// The failure answers are genuinely different actions:
     ///
     /// - `Busy` -- a form is in flight. Working as intended; wait, resume, or
     ///   interrupt. Asked of the session itself rather than of unit
@@ -918,18 +1289,29 @@ impl Book {
     ///   nothing in the test suite can wedge ACL2 on demand, so the branch is
     ///   untested. It is also the answer that matters most when something has
     ///   genuinely gone wrong.
-    /// - `Dead` -- the descriptor itself failed. The process is gone; only a
-    ///   rebuild will help.
+    /// - `Dead` -- the process is gone. Only close-and-reopen will help, and
+    ///   the check comes *first*, because a dead child otherwise wears `Busy`
+    ///   forever: the reader sees EOF and returns, nothing ever completes,
+    ///   and the bookkeeping keeps saying a form is in flight.
     ///
     /// Reporting `Dead` for a session that is merely busy would be the worst
     /// of these, since a client would discard a session that is working.
+    ///
+    /// The probe is a handshake, not a submission. A `submit` probe put the
+    /// probe itself in flight, so timing out on a slow-but-alive session (a
+    /// long GC) *wedged* it: the session then read as busy until something
+    /// drained it, and a later resume reported the probe as a finished eval.
+    /// A health check must not be able to wedge the session it checks.
     pub fn health(&mut self, deadline: Duration) -> Health {
+        if !self.session.alive() {
+            return Health::Dead;
+        }
         if self.session.is_running() {
             return Health::Busy;
         }
-        match self.session.submit("(acl2::value :invisible)", deadline) {
-            Ok(s) if s.outcome != Outcome::StillRunning => Health::Ready,
-            Ok(_) => Health::Unresponsive,
+        match self.session.ping(deadline) {
+            Ok(true) => Health::Ready,
+            Ok(false) => Health::Unresponsive,
             Err(_) => Health::Dead,
         }
     }
@@ -952,59 +1334,78 @@ impl Book {
         if self.session.is_running() {
             return Err(SyncError::Busy { index: self.running_unit() });
         }
+        // One budget for the whole call: units, rollbacks and probes all draw
+        // it down, so the deadline bounds the call as documented rather than
+        // each submission separately. (Session startup during a rebuild sits
+        // outside it, bounded by its own fixed deadlines: a hung
+        // customization file was never this call's proof work.)
+        let budget = Budget::new(deadline);
         if self.dirty {
-            // An undo we could not verify: rebuild rather than trust it.
-            self.rebuild(0, deadline)?;
-            self.dirty = false;
+            // An undo we could not verify: rebuild rather than trust it. With
+            // `keep` 0 nothing is replayed, so this cannot report in-flight;
+            // rebuild itself clears the flag.
+            self.rebuild(0, &budget)?;
         }
         let bytes = std::fs::read(&self.path)?;
         let units = split(&bytes).map_err(SyncError::Split)?;
 
         let mut out = SyncOutcome::default();
-        let target = match resolve_target(&units, through_line) {
-            Some(t) => t,
-            None => return Ok(out), // nothing selected; nothing to do
-        };
-        out.resolved_through = Some(target);
 
         // Longest common prefix by hash. This is the whole diff: the client
         // never says what changed, we just re-derive it.
+        //
+        // The diff runs *before* the target is even resolved: rollback is
+        // driven by the file changing, never by the target. Resolving first
+        // and returning early left the whole stale world in place -- for a
+        // `through_line` above the first unit, or a file emptied of forms --
+        // while reporting `reused: 0` as though nothing were admitted.
         let hashes: Vec<u64> = self.admitted.iter().map(|a| a.hash).collect();
         let keep = common_prefix(&hashes, &units);
         out.reused = keep;
 
         if keep < self.admitted.len() {
             out.rolled_back = self.admitted.len() - keep;
-            match self.rollback_to(keep, deadline) {
+            match self.rollback_to(keep, budget.floored()) {
                 Ok(()) => {}
                 // P3: a fast path that cannot be verified degrades to replay
                 // rather than being trusted. Both an outright rejection and an
                 // unverifiable landing get the same treatment.
                 Err(SyncError::RollbackFailed { .. })
                 | Err(SyncError::RollbackUnverified { .. }) => {
-                    self.rebuild(keep, deadline)?;
                     out.rebuilt = true;
+                    if let Some(f) = self.rebuild(keep, &budget)? {
+                        // The budget ran out mid-replay. The session holds a
+                        // valid shorter prefix plus one unit in flight, which
+                        // is exactly the shape of an ordinary deadline expiry:
+                        // resume finishes the unit, the next sync continues.
+                        out.failed = Some(f);
+                        return Ok(out);
+                    }
                 }
                 Err(e) => return Err(e),
             }
         }
 
+        let target = match resolve_target(&units, through_line) {
+            Some(t) => t,
+            None => return Ok(out), // nothing selected; nothing to admit
+        };
+        out.resolved_through = Some(target);
+
         for (i, u) in units.iter().enumerate().take(target + 1).skip(keep) {
-            let (sub, output_ref) = self.admit_unit(u, i, &bytes, deadline)?;
+            let (sub, output_ref) = self.admit_unit(u, i, &bytes, budget.remaining())?;
             let output_lines = self.outputs.lines(&output_ref).unwrap_or(0);
             match sub.outcome {
                 Outcome::Ok => {
+                    let (inner, inner_total) = parse_inner(&sub);
                     out.admitted.push(UnitReport {
                         index: i,
                         line_start: u.line_start,
                         line_end: u.line_end,
                         elapsed: sub.elapsed,
                         event_data: parse_event_data(&sub),
-                        inner: {
-                            let (i, _) = parse_inner(&sub);
-                            i
-                        },
-                        inner_total: parse_inner(&sub).1,
+                        inner,
+                        inner_total,
                         output_ref,
                         output_lines,
                     });
@@ -1013,8 +1414,14 @@ impl Book {
                     // A failing unit aborts its own `ld`, so the trailing
                     // probes never ran. Ask again in a separate submission:
                     // `gag-state-saved` and `last-event-data` are state
-                    // globals and survive the failure.
-                    let (ed, cp, inner, inner_total) = self.probe_after_failure(deadline);
+                    // globals and survive the failure. Not on a deadline
+                    // expiry, though -- the unit is still *running*, so the
+                    // session cannot answer a probe.
+                    let (ed, cp, inner, inner_total) = if sub.outcome == Outcome::StillRunning {
+                        (EventData::default(), Checkpoints::default(), Vec::new(), 0)
+                    } else {
+                        self.probe_after_failure(budget.floored())
+                    };
                     let status = if sub.outcome == Outcome::StillRunning {
                         Status::DeadlineExceeded
                     } else if cp.proof_ran {
@@ -1123,12 +1530,12 @@ impl Book {
         let label = self.label_gen;
         let body = format!(
             "{CLEAR_STALE}\n{text}\n{EVENT_DATA_PROBE}\n{INNER_EVENTS_PROBE}\n\
-             (acl2::with-output :off :all (acl2::deflabel {}))\n\
-             (acl2::prog2$ (acl2::cw \"~%<<<ASS-DATA cmd ~x0>>>~%\" \
-               (acl2::max-absolute-command-number (acl2::w acl2::state))) \
-               (acl2::value :invisible))",
+             (acl2::with-output :off :all (acl2::deflabel {}))\n{CMD_PROBE}",
             Self::label_name(label)
         );
+        // Named before submission, so a lock-free status reader can say which
+        // unit is running while this call still holds the session.
+        self.control.set_unit(Some(index));
         let sub = self.session.submit(&body, deadline)?;
         if sub.outcome == Outcome::StillRunning {
             // Deadline expired; ACL2 is untouched and still working. Remember
@@ -1139,6 +1546,7 @@ impl Book {
                 line_start: u.line_start,
                 line_end: u.line_end,
                 label,
+                in_package: in_package_target(&bytes[u.start..u.end]),
             });
         }
         let output_ref = self.record_output(&sub)?;
@@ -1149,10 +1557,61 @@ impl Book {
                 line_end: u.line_end,
                 label,
                 command_number: sub.get("cmd").and_then(|v| v.parse().ok()),
+                package: sub.get("pkg").and_then(unquote),
                 output_ref: output_ref.clone(),
             });
+            // Second phase for a unit that is a top-level `(in-package ...)`:
+            // its switch was scoped to the `ld` that just exited, so make it
+            // stick. Unconditional rather than skipped-when-current: the raw
+            // re-issue is idempotent and one round trip, and a staleness bug
+            // in a skip condition here would silently misread every form
+            // after the switch.
+            if let Some(target) = in_package_target(&bytes[u.start..u.end]) {
+                self.make_package_stick(&target, deadline.max(PROBE_FLOOR))?;
+            }
         }
         Ok((sub, output_ref))
+    }
+
+    /// Make a top-level `(in-package "P")` persist beyond its own `ld`.
+    ///
+    /// Inside an `ld`, the reader's package switch reverts when the `ld`
+    /// exits. In a directory whose `acl2-customization.lsp` already
+    /// establishes `P` that is invisible; without the convention, the session
+    /// would read every later form in a different package than the session a
+    /// person gets -- symbols interning elsewhere, definitions "missing" --
+    /// which is precisely the divergence the prefix invariant forbids.
+    ///
+    /// Two phases:
+    /// the unit already went through the normal wrapper (that is what gives
+    /// an unknown package a real failure signal instead of a hung REPL), and
+    /// only then is the switch re-issued raw at the top level, the way a
+    /// person would type it. Raw submission proves nothing by finishing, so
+    /// the effect is verified by reading `current-package` back.
+    fn make_package_stick(&mut self, target: &str, deadline: Duration) -> Result<(), SyncError> {
+        let raw = format!(
+            "(acl2::in-package \"{target}\")\n\
+             (acl2::prog2$ (acl2::cw \"~%<<<ASS-DATA pkg ~x0>>>~%\" \
+               (acl2::f-get-global 'acl2::current-package acl2::state)) \
+               (acl2::value :invisible))"
+        );
+        let sub = self.session.submit_raw(&raw, deadline)?;
+        let now = sub.get("pkg").and_then(unquote);
+        if now.as_deref() != Some(target) {
+            // Should be unreachable -- the form already admitted inside the
+            // wrapper -- but a switch that did not stick means every later
+            // form reads differently than the reference session. Fail loudly
+            // and let replay re-establish the world.
+            self.dirty = true;
+            return Err(SyncError::Io(io::Error::new(
+                io::ErrorKind::Other,
+                format!(
+                    "in-package {target:?} did not persist (session reports {now:?}); \
+                     the next sync will rebuild"
+                ),
+            )));
+        }
+        Ok(())
     }
 
     /// Finish a unit whose deadline expired.
@@ -1194,8 +1653,16 @@ impl Book {
                 line_end: p.line_end,
                 label: p.label,
                 command_number: sub.get("cmd").and_then(|v| v.parse().ok()),
+                package: sub.get("pkg").and_then(unquote),
                 output_ref: output_ref.clone(),
             });
+            // The two-phase treatment applies here exactly as in
+            // `admit_unit`; the pending record carries the detection made
+            // when the unit was submitted, since the file may have changed
+            // on disk while the unit ran.
+            if let Some(target) = p.in_package.clone() {
+                self.make_package_stick(&target, deadline.max(PROBE_FLOOR))?;
+            }
             let (inner, inner_total) = parse_inner(&sub);
             return Ok(Some(Resumed::Admitted(UnitReport {
                 index: p.index,
@@ -1209,7 +1676,7 @@ impl Book {
                 output_lines,
             })));
         }
-        let (ed, cp, inner, inner_total) = self.probe_after_failure(deadline);
+        let (ed, cp, inner, inner_total) = self.probe_after_failure(deadline.max(PROBE_FLOOR));
         let error_line = error_message(&sub.output);
         Ok(Some(Resumed::Failed(FailureReport {
             index: p.index,
@@ -1253,7 +1720,11 @@ impl Book {
     }
 
     /// Abort the unit in flight and make the session usable again.
-    pub fn interrupt(&mut self) -> io::Result<bool> {
+    ///
+    /// Callers that cannot take the session lock ask via the control block
+    /// first (`control().request_abort()`), which makes whatever call is
+    /// blocked on the session hand the lock over within a poll slice.
+    pub fn interrupt(&mut self) -> io::Result<InterruptReport> {
         // A build is a separate process tree, so stopping it is a different
         // act from interrupting the prover -- but a caller asking to stop
         // means both, and leaving a -j build running after "interrupt" said
@@ -1261,21 +1732,80 @@ impl Book {
         if let Some(mut b) = self.build.take() {
             let _ = b.kill();
         }
+        let was_running = self.session.is_running();
         // Capture before interrupting: the form will never report, so this is
         // the only chance to keep what it printed, and the interrupt handshake
         // reads more that would otherwise be mixed in.
         let partial = self.session.captured_so_far();
         let ok = self.session.interrupt()?;
-        if ok {
-            self.pending = None;
-            if let Some(r) = self.in_flight_output.take() {
-                let _ = self.outputs.fill(&r, &partial);
-                // It describes a form that was abandoned rather than the world
-                // as it now stands, which is what `superseded` is for.
-                self.outputs.mark_superseded(&r);
-            }
+        // Filed in *both* arms: after a failed interrupt, the wedged session
+        // is exactly the one whose partial log is the only evidence. The
+        // handle stays linked on failure, so a form that later completes
+        // still fills it with the full record.
+        let mut output_ref = None;
+        let mut output_lines = 0;
+        if let Some(r) = &self.in_flight_output {
+            let _ = self.outputs.fill(r, &partial);
+            output_lines = self.outputs.lines(r).unwrap_or(0);
+            output_ref = Some(r.clone());
         }
-        Ok(ok)
+        if !ok {
+            return Ok(InterruptReport { ok: false, interrupted: None });
+        }
+        self.pending = None;
+        if let Some(r) = self.in_flight_output.take() {
+            // It describes a form that was abandoned rather than the world
+            // as it now stands, which is what `superseded` is for.
+            self.outputs.mark_superseded(&r);
+        }
+        if !was_running {
+            return Ok(InterruptReport { ok: true, interrupted: None });
+        }
+        Ok(InterruptReport {
+            ok: true,
+            interrupted: self.probe_after_interrupt(output_ref, output_lines),
+        })
+    }
+
+    /// Ask ACL2 what it recorded about the form just interrupted.
+    ///
+    /// Best effort, like every post-mortem probe: the envelope must never
+    /// turn a successful interrupt into an error. Returns `None` unless the
+    /// recorded abort cause actually names an interrupt -- see
+    /// `INTERRUPT_PROBE` on why anything less is untrustworthy.
+    fn probe_after_interrupt(
+        &mut self,
+        output_ref: Option<OutputRef>,
+        output_lines: usize,
+    ) -> Option<InterruptEnvelope> {
+        let sub = self.session.submit(INTERRUPT_PROBE, PROBE_FLOOR).ok()?;
+        let body = sub.block("intr")?;
+        let pairs = keyed_block(body, &["iabort", "itime", "isteps", "ievent"]);
+        let get = |k: &str| {
+            pairs
+                .iter()
+                .find(|(pk, _)| pk == k)
+                .map(|(_, v)| v.trim().to_string())
+                .filter(|v| !is_nil(v))
+        };
+        let abort_cause = get("iabort")?;
+        if !abort_cause.to_ascii_lowercase().contains("interrupt") {
+            return None;
+        }
+        let checkpoints = match self.session.submit(CHECKPOINT_PROBE, PROBE_FLOOR) {
+            Ok(s) => parse_checkpoints(&s),
+            Err(_) => Checkpoints::default(),
+        };
+        Some(InterruptEnvelope {
+            abort_cause: Some(abort_cause),
+            event: get("ievent"),
+            time: get("itime")
+                .map(|v| v.split_whitespace().collect::<Vec<_>>().join(" ")),
+            prover_steps: get("isteps").and_then(|v| v.parse().ok()),
+            checkpoints,
+            output_ref,
+            output_lines,
+        })
     }
 
     /// Certify this book with `cert.pl`, waiting up to `deadline`.
@@ -1372,7 +1902,20 @@ impl Book {
     /// Cost runs opposite to intuition -- it is proportional to what is *kept*,
     /// not what is undone. Rolling back one unit of a two-hundred-unit book
     /// replays a hundred and ninety-nine.
-    pub fn rebuild(&mut self, keep: usize, deadline: Duration) -> Result<(), SyncError> {
+    ///
+    /// `Ok(Some(report))` means the budget ran out mid-replay. That is not a
+    /// failure and must not read as one: the session then holds a valid
+    /// *shorter* prefix plus one unit in flight -- the same shape as any
+    /// deadline expiry -- and the caller reports it as such, so resume
+    /// finishes the unit and the next sync carries on. Treating it as
+    /// `ReplayFailed` made a book whose replay exceeds one deadline
+    /// unrecoverable: each sync killed the half-rebuilt session and started
+    /// over.
+    pub fn rebuild(
+        &mut self,
+        keep: usize,
+        budget: &Budget,
+    ) -> Result<Option<FailureReport>, SyncError> {
         let bytes = std::fs::read(&self.path)?;
         let units = split(&bytes).map_err(SyncError::Split)?;
         let keep = keep.min(units.len());
@@ -1381,25 +1924,54 @@ impl Book {
             Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
             _ => PathBuf::from("."),
         };
-        // Assigning drops the old Session, whose Drop kills the child.
-        self.session = Session::start(&self.acl2, &dir)?;
+        // Assigning drops the old Session, whose Drop kills the child. The
+        // control block carries over, so handles held outside the lock keep
+        // addressing this book.
+        self.session = Session::start(&self.acl2, &dir, self.control.clone())?;
         self.admitted.clear();
         self.label_gen = 0;
         self.rebuilds += 1;
-        self.plant_base_label()?;
+        self.post_start_setup()?;
+        // From here the world is right by construction, whatever suspicion
+        // put us on this path -- even a replay that stops short leaves a
+        // valid (shorter) prefix. Clearing now, not at the end, keeps a
+        // mid-replay in-flight return from queueing a second, redundant
+        // rebuild behind itself.
+        self.dirty = false;
 
-        for u in units.iter().take(keep) {
-            let (sub, _) = self.admit_unit(u, 0, &bytes, deadline)?;
-            if sub.outcome != Outcome::Ok {
-                // A unit that admitted before but not now means the world we
-                // were trying to restore was never reachable. Fail loudly.
-                return Err(SyncError::ReplayFailed {
-                    line_start: u.line_start,
-                    output: sub.output.clone(),
-                });
+        for (i, u) in units.iter().enumerate().take(keep) {
+            let (sub, output_ref) = self.admit_unit(u, i, &bytes, budget.remaining())?;
+            match sub.outcome {
+                Outcome::Ok => {}
+                Outcome::StillRunning => {
+                    let output_lines = self.outputs.lines(&output_ref).unwrap_or(0);
+                    return Ok(Some(FailureReport {
+                        index: i,
+                        line_start: u.line_start,
+                        line_end: u.line_end,
+                        status: Status::DeadlineExceeded,
+                        still_running: true,
+                        error_line: None,
+                        output_ref,
+                        output_lines,
+                        event_data: EventData::default(),
+                        checkpoints: Checkpoints::default(),
+                        inner: Vec::new(),
+                        inner_total: 0,
+                    }));
+                }
+                Outcome::Failed => {
+                    // A unit that admitted before but not now means the world
+                    // we were trying to restore was never reachable. Fail
+                    // loudly.
+                    return Err(SyncError::ReplayFailed {
+                        line_start: u.line_start,
+                        output: sub.output.clone(),
+                    });
+                }
             }
         }
-        Ok(())
+        Ok(None)
     }
 
     /// Undo back to a prefix of length `keep`, then verify.
@@ -1413,23 +1985,29 @@ impl Book {
     /// introduces none at all. A label we plant is always exactly one event
     /// with a name we chose.
     fn rollback_to(&mut self, keep: usize, deadline: Duration) -> Result<(), SyncError> {
-        let target_label = if keep == 0 {
-            0
+        let (target_label, target_package) = if keep == 0 {
+            (0, self.base_package.clone())
         } else {
-            self.admitted[keep - 1].label
+            let a = &self.admitted[keep - 1];
+            (a.label, a.package.clone())
         };
+        // The reader's package is state, not world: `ubu!` will not restore
+        // it. Re-establish the recorded package *before* undoing -- in that
+        // order, because the target package is certainly known in the older
+        // world (it was current there), while the package we are leaving may
+        // be about to lose its very definition to the undo.
+        if let Some(p) = target_package {
+            if self.current_package() != Some(p.as_str()) {
+                self.make_package_stick(&p, deadline)
+                    .map_err(|e| SyncError::RollbackFailed { output: e.to_string() })?;
+            }
+        }
         // `ubu!` is a macro that passes its argument into a *function* call, so
         // the label is evaluated and must be quoted. Unquoted it is simply an
         // unbound variable, and the resulting translate error aborts the `ld`
         // silently -- which is why the outcome is checked below rather than
         // only the reported command number.
-        let body = format!(
-            "(acl2::ubu! '{})\n\
-             (acl2::prog2$ (acl2::cw \"~%<<<ASS-DATA cmd ~x0>>>~%\" \
-               (acl2::max-absolute-command-number (acl2::w acl2::state))) \
-               (acl2::value :invisible))",
-            Book::label_name(target_label)
-        );
+        let body = format!("(acl2::ubu! '{})\n{CMD_PROBE}", Book::label_name(target_label));
         let sub = self.session.submit(&body, deadline)?;
         if sub.outcome != Outcome::Ok {
             return Err(SyncError::RollbackFailed { output: sub.output });
@@ -1558,6 +2136,39 @@ mod tests {
     #[test]
     fn output_without_an_error_has_no_message() {
         assert_eq!(super::error_message("Q.E.D.\n\nSummary\n"), None);
+    }
+
+    /// A compound unit can *print* an error without failing -- `must-fail`
+    /// does exactly that -- so the first error paragraph may be an expected
+    /// decoy. The genuine failure is the last one; nothing prints after it.
+    #[test]
+    fn an_expected_error_earlier_in_the_unit_is_not_the_message() {
+        let out = "ACL2 Error in ( DEFTHM EXPECTED ...):  This error was\n\
+                   expected by must-fail.\n\
+                   \n\
+                   Q.E.D. elsewhere\n\
+                   \n\
+                   ACL2 Error [Failure] in ( DEFTHM REAL ...):  The real\n\
+                   failure.\n\
+                   \n\
+                   Summary\n";
+        let m = super::error_message(out).expect("an error is present");
+        assert!(m.contains("REAL"), "must pick the last error paragraph: {m:?}");
+        assert!(!m.contains("EXPECTED"), "the decoy must not be reported: {m:?}");
+    }
+
+    /// The shapes `in_package_target` must accept, and the ones it must not.
+    #[test]
+    fn in_package_detection() {
+        let t = |s: &str| super::in_package_target(s.as_bytes());
+        assert_eq!(t(r#"(in-package "TREEMAP")"#), Some("TREEMAP".into()));
+        assert_eq!(t("(IN-PACKAGE\n  \"ACL2\")"), Some("ACL2".into()));
+        assert_eq!(t(r#"(acl2::in-package "X")"#), Some("X".into()));
+        assert_eq!(t(r#"(in-package "X" :extra)"#), None);
+        assert_eq!(t(r#"(in-package name)"#), None);
+        assert_eq!(t(r#"(include-book "in-package")"#), None);
+        assert_eq!(t(r#"(defthm in-package t)"#), None);
+        assert_eq!(t("in-package"), None);
     }
 
     use super::*;

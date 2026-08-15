@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::image::{ImageError, ImagePolicy};
+use crate::session::SessionControl;
 use crate::sync::{Book, SyncError};
 
 /// An opaque handle to one open session.
@@ -82,71 +83,121 @@ impl From<SyncError> for RegistryError {
 /// make the deadline model useless, since the call you need in order to stop a
 /// runaway proof would be waiting behind the runaway proof.
 ///
-/// Within one session the operations do serialise, but a deadline bounds how
-/// long any of them holds the lock: a `sync` returns once its deadline expires
-/// whether or not ACL2 has finished, so `interrupt` waits at most that long.
+/// Within one session the operations serialise on this lock, and a blocking
+/// call holds it for up to its whole deadline. That is why the entry also
+/// carries the session's control block: an interrupt *asks through the block
+/// first* (`request_abort`), the blocked call hands the lock over within a
+/// poll slice, and only then does the interrupt take the lock to escalate --
+/// so stopping a proof you regret costs a poll slice, not the proof's
+/// deadline. Status reads the block's mirror and needs no lock at all.
 pub type SharedBook = Arc<Mutex<Book>>;
+
+/// Everything the registry records about one session. `path` and `image` are
+/// fixed at open, so listing sessions never has to take any book's lock --
+/// `acl2_sessions` used to hang behind whichever session had a sync in
+/// flight.
+struct Entry {
+    book: SharedBook,
+    /// A session keeps its image for life: the world was built by that image,
+    /// so changing it would mean discarding and re-proving everything, which
+    /// is what closing and reopening already does.
+    image: PathBuf,
+    path: PathBuf,
+    control: Arc<SessionControl>,
+}
 
 /// Several open books, each with its own ACL2 process.
 pub struct Registry {
     policy: ImagePolicy,
     next: u64,
-    books: HashMap<SessionId, SharedBook>,
-    /// The image each session is running, for reporting.
-    ///
-    /// A session keeps its image for life: the world was built by that image,
-    /// so changing it would mean discarding and re-proving everything, which
-    /// is what closing and reopening already does.
-    images: HashMap<SessionId, PathBuf>,
+    entries: HashMap<SessionId, Entry>,
 }
 
 impl Registry {
     pub fn new(policy: ImagePolicy) -> Registry {
-        Registry {
-            policy,
-            next: 0,
-            books: HashMap::new(),
-            images: HashMap::new(),
-        }
+        Registry { policy, next: 0, entries: HashMap::new() }
     }
 
     pub fn policy(&self) -> &ImagePolicy {
         &self.policy
     }
 
-    /// Open a book and start a session for it.
+    /// Which image the policy assigns this book.
     ///
     /// `image` names one explicitly; omitted, it is derived from the book's
     /// own checkout. Either way it must be one the policy permits.
+    ///
+    /// Split from [`register`](Self::register) so a caller holding the
+    /// registry behind a lock can resolve, release, start ACL2 unlocked, and
+    /// lock again only to insert. Starting a session takes up to the
+    /// two-minute customization handshake, and holding the registry across it
+    /// froze every other session's lookups for the duration.
+    pub fn resolve(&self, file: &Path, image: Option<&Path>) -> Result<PathBuf, RegistryError> {
+        Ok(match image {
+            Some(i) => self.policy.resolve_explicit(i)?,
+            None => self.policy.resolve(file)?,
+        })
+    }
+
+    /// Adopt an already-started book under a fresh id.
+    pub fn register(&mut self, book: Book, image: PathBuf) -> SessionId {
+        self.next += 1;
+        let id = SessionId(format!("s{}", self.next));
+        self.entries.insert(
+            id.clone(),
+            Entry {
+                path: book.path().to_path_buf(),
+                control: book.control(),
+                book: Arc::new(Mutex::new(book)),
+                image,
+            },
+        );
+        id
+    }
+
+    /// Open a book and start a session for it: resolve, start, register.
+    ///
+    /// The convenience form for callers that do not share the registry across
+    /// threads; it holds `&mut self` across the ACL2 startup.
     pub fn open(
         &mut self,
         file: &Path,
         image: Option<&Path>,
     ) -> Result<(SessionId, PathBuf), RegistryError> {
-        let acl2 = match image {
-            Some(i) => self.policy.resolve_explicit(i)?,
-            None => self.policy.resolve(file)?,
-        };
+        let acl2 = self.resolve(file, image)?;
         let book = Book::open(&acl2, file)?;
-        self.next += 1;
-        let id = SessionId(format!("s{}", self.next));
-        self.books.insert(id.clone(), Arc::new(Mutex::new(book)));
-        self.images.insert(id.clone(), acl2.clone());
-        Ok((id, acl2))
+        Ok((self.register(book, acl2.clone()), acl2))
     }
 
     /// The image a session is running.
     pub fn image_of(&self, id: &SessionId) -> Option<&Path> {
-        self.images.get(id).map(|p| p.as_path())
+        self.entries.get(id).map(|e| e.image.as_path())
+    }
+
+    /// The control block for reaching a session without its lock.
+    pub fn control_of(&self, id: &SessionId) -> Option<Arc<SessionControl>> {
+        self.entries.get(id).map(|e| e.control.clone())
     }
 
     /// Close a session, killing its ACL2 and discarding its captured output.
     ///
     /// Returns whether there was anything to close, so a double close is a
     /// reported fact rather than an error.
+    ///
+    /// The abort request matters: if a call is blocked on the session, the
+    /// process itself survives inside that call's `Arc` until the call
+    /// returns. Without the request that meant "until its deadline expires" --
+    /// an unreachable ACL2 grinding on for ten minutes after its session was
+    /// closed. With it, the call returns within a poll slice and the drop
+    /// kills the child.
     pub fn close(&mut self, id: &SessionId) -> bool {
-        self.images.remove(id);
-        self.books.remove(id).is_some()
+        match self.entries.remove(id) {
+            Some(e) => {
+                e.control.request_abort();
+                true
+            }
+            None => false,
+        }
     }
 
     /// The book for `id`, if it is open.
@@ -154,33 +205,30 @@ impl Registry {
     /// Returns the shared handle rather than a borrow, so the registry lock can
     /// be released before the caller does any blocking work with the book.
     pub fn get(&self, id: &SessionId) -> Result<SharedBook, RegistryError> {
-        self.books
+        self.entries
             .get(id)
-            .cloned()
+            .map(|e| e.book.clone())
             .ok_or_else(|| RegistryError::Unknown(id.clone()))
     }
 
     /// Open sessions, with the file and image of each, in id order.
+    /// Locks nothing: both facts are fixed at open.
     pub fn list(&self) -> Vec<(SessionId, PathBuf, PathBuf)> {
         let mut v: Vec<_> = self
-            .books
+            .entries
             .iter()
-            .filter_map(|(id, b)| {
-                let p = b.lock().ok()?.path().to_path_buf();
-                let img = self.images.get(id).cloned().unwrap_or_default();
-                Some((id.clone(), p, img))
-            })
+            .map(|(id, e)| (id.clone(), e.path.clone(), e.image.clone()))
             .collect();
         v.sort();
         v
     }
 
     pub fn len(&self) -> usize {
-        self.books.len()
+        self.entries.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.books.is_empty()
+        self.entries.is_empty()
     }
 }
 

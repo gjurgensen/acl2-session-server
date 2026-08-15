@@ -26,6 +26,10 @@ pub struct InnerEvent {
     /// Present only on the inner event that failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub abort_causes: Option<String>,
+    /// The event's kind -- `defun`, `defthm`, `verify-guards` -- when
+    /// recorded. Says *what kind of thing* failed without parsing prose.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     /// Runes this inner event used, one per entry. Answers questions like
     /// "did the prep-lemma actually get used?", which the outer form cannot.
     ///
@@ -33,18 +37,43 @@ pub struct InnerEvent {
     /// are debugging. On a form that went in, see `rules_of` below.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<String>,
+    /// This event's own prove time `(prove print proof-tree other)`. For a
+    /// clique, this is "which member was slow" -- the outer total cannot say.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time: Option<String>,
+    /// Prover steps this event took, when non-negative.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prover_steps: Option<u64>,
+    /// This event ran out of a prover step limit of this size.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step_limit_reached: Option<u64>,
 }
 
-/// An inner event of a form that failed: rules included.
-fn inner_failed(e: &core::InnerEvent) -> InnerEvent {
-    InnerEvent {
-        name: e.name.clone(),
-        abort_causes: e.abort_causes.clone(),
-        rules: e.rules.clone(),
+fn steps_split(steps: Option<i64>) -> (Option<u64>, Option<u64>) {
+    match steps {
+        Some(n) if n < 0 => (None, Some(n.unsigned_abs())),
+        Some(n) => (Some(n as u64), None),
+        None => (None, None),
     }
 }
 
-/// An inner event of a form that was admitted: what it introduced, no more.
+/// An inner event of a form that failed: full detail.
+fn inner_failed(e: &core::InnerEvent) -> InnerEvent {
+    let (prover_steps, step_limit_reached) = steps_split(e.prover_steps);
+    InnerEvent {
+        name: e.name.clone(),
+        abort_causes: e.abort_causes.clone(),
+        kind: e.kind.clone(),
+        rules: e.rules.clone(),
+        time: e.time.clone(),
+        prover_steps,
+        step_limit_reached,
+    }
+}
+
+/// An inner event of a form that was admitted: what it introduced, plus its
+/// own time -- the "which member of the clique was slow" answer is as useful
+/// on success as on failure.
 ///
 /// The rules are dropped here rather than at the source: the core still has
 /// them, and a different client may want them. See the note on `Admitted`.
@@ -52,8 +81,24 @@ fn inner_admitted(e: &core::InnerEvent) -> InnerEvent {
     InnerEvent {
         name: e.name.clone(),
         abort_causes: e.abort_causes.clone(),
+        kind: None,
         rules: Vec::new(),
+        time: e.time.clone(),
+        prover_steps: None,
+        step_limit_reached: None,
     }
+}
+
+/// One key checkpoint of a failed proof.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct Goal {
+    /// The goal's name exactly as ACL2 prints it -- `Subgoal *1/2''` -- which
+    /// is exactly what `acl2_output mode:"goal"` takes: pass it back to read
+    /// everything the prover printed under this goal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goal: Option<String>,
+    /// The goal itself, as ACL2 would print it. Layout is preserved.
+    pub term: String,
 }
 
 /// Key checkpoints of a failed proof, as ACL2 would print them.
@@ -63,10 +108,10 @@ pub struct Checkpoints {
     ///
     /// If `pre_revert` is set, these are the goals as they stood *before* the
     /// proof reverted to induction -- a phase the prover then abandoned.
-    pub top: Vec<String>,
+    pub top: Vec<Goal>,
     /// Goals under a top-level induction. Often where the actual defect is,
     /// which is why these are kept separate from `top` rather than merged.
-    pub sub: Vec<String>,
+    pub sub: Vec<Goal>,
     /// How many the prover pushed. May exceed the number listed: a fixed
     /// number of slots is read, and this says when there were more.
     pub n_top: usize,
@@ -76,6 +121,18 @@ pub struct Checkpoints {
     /// The proof reverted to proof by induction. `top` then describes the
     /// pre-revert goals, and `sub` the induction it fell back on.
     pub pre_revert: bool,
+}
+
+fn checkpoints(c: &core::sync::Checkpoints) -> Checkpoints {
+    let goal = |g: &core::Checkpoint| Goal { goal: g.goal.clone(), term: g.term.clone() };
+    Checkpoints {
+        top: c.top.iter().map(goal).collect(),
+        sub: c.sub.iter().map(goal).collect(),
+        n_top: c.n_top,
+        n_sub: c.n_sub,
+        forced: c.forced,
+        pre_revert: c.pre_revert,
+    }
 }
 
 /// A form that was admitted.
@@ -97,6 +154,15 @@ pub struct Admitted {
     /// warning is an exception rather than a fact every form carries.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warnings: Option<String>,
+    /// Hints that fired -- `((:use lemma))` and friends. Present exactly when
+    /// a hint did something, so "did my hint matter" is answered on success
+    /// too, where it matters most.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hint_events: Vec<String>,
+    /// Rules that caused case splits, when ACL2 recorded any -- the "why did
+    /// this get slow" answer for a form that still went in.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub splitter_rules: Vec<String>,
     pub inner: Vec<InnerEvent>,
     /// Handle to everything ACL2 printed for this form. Pass to `acl2_output`.
     pub output_ref: String,
@@ -126,13 +192,35 @@ pub struct Failed {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub abort_cause: Option<String>,
     /// The `ACL2 Error` message, with ACL2's line wrapping undone so the
-    /// sentence is whole. Matters most for `rejected`, where no proof ran and
+    /// sentence is whole -- the *last* error paragraph, since testing
+    /// utilities such as `must-fail` print expected errors earlier in a
+    /// compound form. Matters most for `rejected`, where no proof ran and
     /// the other fields are empty. For a compound form it also names the
     /// inner event that failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_line: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prover_steps: Option<u64>,
+    /// The proof ran out of a prover step limit of this size (set by the
+    /// book or the environment). A different situation from a proof that
+    /// failed on the merits: the conjecture was not refuted, the budget ran
+    /// out -- raise the limit or simplify, rather than fixing a "false"
+    /// statement.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step_limit_reached: Option<u64>,
+    /// The kind of the failing event -- `defun`, `defthm`, `verify-guards` --
+    /// when ACL2 recorded it. Distinguishes a definition rejected at
+    /// translate level from a guard verification from a proof failure,
+    /// without touching prover prose.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed_kind: Option<String>,
+    /// Hints that fired before the failure, when any did.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hint_events: Vec<String>,
+    /// Rules that caused case splits, when ACL2 recorded any -- the "why did
+    /// this explode into cases" answer.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub splitter_rules: Vec<String>,
     pub checkpoints: Checkpoints,
     pub inner: Vec<InnerEvent>,
     /// How many of `inner` carry detail (`rules`, `abort_causes`).
@@ -237,6 +325,8 @@ pub fn admitted(u: &core::sync::UnitReport) -> Admitted {
         line_end: u.line_end,
         elapsed_ms: u.elapsed.as_millis(),
         warnings: u.event_data.warnings.clone(),
+        hint_events: u.event_data.hint_events.clone(),
+        splitter_rules: u.event_data.splitter_rules.clone(),
         inner: u.inner.iter().map(inner_admitted).collect(),
         output_ref: u.output_ref.to_string(),
         output_lines: u.output_lines,
@@ -244,6 +334,7 @@ pub fn admitted(u: &core::sync::UnitReport) -> Admitted {
 }
 
 pub fn failed(f: &core::sync::FailureReport) -> Failed {
+    let (prover_steps, step_limit_reached) = steps_split(f.event_data.prover_steps);
     Failed {
         index: f.index,
         line_start: f.line_start,
@@ -256,15 +347,12 @@ pub fn failed(f: &core::sync::FailureReport) -> Failed {
         .to_string(),
         abort_cause: f.checkpoints.abort_cause.clone(),
         error_line: f.error_line.clone(),
-        prover_steps: f.event_data.prover_steps,
-        checkpoints: Checkpoints {
-            top: f.checkpoints.top.clone(),
-            sub: f.checkpoints.sub.clone(),
-            n_top: f.checkpoints.n_top,
-            n_sub: f.checkpoints.n_sub,
-            forced: f.checkpoints.forced,
-            pre_revert: f.checkpoints.pre_revert,
-        },
+        prover_steps,
+        step_limit_reached,
+        failed_kind: f.failed_event().and_then(|e| e.kind.clone()),
+        hint_events: f.event_data.hint_events.clone(),
+        splitter_rules: f.event_data.splitter_rules.clone(),
+        checkpoints: checkpoints(&f.checkpoints),
         inner: f.inner.iter().map(inner_failed).collect(),
         inner_detail_through: f.inner.len().min(acl2_session::sync::INNER_DETAIL_SLOTS),
         failed_event: f.failed_event().map(|e| e.name.clone()),
@@ -392,11 +480,73 @@ pub struct OpenReply {
 pub struct HealthReply {
     /// `ready` submit now; `busy` a form is in flight, wait or interrupt;
     /// `unresponsive` nothing should be running yet it is not answering;
-    /// `dead` the process is gone.
+    /// `dead` the process is gone -- close the session and open it again.
     pub state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub running_unit: Option<usize>,
-    pub rebuilds: usize,
+    /// Absent when the session was busy and the counter could not be read
+    /// without waiting behind the in-flight call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rebuilds: Option<usize>,
+}
+
+/// What an interrupt accomplished.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct InterruptReply {
+    /// The session answered a round-trip after the signal; it is usable.
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// What ACL2 recorded about the interrupted form: present when a form
+    /// was actually interrupted and the record is trustworthy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interrupted: Option<Interrupted>,
+}
+
+/// The envelope of an interrupted form. The partial output behind
+/// `output_ref` is the record; this is the summary.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct Interrupted {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub abort_cause: Option<String>,
+    /// The interrupted event, abbreviated. An outline, not the form.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event: Option<String>,
+    /// `(prove print proof-tree other)` seconds up to the interrupt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prover_steps: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step_limit_reached: Option<u64>,
+    /// Whatever the prover had pushed when interrupted. Empty stacks are
+    /// normal for a grind inside an executable counterpart; a waterfall
+    /// interrupt can carry real checkpoints.
+    pub checkpoints: Checkpoints,
+    /// The partial output captured before the signal landed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_ref: Option<String>,
+    pub output_lines: usize,
+}
+
+pub fn interrupted(r: &core::InterruptReport) -> InterruptReply {
+    InterruptReply {
+        ok: r.ok,
+        detail: (!r.ok).then(|| "session did not recover; consider reopening".into()),
+        interrupted: r.interrupted.as_ref().map(|e| {
+            let (prover_steps, step_limit_reached) = steps_split(e.prover_steps);
+            Interrupted {
+                abort_cause: e.abort_cause.clone(),
+                event: e.event.clone(),
+                time: e.time.clone(),
+                prover_steps,
+                step_limit_reached,
+                checkpoints: checkpoints(&e.checkpoints),
+                output_ref: e.output_ref.as_ref().map(|o| o.to_string()),
+                output_lines: e.output_lines,
+            }
+        }),
+    }
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]

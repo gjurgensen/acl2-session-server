@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use acl2_session::{Health, ImagePolicy, Registry, SessionId, Slice};
+use acl2_session::{Book, Health, ImagePolicy, Registry, SessionId, Slice};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler, ServiceExt};
@@ -27,6 +27,12 @@ fn secs(s: Option<u64>) -> Duration {
 
 fn fail(e: impl std::fmt::Display) -> ErrorData {
     ErrorData::internal_error(e.to_string(), None)
+}
+
+/// The last `n` lines of `s`, for tails served from the status mirror.
+fn last_lines(s: &str, n: usize) -> String {
+    let v: Vec<&str> = s.lines().rev().take(n).collect();
+    v.into_iter().rev().collect::<Vec<_>>().join("\n")
 }
 
 /// Reply with real structured content rather than JSON stuffed into a text
@@ -165,6 +171,16 @@ impl Acl2Mcp {
             .map_err(fail)
     }
 
+    /// The session's control block: the way to reach a busy session without
+    /// queueing behind whatever call holds its lock.
+    fn control(&self, id: &str) -> Result<std::sync::Arc<acl2_session::SessionControl>, ErrorData> {
+        self.registry
+            .lock()
+            .map_err(fail)?
+            .control_of(&SessionId::from(id))
+            .ok_or_else(|| fail(format!("no session {id}; it was never opened, or has been closed")))
+    }
+
     #[tool(description = "Open an ACL2 session anchored to a .lisp book. Returns a \
         session_id used by every other tool. The session runs in the book's own \
         directory, so it is the session you would get by starting ACL2 there.")]
@@ -176,14 +192,21 @@ impl Acl2Mcp {
         let file = PathBuf::from(&a.file);
         let want = a.acl2.clone().map(PathBuf::from);
         let (id, image, overridden) = blocking!({
-            let mut r = reg.lock().map_err(|e| e.to_string())?;
-            let (id, image) = r.open(&file, want.as_deref()).map_err(|e| e.to_string())?;
-            let b = r.get(&id).map_err(|e| e.to_string())?;
-            let g = b.lock().map_err(|e| e.to_string())?;
-            let ov = g
+            // Resolve under the lock, start ACL2 without it, lock again only
+            // to insert. Startup runs the directory's customization file --
+            // up to the two-minute handshake -- and holding the registry
+            // across it froze every session's lookups for the duration.
+            let acl2 = reg
+                .lock()
+                .map_err(|e| e.to_string())?
+                .resolve(&file, want.as_deref())
+                .map_err(|e| e.to_string())?;
+            let book = Book::open(&acl2, &file).map_err(|e| e.to_string())?;
+            let ov = book
                 .prove_output_overridden()
-                .then(|| g.inherited_inhibit_output().unwrap_or("?").to_string());
-            Ok::<_, String>((id, image, ov))
+                .then(|| book.inherited_inhibit_output().unwrap_or("?").to_string());
+            let id = reg.lock().map_err(|e| e.to_string())?.register(book, acl2.clone());
+            Ok::<_, String>((id, acl2, ov))
         })
         .map_err(fail)?;
         json(wire::OpenReply {
@@ -368,82 +391,151 @@ impl Acl2Mcp {
 
     #[tool(description = "Progress on whatever is still running -- a form in \
         the prover, a certification, or both. Reports how long each has been \
-        going and the tail of what it has printed. Does not wait.")]
+        going and the tail of what it has printed. Does not wait, even while \
+        another call is blocked on the same session.")]
     async fn acl2_status(
         &self,
         Parameters(a): Parameters<StatusArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        let control = self.control(&a.session_id)?;
         let book = self.book(&a.session_id)?;
         let n = a.tail_lines.unwrap_or(20);
-        let (p, unit, build) = blocking!({
-            let mut b = book.lock().map_err(|e| e.to_string())?;
-            let u = b.running_unit();
-            let bp = b.build_progress(n).as_ref().map(wire::build_progress);
-            b.progress(n).map(|p| (p, u, bp)).map_err(|e| e.to_string())
+        let reply = blocking!({
+            // A blocked sync/eval holds the session lock for its whole
+            // deadline, and status exists precisely to be usable then. Try
+            // the lock; on contention, answer from the control block's
+            // mirror, which the reader updates as output arrives.
+            match book.try_lock() {
+                Ok(mut b) => {
+                    let unit = b.running_unit();
+                    let build = b.build_progress(n).as_ref().map(wire::build_progress);
+                    let p = b.progress(n).map_err(|e| e.to_string())?;
+                    Ok::<_, String>(match p {
+                        Some(p) => wire::ProgressReply {
+                            running: true,
+                            unit_index: unit,
+                            elapsed_ms: p.elapsed.as_millis(),
+                            tail: p.tail,
+                            bytes_so_far: p.bytes_so_far,
+                            build,
+                        },
+                        None => wire::ProgressReply {
+                            running: false,
+                            unit_index: None,
+                            elapsed_ms: 0,
+                            tail: String::new(),
+                            bytes_so_far: 0,
+                            build,
+                        },
+                    })
+                }
+                Err(_) => match control.snapshot() {
+                    Some(s) => Ok(wire::ProgressReply {
+                        running: true,
+                        unit_index: s.unit,
+                        elapsed_ms: s.elapsed.as_millis(),
+                        tail: last_lines(&s.tail, n),
+                        bytes_so_far: s.bytes_so_far,
+                        // A build's progress lives behind the lock; the form's
+                        // progress is the thing a blocked session is asked
+                        // about.
+                        build: None,
+                    }),
+                    // Contended for an instant between submissions: a brief
+                    // wait is bounded and honest.
+                    None => {
+                        let mut b = book.lock().map_err(|e| e.to_string())?;
+                        let unit = b.running_unit();
+                        let build = b.build_progress(n).as_ref().map(wire::build_progress);
+                        let p = b.progress(n).map_err(|e| e.to_string())?;
+                        Ok(match p {
+                            Some(p) => wire::ProgressReply {
+                                running: true,
+                                unit_index: unit,
+                                elapsed_ms: p.elapsed.as_millis(),
+                                tail: p.tail,
+                                bytes_so_far: p.bytes_so_far,
+                                build,
+                            },
+                            None => wire::ProgressReply {
+                                running: false,
+                                unit_index: None,
+                                elapsed_ms: 0,
+                                tail: String::new(),
+                                bytes_so_far: 0,
+                                build,
+                            },
+                        })
+                    }
+                },
+            }
         })
         .map_err(fail)?;
-        json(match p {
-            Some(p) => wire::ProgressReply {
-                running: true,
-                unit_index: unit,
-                elapsed_ms: p.elapsed.as_millis(),
-                tail: p.tail,
-                bytes_so_far: p.bytes_so_far,
-                build,
-            },
-            None => wire::ProgressReply {
-                running: false,
-                unit_index: None,
-                elapsed_ms: 0,
-                tail: String::new(),
-                bytes_so_far: 0,
-                build,
-            },
-        })
+        json(reply)
     }
 
     #[tool(description = "Abort the form in flight and make the session usable \
-        again. Sends an escalating signal sequence and verifies recovery.")]
+        again. Works immediately even while a sync or eval is still waiting on \
+        the form. Reports what was interrupted -- elapsed prove time, an \
+        outline of the event, checkpoints if the prover had any -- plus a \
+        handle to the partial output.")]
     async fn acl2_interrupt(
         &self,
         Parameters(a): Parameters<SessionArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        // Ask through the control block first: the blocked call returns
+        // within a poll slice and hands the lock over, instead of after its
+        // whole deadline -- which used to make interrupting a 600-second sync
+        // wait 600 seconds.
+        let control = self.control(&a.session_id)?;
+        control.request_abort();
         let book = self.book(&a.session_id)?;
-        let ok = blocking!({
+        let r = blocking!({
             let mut b = book.lock().map_err(|e| e.to_string())?;
             b.interrupt().map_err(|e| e.to_string())
         })
         .map_err(fail)?;
-        json(wire::Ack {
-            ok,
-            detail: (!ok).then(|| "session did not recover; consider reopening".into()),
-        })
+        json(wire::interrupted(&r))
     }
 
     #[tool(description = "Whether the session is answering: ready, busy, \
-        unresponsive, or dead. Busy is normal; unresponsive and dead are not.")]
+        unresponsive, or dead. Busy is normal; unresponsive and dead are not. \
+        Dead means close the session and open it again.")]
     async fn acl2_health(
         &self,
         Parameters(a): Parameters<SessionArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        let control = self.control(&a.session_id)?;
         let book = self.book(&a.session_id)?;
-        let (h, unit, rebuilds) = blocking!({
+        let reply = blocking!({
+            // A busy session answers from the mirror rather than queueing
+            // behind the very call it is being asked about. Both conditions,
+            // deliberately: a mirror that says running with a free lock means
+            // the form outran its call's deadline, and the locked path then
+            // gives the fuller answer.
+            if control.snapshot().is_some() && book.try_lock().is_err() {
+                return Ok::<_, String>(wire::HealthReply {
+                    state: "busy".to_string(),
+                    running_unit: control.snapshot().and_then(|s| s.unit),
+                    rebuilds: None,
+                });
+            }
             let mut b = book.lock().map_err(|e| e.to_string())?;
             let h = b.health(Duration::from_secs(10));
-            Ok::<_, String>((h, b.running_unit(), b.rebuilds()))
+            Ok(wire::HealthReply {
+                state: match h {
+                    Health::Ready => "ready",
+                    Health::Busy => "busy",
+                    Health::Unresponsive => "unresponsive",
+                    Health::Dead => "dead",
+                }
+                .to_string(),
+                running_unit: b.running_unit(),
+                rebuilds: Some(b.rebuilds()),
+            })
         })
         .map_err(fail)?;
-        json(wire::HealthReply {
-            state: match h {
-                Health::Ready => "ready",
-                Health::Busy => "busy",
-                Health::Unresponsive => "unresponsive",
-                Health::Dead => "dead",
-            }
-            .to_string(),
-            running_unit: unit,
-            rebuilds,
-        })
+        json(reply)
     }
 
     #[tool(description = "Read part of a form's captured output, by handle. The \

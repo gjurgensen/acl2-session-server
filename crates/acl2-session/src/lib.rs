@@ -21,7 +21,7 @@ pub mod session;
 pub mod split;
 pub mod sync;
 
-pub use session::{Outcome, Session, Submission};
+pub use session::{Outcome, Session, SessionControl, StatusSnapshot, Submission};
 pub use split::{split, split_str, Form, SplitError};
 pub use registry::{Registry, RegistryError, SessionId};
 pub use cert::{Build, CertError};
@@ -29,6 +29,6 @@ pub use image::{find_checkout, ImageError, ImagePolicy};
 pub use output::{OutputRef, OutputSlice, OutputStore, Slice};
 pub use session::Progress;
 pub use sync::{
-    Book, EvalResult, Health, InnerEvent, Resumed, Status, SyncError, SyncOutcome,
-    WorldChange,
+    Book, Checkpoint, EvalResult, Health, InnerEvent, InterruptEnvelope, InterruptReport,
+    Resumed, Status, SyncError, SyncOutcome, WorldChange,
 };
