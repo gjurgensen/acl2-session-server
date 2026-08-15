@@ -918,7 +918,7 @@ fn keyed_block(body: &str, keys: &[&str]) -> Vec<(String, String)> {
     let mut done: Vec<(String, String)> = Vec::new();
     for line in body.lines() {
         let hit = keys.iter().find(|k| {
-            line.strip_prefix(**k).map_or(false, |r| r.starts_with(' '))
+            line.strip_prefix(**k).is_some_and(|r| r.starts_with(' '))
         });
         if let Some(k) = hit {
             if let Some((pk, v)) = cur.take() {
@@ -948,12 +948,12 @@ fn parse_checkpoints(sub: &crate::session::Submission) -> Checkpoints {
                 "tid0", "tid1", "tid2", "sid0", "sid1", "sid2"];
     let pairs = keyed_block(body, &keys);
     let get = |k: &str| pairs.iter().find(|(pk, _)| pk == k).map(|(_, v)| v.trim().to_string());
-    c.proof_ran = get("gag").map_or(false, |v| !is_nil(&v));
+    c.proof_ran = get("gag").is_some_and(|v| !is_nil(&v));
     c.n_top = get("ntop").and_then(|v| v.parse().ok()).unwrap_or(0);
     c.n_sub = get("nsub").and_then(|v| v.parse().ok()).unwrap_or(0);
-    c.forced = get("forced").map_or(false, |v| !is_nil(&v));
+    c.forced = get("forced").is_some_and(|v| !is_nil(&v));
     c.abort_cause = get("abort").filter(|v| !is_nil(v));
-    c.pre_revert = get("reverted").map_or(false, |v| !is_nil(&v));
+    c.pre_revert = get("reverted").is_some_and(|v| !is_nil(&v));
     // The goal name arrives on one line; collapse any residual whitespace so
     // it can be handed straight to a goal-addressed output slice.
     let goal_of = |k: &str| {
@@ -1233,7 +1233,7 @@ impl Book {
     pub fn prove_output_overridden(&self) -> bool {
         self.inherited_inhibit
             .as_deref()
-            .map_or(false, |v| v.to_lowercase().contains("prove"))
+            .is_some_and(|v| v.to_lowercase().contains("prove"))
     }
 
     /// The command number the world should be at with the current prefix.
@@ -1328,23 +1328,23 @@ impl Book {
         };
 
         let mut world_change = WorldChange::None;
-        if let (Some(a), Some(e)) = (after, self.expected_command_number()) {
-            if a != e {
-                // Events were introduced. Undo back to the prefix, which is
-                // where the last planted label sits. Floored: the undo must
-                // run whatever is left of the deadline, because skipping it
-                // leaves events the caller was promised would not persist.
-                let keep = self.admitted.len();
-                world_change = match self.rollback_to(keep, deadline.max(PROBE_FLOOR)) {
-                    Ok(()) => WorldChange::Undone,
-                    Err(SyncError::RollbackFailed { .. })
-                    | Err(SyncError::RollbackUnverified { .. }) => {
-                        self.dirty = true;
-                        WorldChange::Dirty
-                    }
-                    Err(e) => return Err(e),
-                };
-            }
+        if let (Some(a), Some(e)) = (after, self.expected_command_number())
+            && a != e
+        {
+            // Events were introduced. Undo back to the prefix, which is
+            // where the last planted label sits. Floored: the undo must
+            // run whatever is left of the deadline, because skipping it
+            // leaves events the caller was promised would not persist.
+            let keep = self.admitted.len();
+            world_change = match self.rollback_to(keep, deadline.max(PROBE_FLOOR)) {
+                Ok(()) => WorldChange::Undone,
+                Err(SyncError::RollbackFailed { .. })
+                | Err(SyncError::RollbackUnverified { .. }) => {
+                    self.dirty = true;
+                    WorldChange::Dirty
+                }
+                Err(e) => return Err(e),
+            };
         }
         Ok(EvalResult {
             outcome: sub.outcome,
@@ -1687,8 +1687,7 @@ impl Book {
             // form reads differently than the reference session. Fail loudly
             // and let replay re-establish the world.
             self.dirty = true;
-            return Err(SyncError::Io(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(SyncError::Io(io::Error::other(
                 format!(
                     "in-package {target:?} did not persist (session reports {now:?}); \
                      the next sync will rebuild"
@@ -2087,11 +2086,11 @@ impl Book {
         // order, because the target package is certainly known in the older
         // world (it was current there), while the package we are leaving may
         // be about to lose its very definition to the undo.
-        if let Some(p) = target_package {
-            if self.current_package() != Some(p.as_str()) {
-                self.make_package_stick(&p, deadline)
-                    .map_err(|e| SyncError::RollbackFailed { output: e.to_string() })?;
-            }
+        if let Some(p) = target_package
+            && self.current_package() != Some(p.as_str())
+        {
+            self.make_package_stick(&p, deadline)
+                .map_err(|e| SyncError::RollbackFailed { output: e.to_string() })?;
         }
         // `ubu!` is a macro that passes its argument into a *function* call, so
         // the label is evaluated and must be quoted. Unquoted it is simply an
@@ -2107,12 +2106,11 @@ impl Book {
 
         // P3: the fast path is verified against a recorded invariant. A subtle
         // undo surprise should cost latency, not correctness.
-        if keep > 0 {
-            if let Some(expected) = self.admitted[keep - 1].command_number {
-                if actual != Some(expected) {
-                    return Err(SyncError::RollbackUnverified { expected, actual });
-                }
-            }
+        if keep > 0
+            && let Some(expected) = self.admitted[keep - 1].command_number
+            && actual != Some(expected)
+        {
+            return Err(SyncError::RollbackUnverified { expected, actual });
         }
         // Output from rolled-back units stays readable -- comparing against
         // what a form used to print is useful -- but is flagged so it cannot be

@@ -451,7 +451,7 @@ fn an_ordinary_failure_still_reports_top_stack_checkpoints() {
     assert!(!c.pre_revert, "induction was disabled, so nothing reverted");
     assert_eq!(c.abort_cause.as_deref(), Some("do-not-induct"));
     assert!(
-        c.top.first().map_or(false, |g| g.term.contains("17")),
+        c.top.first().is_some_and(|g| g.term.contains("17")),
         "expected the goal, got {:?}",
         c.top
     );

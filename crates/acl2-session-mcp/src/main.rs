@@ -267,7 +267,7 @@ impl Acl2Mcp {
         json(wire::ImagesReply {
             images: images.iter().map(|p| p.display().to_string()).collect(),
             trusted_directories: trusted.iter().map(|p| p.display().to_string()).collect(),
-            default: default,
+            default,
         })
     }
 
@@ -652,10 +652,10 @@ fn policy_from_args() -> Result<ImagePolicy, String> {
     if default.is_none() {
         default = std::env::var("ACL2_DEFAULT").ok();
     }
-    if trusted.is_empty() {
-        if let Ok(v) = std::env::var("ACL2_TRUSTED") {
-            trusted.extend(v.split(':').filter(|s| !s.is_empty()).map(String::from));
-        }
+    if trusted.is_empty()
+        && let Ok(v) = std::env::var("ACL2_TRUSTED")
+    {
+        trusted.extend(v.split(':').filter(|s| !s.is_empty()).map(String::from));
     }
 
     for d in &trusted {

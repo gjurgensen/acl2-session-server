@@ -170,13 +170,13 @@ impl SessionControl {
     }
 
     fn update(&self, buf: &[u8]) {
-        if let Ok(mut m) = self.mirror.lock() {
-            if m.running {
-                m.bytes = buf.len();
-                let from = buf.len().saturating_sub(MIRROR_TAIL);
-                m.tail.clear();
-                m.tail.extend_from_slice(&buf[from..]);
-            }
+        if let Ok(mut m) = self.mirror.lock()
+            && m.running
+        {
+            m.bytes = buf.len();
+            let from = buf.len().saturating_sub(MIRROR_TAIL);
+            m.tail.clear();
+            m.tail.extend_from_slice(&buf[from..]);
         }
     }
 }
@@ -570,7 +570,7 @@ impl Session {
 
     fn await_completion(&mut self, deadline: Duration) -> io::Result<Submission> {
         let Some(InFlight { generation: genid, started, raw }) = self.inflight else {
-            return Err(io::Error::new(io::ErrorKind::Other, "nothing in flight"));
+            return Err(io::Error::other("nothing in flight"));
         };
         let done = format!("<<<ASS-DONE {genid}>>>");
         let end = self.read_until(Some(done.as_bytes()), deadline)?;
@@ -794,17 +794,21 @@ fn lisp_string(s: &str) -> String {
 /// string it should never have seen.
 fn is_completion_marker(l: &str) -> bool {
     for pat in ["<<<ASS-OK ", "<<<ASS-DONE "] {
-        if let Some(i) = l.find(pat) {
-            if let Some(end) = l[i + pat.len()..].find(">>>") {
-                let id = &l[i + pat.len()..i + pat.len() + end];
-                if !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) {
-                    return true;
-                }
+        if let Some(i) = l.find(pat)
+            && let Some(end) = l[i + pat.len()..].find(">>>")
+        {
+            let id = &l[i + pat.len()..i + pat.len() + end];
+            if !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) {
+                return true;
             }
         }
     }
     false
 }
+
+/// What a capture separates into: the display text, the one-line `ASS-DATA`
+/// pairs, and the `ASS-BEGIN`/`ASS-END` blocks.
+type Stripped = (String, Vec<(String, String)>, Vec<(String, String)>);
 
 /// Remove our own markers, returning what ACL2 printed plus any structured
 /// values reported via `<<<ASS-DATA key value>>>`.
@@ -813,7 +817,7 @@ fn is_completion_marker(l: &str) -> bool {
 /// which therefore lands at the head of the capture. This is cosmetic only --
 /// the prompt is never used to decide anything (P2); it is just noise at the
 /// front of otherwise clean output.
-fn strip_sentinels(s: &str, _genid: u64) -> (String, Vec<(String, String)>, Vec<(String, String)>) {
+fn strip_sentinels(s: &str, _genid: u64) -> Stripped {
     let mut data = Vec::new();
     let mut blocks: Vec<(String, String)> = Vec::new();
     let mut kept: Vec<&str> = Vec::new();
@@ -824,24 +828,24 @@ fn strip_sentinels(s: &str, _genid: u64) -> (String, Vec<(String, String)>, Vec<
         }
         // Multi-line block delimiters. Collected out of the output entirely,
         // so a block's contents never appear twice.
-        if let Some(i) = l.find("<<<ASS-BEGIN ") {
-            if let Some(end) = l[i + 13..].find(">>>") {
-                open = Some((l[i + 13..i + 13 + end].trim().to_string(), Vec::new()));
-                continue;
-            }
+        if let Some(i) = l.find("<<<ASS-BEGIN ")
+            && let Some(end) = l[i + 13..].find(">>>")
+        {
+            open = Some((l[i + 13..i + 13 + end].trim().to_string(), Vec::new()));
+            continue;
         }
-        if let Some(i) = l.find("<<<ASS-END ") {
-            if let Some(end) = l[i + 11..].find(">>>") {
-                let key = l[i + 11..i + 11 + end].trim().to_string();
-                if let Some((k, body)) = open.take() {
-                    if k == key {
-                        blocks.push((k, body.join("\n").trim().to_string()));
-                        continue;
-                    }
-                    open = Some((k, body));
+        if let Some(i) = l.find("<<<ASS-END ")
+            && let Some(end) = l[i + 11..].find(">>>")
+        {
+            let key = l[i + 11..i + 11 + end].trim().to_string();
+            if let Some((k, body)) = open.take() {
+                if k == key {
+                    blocks.push((k, body.join("\n").trim().to_string()));
+                    continue;
                 }
-                continue;
+                open = Some((k, body));
             }
+            continue;
         }
         if let Some((_, body)) = open.as_mut() {
             body.push(l);
@@ -862,13 +866,13 @@ fn strip_sentinels(s: &str, _genid: u64) -> (String, Vec<(String, String)>, Vec<
                 continue;
             }
         }
-        if let Some(rest) = l.find("<<<ASS-DATA ").map(|i| &l[i + 12..]) {
-            if let Some(end) = rest.find(">>>") {
-                let mut it = rest[..end].splitn(2, ' ');
-                if let (Some(k), Some(v)) = (it.next(), it.next()) {
-                    data.push((k.to_string(), v.trim().to_string()));
-                    continue;
-                }
+        if let Some(rest) = l.find("<<<ASS-DATA ").map(|i| &l[i + 12..])
+            && let Some(end) = rest.find(">>>")
+        {
+            let mut it = rest[..end].splitn(2, ' ');
+            if let (Some(k), Some(v)) = (it.next(), it.next()) {
+                data.push((k.to_string(), v.trim().to_string()));
+                continue;
             }
         }
         kept.push(l);
@@ -878,10 +882,10 @@ fn strip_sentinels(s: &str, _genid: u64) -> (String, Vec<(String, String)>, Vec<
     // fires.
     let mut out = kept.join("\n").trim_start_matches(['\n', '\r']).to_string();
     // Drop a leading "PKG !>" left over from the prompt preceding our input.
-    if let Some(i) = out.find("!>") {
-        if !out[..i].contains('\n') {
-            out = out[i + 2..].to_string();
-        }
+    if let Some(i) = out.find("!>")
+        && !out[..i].contains('\n')
+    {
+        out = out[i + 2..].to_string();
     }
     (out.trim_start_matches(['\n', '\r']).to_string(), data, blocks)
 }

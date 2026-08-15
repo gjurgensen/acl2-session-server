@@ -196,10 +196,7 @@ impl Build {
     pub fn kill(&mut self) -> Result<(), CertError> {
         // Negating the pid addresses the process group, which is why the child
         // was put in one of its own.
-        if let Ok(pgid) = rustix::process::Pid::from_raw(self.child.id() as i32)
-            .ok_or(())
-            .map(rustix::process::Pid::from)
-        {
+        if let Some(pgid) = rustix::process::Pid::from_raw(self.child.id() as i32) {
             let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::TERM);
         }
         let _ = self.child.kill();

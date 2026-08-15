@@ -81,7 +81,7 @@ fn prove_ms_of(time: Option<&str>) -> Option<u64> {
     }
     // Round half up, in integer arithmetic: exactness is the one virtue of
     // the rational form worth keeping.
-    Some(((num * 1000 + den / 2) / den).try_into().ok()?)
+    ((num * 1000 + den / 2) / den).try_into().ok()
 }
 
 /// An inner event of a form that failed: full detail.
@@ -696,6 +696,26 @@ pub struct CertifyReply {
     pub elapsed_ms: u128,
 }
 
+pub fn certified(r: &acl2_session::cert::CertReport) -> CertifyReply {
+    use acl2_session::cert::CertStatus;
+    CertifyReply {
+        outcome: match r.status {
+            CertStatus::Certified => "certified",
+            CertStatus::Failed => "failed",
+            CertStatus::StillRunning => "still_running",
+        }
+        .to_string(),
+        book: r.book.display().to_string(),
+        failed_books: r.failed_books.iter().map(|p| p.display().to_string()).collect(),
+        failed_in_dependency: r.failed_in_dependency(),
+        error_line: r.error_line.clone(),
+        output_ref: r.output_ref.as_ref().map(|o| o.to_string()),
+        output_lines: r.output_lines,
+        tail: r.tail.clone(),
+        elapsed_ms: r.elapsed.as_millis(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::prove_ms_of;
@@ -716,25 +736,5 @@ mod tests {
         assert_eq!(prove_ms_of(Some("(x y z)")), None);
         assert_eq!(prove_ms_of(Some("(1/0 0 0 0)")), None);
         assert_eq!(prove_ms_of(None), None);
-    }
-}
-
-pub fn certified(r: &acl2_session::cert::CertReport) -> CertifyReply {
-    use acl2_session::cert::CertStatus;
-    CertifyReply {
-        outcome: match r.status {
-            CertStatus::Certified => "certified",
-            CertStatus::Failed => "failed",
-            CertStatus::StillRunning => "still_running",
-        }
-        .to_string(),
-        book: r.book.display().to_string(),
-        failed_books: r.failed_books.iter().map(|p| p.display().to_string()).collect(),
-        failed_in_dependency: r.failed_in_dependency(),
-        error_line: r.error_line.clone(),
-        output_ref: r.output_ref.as_ref().map(|o| o.to_string()),
-        output_lines: r.output_lines,
-        tail: r.tail.clone(),
-        elapsed_ms: r.elapsed.as_millis(),
     }
 }

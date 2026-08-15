@@ -135,16 +135,16 @@ impl ImagePolicy {
     /// otherwise the configured default. A derived image is never used from an
     /// untrusted location, however plausible it looks.
     pub fn resolve(&self, book: &Path) -> Result<PathBuf, ImageError> {
-        if let Some(checkout) = find_checkout(book) {
-            if self.is_trusted(&checkout) {
-                let image = checkout.join(IMAGE_NAME);
-                if image.is_file() {
-                    return Ok(image);
-                }
-                // Trusted but unbuilt. Falling back here would run the book
-                // against a different checkout's world.
-                return Err(ImageError::Unbuilt { checkout });
+        if let Some(checkout) = find_checkout(book)
+            && self.is_trusted(&checkout)
+        {
+            let image = checkout.join(IMAGE_NAME);
+            if image.is_file() {
+                return Ok(image);
             }
+            // Trusted but unbuilt. Falling back here would run the book
+            // against a different checkout's world.
+            return Err(ImageError::Unbuilt { checkout });
         }
         self.default
             .clone()
@@ -173,10 +173,10 @@ impl ImagePolicy {
     /// to discover the permitted set.
     pub fn available(&self) -> Vec<PathBuf> {
         let mut found: Vec<PathBuf> = Vec::new();
-        if let Some(d) = &self.default {
-            if d.is_file() {
-                found.push(d.clone());
-            }
+        if let Some(d) = &self.default
+            && d.is_file()
+        {
+            found.push(d.clone());
         }
         for root in &self.trusted {
             collect_images(root, 0, &mut found);
