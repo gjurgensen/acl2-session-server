@@ -434,6 +434,22 @@ fn unquote(v: &str) -> Option<String> {
     t.strip_prefix('"').and_then(|t| t.strip_suffix('"')).map(str::to_string)
 }
 
+/// How many inner events the probe reads detail (abort causes, rules) for.
+///
+/// Names are complete however many there are; this bounds only the detail.
+/// A consumer is told where it stops, because "no rules" and "rules not read"
+/// look identical otherwise -- the silent-incompleteness trap that made a
+/// three-name `inner` list read as the whole story.
+///
+/// Three is not a magic number: fmt indexes `~x0` to `~x9`, so one `cw` carried
+/// three events' worth of fields plus a marker. It stays because the detail
+/// that matters is always in reach -- `event-data-fal` is newest-first and a
+/// compound form stops at the event that failed, so that event is at index 0.
+/// Detail for the rest is per-event in the captured log: search a form's
+/// output for `Rules:` and it is there under a `Form:` header, 13 of them for
+/// a `defines` clique.
+pub const INNER_DETAIL_SLOTS: usize = 3;
+
 /// Every value recorded under a repeated key, with ACL2's wrapping undone.
 ///
 /// The probes print list-valued data one element per line with a distinguishing
@@ -462,7 +478,7 @@ fn parse_inner(sub: &crate::session::Submission) -> (Vec<InnerEvent>, usize) {
     // a long one: the reporter found two of a clique's own functions in the
     // world and absent from this list, with nothing to say it was truncated.
     let names = items(&pairs, "iname");
-    // Names are complete; the per-event detail is read for the first three.
+    // Names are complete; the per-event detail is read for the first few.
     //
     // That number is a leftover -- fmt indexes `~x0` to `~x9`, so one `cw`
     // carried three events' worth -- but it costs nothing where it matters.
@@ -473,8 +489,11 @@ fn parse_inner(sub: &crate::session::Submission) -> (Vec<InnerEvent>, usize) {
     //
     // What the limit does cost is the rules used by *non-failing* inner events
     // past the third, on a form that failed. Raising it means more `~*` passes,
-    // one per slot; do that if anyone ever wants them, not before.
+    // one per slot. Either way a reader must be told where the detail stops,
+    // since an entry with no rules is otherwise indistinguishable from one
+    // whose rules were never read -- see `INNER_DETAIL_SLOTS`.
     let detail = [("a0", "r0rune"), ("a1", "r1rune"), ("a2", "r2rune")];
+    debug_assert_eq!(detail.len(), INNER_DETAIL_SLOTS);
     let mut out = Vec::new();
     for (i, name) in names.iter().enumerate() {
         // Names are cheap and complete; the per-event detail is not, and is

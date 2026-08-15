@@ -135,6 +135,18 @@ pub struct Failed {
     pub prover_steps: Option<u64>,
     pub checkpoints: Checkpoints,
     pub inner: Vec<InnerEvent>,
+    /// How many of `inner` carry detail (`rules`, `abort_causes`).
+    ///
+    /// `inner` names **every** event the form introduced, but the probe reads
+    /// detail for the first few only. Past this index an entry is a name and
+    /// nothing else, so an empty `rules` there means "not read", not "used no
+    /// rules" -- the distinction this field exists to make.
+    ///
+    /// The event that failed is always within it: ACL2 records newest-first
+    /// and a compound form stops at the event that failed, putting it at index
+    /// 0. For the rest, search that form's `output_ref` for `Rules:`, which
+    /// ACL2 prints per event under a `Form:` header.
+    pub inner_detail_through: usize,
     /// The inner event that failed, when the form was compound.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failed_event: Option<String>,
@@ -254,6 +266,7 @@ pub fn failed(f: &core::sync::FailureReport) -> Failed {
             pre_revert: f.checkpoints.pre_revert,
         },
         inner: f.inner.iter().map(inner_failed).collect(),
+        inner_detail_through: f.inner.len().min(acl2_session::sync::INNER_DETAIL_SLOTS),
         failed_event: f.failed_event().map(|e| e.name.clone()),
         output_ref: f.output_ref.to_string(),
         output_lines: f.output_lines,

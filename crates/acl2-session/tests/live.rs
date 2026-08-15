@@ -714,3 +714,42 @@ fn an_interrupted_forms_output_survives() {
     let ev = b.eval("(+ 1 1)", Duration::from_secs(30)).unwrap();
     assert_eq!(ev.outcome, acl2_session::Outcome::Ok);
 }
+
+/// Inner names are complete; detail is bounded, and the failing event is in it.
+#[test]
+#[ignore = "needs ACL2"]
+fn inner_names_are_complete_and_the_failing_event_carries_detail() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("inner-detail");
+    let file = dir.join("p.lisp");
+    std::fs::write(
+        &file,
+        "(in-package \"ACL2\")\n\
+         (progn\n\
+           (defthm q1 (equal (car (cons a b)) a) :rule-classes nil)\n\
+           (defthm q2 (equal (cdr (cons a b)) b) :rule-classes nil)\n\
+           (defthm q3 (equal (append nil x) (append nil x)) :rule-classes nil)\n\
+           (defthm q4-bogus (equal (car x) 99) :rule-classes nil))\n",
+    )
+    .unwrap();
+    let mut b = Book::open(&acl2, &file).unwrap();
+    let o = b.sync(None, Duration::from_secs(120)).unwrap();
+    let f = o.failed.expect("q4-bogus is false");
+
+    let names: Vec<&str> = f.inner.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, vec!["q4-bogus", "q3", "q2", "q1"],
+               "every inner event is named, newest first");
+
+    // The event that failed is at index 0 -- failing is what puts it there --
+    // so it is always inside the bounded detail window.
+    assert!(f.inner[0].abort_causes.is_some(), "the failing event carries its cause");
+    assert!(!f.inner[0].rules.is_empty(), "and its rules");
+    assert_eq!(f.failed_event().map(|e| e.name.as_str()), Some("q4-bogus"));
+
+    // Past the window an entry is a name and nothing more. A consumer is told
+    // where that starts, so an empty `rules` is never mistaken for "used none".
+    for e in f.inner.iter().skip(acl2_session::sync::INNER_DETAIL_SLOTS) {
+        assert!(e.rules.is_empty() && e.abort_causes.is_none(),
+                "no detail is read past the window: {}", e.name);
+    }
+}
