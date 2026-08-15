@@ -372,9 +372,44 @@ pub struct EvalReply {
     /// `dirty` -- events were introduced and the undo could not be verified;
     /// the next sync rebuilds by replay.
     pub world_change: String,
+    /// Why the form failed, when it did: the same envelope a sync failure
+    /// carries. For the experimental `thm` -- the form eval exists for --
+    /// this is where the checkpoints and abort cause live.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed: Option<EvalFailed>,
     pub output_ref: String,
     pub output_lines: usize,
     pub elapsed_ms: u128,
+}
+
+/// The failure envelope of an eval'd form. The same fields as a sync
+/// failure's, minus the file coordinates an eval does not have; see `Failed`
+/// for what each means.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct EvalFailed {
+    /// `proof_failure` -- a proof ran and did not finish; checkpoints and an
+    /// abort cause are available. `rejected` -- ACL2 declined the form before
+    /// any proof.
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub abort_cause: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_line: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prover_steps: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step_limit_reached: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed_kind: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hint_events: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub splitter_rules: Vec<String>,
+    pub checkpoints: Checkpoints,
+    pub inner: Vec<InnerEvent>,
+    pub inner_detail_through: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed_event: Option<String>,
 }
 
 pub fn evaluated(r: &core::EvalResult) -> EvalReply {
@@ -391,6 +426,31 @@ pub fn evaluated(r: &core::EvalResult) -> EvalReply {
             core::WorldChange::Dirty => "dirty",
         }
         .to_string(),
+        failed: r.failed.as_ref().map(|f| {
+            let (prover_steps, step_limit_reached) = steps_split(f.event_data.prover_steps);
+            EvalFailed {
+                status: match f.status {
+                    core::Status::ProofFailure => "proof_failure",
+                    core::Status::Rejected => "rejected",
+                    core::Status::DeadlineExceeded => "deadline_exceeded",
+                }
+                .to_string(),
+                abort_cause: f.checkpoints.abort_cause.clone(),
+                error_line: f.error_line.clone(),
+                prover_steps,
+                step_limit_reached,
+                failed_kind: f.failed_event().and_then(|e| e.kind.clone()),
+                hint_events: f.event_data.hint_events.clone(),
+                splitter_rules: f.event_data.splitter_rules.clone(),
+                checkpoints: checkpoints(&f.checkpoints),
+                inner: f.inner.iter().map(inner_failed).collect(),
+                inner_detail_through: f
+                    .inner
+                    .len()
+                    .min(acl2_session::sync::INNER_DETAIL_SLOTS),
+                failed_event: f.failed_event().map(|e| e.name.clone()),
+            }
+        }),
         output_ref: r.output_ref.to_string(),
         output_lines: r.output_lines,
         elapsed_ms: r.elapsed.as_millis(),

@@ -292,7 +292,10 @@ impl Acl2Mcp {
 
     #[tool(description = "Evaluate a one-off form without changing the logical \
         world. Use for queries (pe, pl, pr, disabledp), experiments (thm), and \
-        settings. Anything it defines is undone and will not be visible later.")]
+        settings. Anything it defines is undone and will not be visible later. \
+        A form that fails reports the same envelope a sync failure does -- \
+        checkpoints with goal names, abort cause, error line -- so a failed \
+        thm experiment is directly debuggable from the reply.")]
     async fn acl2_eval(
         &self,
         Parameters(a): Parameters<EvalArgs>,

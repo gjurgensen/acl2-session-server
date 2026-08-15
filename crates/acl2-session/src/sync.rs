@@ -352,9 +352,40 @@ pub enum WorldChange {
 pub struct EvalResult {
     pub outcome: Outcome,
     pub world_change: WorldChange,
+    /// Why the form failed, when it did -- the same envelope a sync failure
+    /// carries, minus the file coordinates an eval does not have. The
+    /// experimental `thm` is the form evals exist for, and a failed
+    /// experiment used to report nothing but "failed" plus a log handle --
+    /// the agent was back to fishing in prose for exactly the form it was
+    /// actively debugging.
+    pub failed: Option<EvalFailure>,
     pub output_ref: OutputRef,
     pub output_lines: usize,
     pub elapsed: Duration,
+}
+
+/// The failure envelope of an eval'd form.
+#[derive(Debug)]
+pub struct EvalFailure {
+    /// `ProofFailure` or `Rejected`; never `DeadlineExceeded`, which is an
+    /// outcome (`StillRunning`), not a failure.
+    pub status: Status,
+    pub error_line: Option<String>,
+    pub event_data: EventData,
+    pub checkpoints: Checkpoints,
+    pub inner: Vec<InnerEvent>,
+    pub inner_total: usize,
+}
+
+impl EvalFailure {
+    /// The inner event that actually failed. Same selection as
+    /// [`FailureReport::failed_event`].
+    pub fn failed_event(&self) -> Option<&InnerEvent> {
+        self.inner
+            .iter()
+            .find(|e| e.abort_causes.is_some())
+            .or_else(|| self.inner.iter().find(|e| e.has_namex == Some(false)))
+    }
 }
 
 /// What an interrupt accomplished.
@@ -364,9 +395,9 @@ pub struct InterruptReport {
     pub ok: bool,
     /// What ACL2 recorded about the interrupted form. Present when the
     /// interrupt landed, something was actually in flight, and the recorded
-    /// abort cause really names an interrupt -- an eval body runs no
-    /// stale-state clearing, so anything less specific could describe some
-    /// earlier event.
+    /// abort cause really names an interrupt -- anything less specific could
+    /// describe some earlier event, since not every submission path clears
+    /// the stale-failure globals first.
     pub interrupted: Option<InterruptEnvelope>,
 }
 
@@ -864,9 +895,10 @@ const CHECKPOINT_PROBE: &str = r#"(acl2::let*
 /// arbitrarily large, so it prints under an evisc tuple -- this is an
 /// envelope, not the record; the record is the partial capture.
 ///
-/// The caller trusts this only when `iabort` actually names an interrupt:
-/// an eval body runs no `CLEAR_STALE`, so after interrupting one of those,
-/// `last-event-data` may still describe some earlier event.
+/// The caller trusts this only when `iabort` actually names an interrupt.
+/// Sync units and evals both run `CLEAR_STALE` first, so the record is
+/// normally fresh; the gate stays as belt-and-braces for the paths that do
+/// not clear (a raw submission, a handshake).
 const INTERRUPT_PROBE: &str = r#"(acl2::prog2$
   (acl2::cw "~%<<<ASS-BEGIN intr>>>~%iabort ~x0~%itime ~x1~%isteps ~x2~%"
     (acl2::get-event-data 'acl2::abort-causes acl2::state)
@@ -1237,7 +1269,14 @@ impl Book {
         if self.session.is_running() {
             return Err(SyncError::Busy { index: self.running_unit() });
         }
-        let body = format!("{form}\n{CMD_PROBE}");
+        // CLEAR_STALE for the same reason every sync unit gets it: a failing
+        // eval must never inherit another form's checkpoints, and a
+        // translate-level failure overwrites nothing. The cost is that
+        // `gag-state-saved` and `last-event-data` from an earlier failure are
+        // not visible to an eval'd form -- accepted, because the envelope
+        // already delivered them structurally, and `:pso` (the post-mortem
+        // that matters) reads `saved-output-reversed`, which is untouched.
+        let body = format!("{CLEAR_STALE}\n{form}\n{CMD_PROBE}");
         let sub = self.session.submit(&body, deadline)?;
         self.finish_eval(sub, deadline)
     }
@@ -1251,7 +1290,42 @@ impl Book {
     ) -> Result<EvalResult, SyncError> {
         let output_ref = self.record_output(&sub)?;
         let output_lines = self.outputs.lines(&output_ref).unwrap_or(0);
-        let after: Option<i64> = sub.get("cmd").and_then(|v| v.parse().ok());
+        // Probe before the undo: rolling back is itself a submission, and the
+        // envelope must describe the form that failed, not the bookkeeping
+        // after it. Floored like every post-mortem probe.
+        let failed = if sub.outcome == Outcome::Failed {
+            let (event_data, checkpoints, inner, inner_total) =
+                self.probe_after_failure(deadline.max(PROBE_FLOOR));
+            Some(EvalFailure {
+                status: if checkpoints.proof_ran {
+                    Status::ProofFailure
+                } else {
+                    Status::Rejected
+                },
+                error_line: error_message(&sub.output),
+                event_data,
+                checkpoints,
+                inner,
+                inner_total,
+            })
+        } else {
+            None
+        };
+        let after: Option<i64> = match sub.get("cmd") {
+            Some(v) => v.parse().ok(),
+            // A failing form aborts its `ld` before the trailing probe runs,
+            // so ask again. This is not merely bookkeeping: an eval string
+            // may hold several top-level forms, and one can introduce events
+            // before a later one fails -- skipping the check because the
+            // marker never printed silently kept those events, which is a
+            // world the file does not describe.
+            None if sub.outcome == Outcome::Failed => self
+                .session
+                .submit(CMD_PROBE, deadline.max(PROBE_FLOOR))
+                .ok()
+                .and_then(|s| s.get("cmd").and_then(|v| v.parse().ok())),
+            None => None,
+        };
 
         let mut world_change = WorldChange::None;
         if let (Some(a), Some(e)) = (after, self.expected_command_number()) {
@@ -1275,6 +1349,7 @@ impl Book {
         Ok(EvalResult {
             outcome: sub.outcome,
             world_change,
+            failed,
             output_ref,
             output_lines,
             elapsed: sub.elapsed,

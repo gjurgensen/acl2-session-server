@@ -766,6 +766,65 @@ fn inner_names_are_complete_and_the_failing_event_carries_detail() {
     }
 }
 
+/// A failed eval carries the same envelope a sync failure does.
+///
+/// The experimental `thm` is what eval exists for, and a failed experiment
+/// used to report nothing but "failed" plus a log handle. Also pins two
+/// rules: a failure that ran no prover must not inherit an earlier proof's
+/// checkpoints (eval bodies clear the failure globals exactly as sync units
+/// do), and events introduced before a later form in the same eval fails are
+/// found and undone even though the failure aborted the trailing probe.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_failed_eval_carries_the_failure_envelope() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("eval-env");
+    let file = dir.join("e.lisp");
+    write(&file, &["(in-package \"ACL2\")", ALPHA]);
+    let mut b = Book::open(&acl2, &file).unwrap();
+    b.sync(None, D).unwrap();
+
+    // A false thm: a proof runs, fails, and the envelope says why.
+    let r = b.eval("(acl2::thm (acl2::equal (alpha x) x))", D).unwrap();
+    assert_eq!(r.outcome, acl2_session::Outcome::Failed);
+    let f = r.failed.as_ref().expect("a failed eval must carry the envelope");
+    assert_eq!(f.status, Status::ProofFailure);
+    assert_eq!(f.checkpoints.abort_cause.as_deref(), Some("empty-clause"),
+               "a false conjecture is distinguished from an unproven one");
+    assert!(!f.checkpoints.top.is_empty() || !f.checkpoints.sub.is_empty(),
+            "the checkpoints are where the debugging starts");
+
+    // A translate-level failure right after: no proof ran, and the thm's
+    // checkpoints above must not be inherited.
+    let r = b.eval("(acl2::no-such-function-anywhere x)", D).unwrap();
+    assert_eq!(r.outcome, acl2_session::Outcome::Failed);
+    let f = r.failed.as_ref().expect("still an envelope");
+    assert_eq!(f.status, Status::Rejected, "no proof ran");
+    assert!(f.checkpoints.top.is_empty() && f.checkpoints.sub.is_empty(),
+            "the earlier thm's checkpoints must not leak in");
+    assert!(f.error_line.is_some(), "the error line is surfaced");
+
+    // A batch eval that introduces an event before a later form fails: the
+    // event must be undone although the failure aborted the trailing probe.
+    let r = b
+        .eval("(acl2::defun ev-stray (acl2::x) acl2::x) (acl2::no-such-fn)", D)
+        .unwrap();
+    assert_eq!(r.outcome, acl2_session::Outcome::Failed);
+    assert_eq!(r.world_change, WorldChange::Undone,
+               "events before the failing form are found and undone");
+    let q = b.eval("(acl2::pe 'ev-stray)", D).unwrap();
+    let text = b.output(&q.output_ref, Slice::All).unwrap().text.to_lowercase();
+    assert!(text.contains("error") || text.contains("not"),
+            "the stray defun must be gone: {text}");
+
+    // Success carries nothing.
+    let r = b.eval("(acl2::+ 1 1)", D).unwrap();
+    assert_eq!(r.outcome, acl2_session::Outcome::Ok);
+    assert!(r.failed.is_none());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A crashed ACL2 must read as dead, not busy forever.
 ///
 /// `is_running` is bookkeeping; a child that dies mid-form leaves it set. The
