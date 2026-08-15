@@ -148,12 +148,14 @@ the splitter across every book in a tree if `ACL2_BOOKS` is also set.
 
 ```
 crates/
-  acl2-session/      core: ACL2 process, file-prefix invariant, form
-                     splitting, structured extraction. No transport.
-  acl2-session-mcp/  MCP server: wire types and a mapping onto the core.
+  acl2-session/         core: ACL2 process, file-prefix invariant, form
+                        splitting, structured extraction. No transport.
+  acl2-session-mcp/     MCP server: wire types and a mapping onto the core.
+  acl2-session-editor/  editor daemon: JSON-RPC over stdio, one stepping
+                        driver per book. Early; a VSCode client is next.
 ```
 
-The core is transport-neutral because an editor is a plausible second client.
+The core is transport-neutral, and the editor daemon is its second client.
 The split is a workspace boundary rather than a naming convention, so the
 compiler enforces it.
 

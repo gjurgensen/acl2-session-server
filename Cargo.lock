@@ -10,6 +10,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "acl2-session-editor"
+version = "0.0.1"
+dependencies = [
+ "acl2-session",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "acl2-session-mcp"
 version = "0.0.1"
 dependencies = [

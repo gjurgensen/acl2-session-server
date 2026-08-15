@@ -9,12 +9,21 @@
 #   acl2-session-mcp  the MCP server. A thin mapping from tool calls onto the
 #                     core, owning its own wire types.
 #
-# An editor-facing interface is a plausible third crate. The core must stay
-# usable by one without dragging in the other's dependencies.
+#   acl2-session-editor  the editor daemon. JSON-RPC 2.0 over stdio; a
+#                     stepping driver per book turns syncs into the event
+#                     stream an editor paints from. Owns its own wire types,
+#                     richer than the MCP's on purpose.
+#
+# The core must stay usable by any one interface without dragging in the
+# others' dependencies.
 
 [workspace]
 resolver = "3"
-members = ["crates/acl2-session", "crates/acl2-session-mcp"]
+members = [
+    "crates/acl2-session",
+    "crates/acl2-session-mcp",
+    "crates/acl2-session-editor",
+]
 
 [workspace.package]
 version = "0.0.1"
