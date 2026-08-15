@@ -318,7 +318,8 @@ pub struct SyncOutcome {
     pub resolved_through: Option<usize>,
     /// Prefix units left untouched because their hashes still matched.
     pub reused: usize,
-    /// Units undone because the file changed beneath them.
+    /// Units undone -- because the snapshot changed beneath them, or
+    /// because a retraction asked (`Book::retract_to`).
     pub rolled_back: usize,
     pub admitted: Vec<UnitReport>,
     pub failed: Option<FailureReport>,
@@ -1586,6 +1587,76 @@ impl Book {
                     break;
                 }
             }
+        }
+        Ok(out)
+    }
+
+    /// Undo admitted units on request, keeping only the first `keep`.
+    ///
+    /// The editor's undo verb -- Proof General's "retract to here", the
+    /// muscle memory `sync` deliberately refuses (a target bounds admission
+    /// and never retracts). Keeping the two contracts on two verbs keeps
+    /// both simple, and this one stays off the MCP surface: for an agent,
+    /// undo remains a consequence of editing.
+    ///
+    /// BYTES is the caller's current snapshot, doing two jobs. It bounds
+    /// the request -- the prefix kept is `min(keep, common prefix of the
+    /// snapshot with the admitted units)`, so retracting under an edited
+    /// buffer keeps only what is both requested and still current; a "kept"
+    /// unit must mean "unit `i` of the snapshot is in the world", and units
+    /// above an edit were headed for rollback at the next sync anyway. And
+    /// it feeds the fallback: an unverifiable rollback degrades to
+    /// `rebuild`, which replays from the snapshot, like any other undo the
+    /// checks would not vouch for.
+    ///
+    /// The reply is the sync shape: `reused` counts the kept prefix,
+    /// `rolled_back` the units undone, nothing is newly admitted, and
+    /// `failed` carries the one non-error surprise -- a rebuild fallback
+    /// whose replay outran the deadline, left as a valid shorter prefix
+    /// plus one unit in flight for `resume`, exactly as a sync leaves it.
+    ///
+    /// Retraction pauses nothing by itself: with no target, the next sync
+    /// re-admits what was just undone. The daemon pairs the two, moving its
+    /// `through_line` back alongside.
+    pub fn retract_to(
+        &mut self,
+        bytes: &[u8],
+        keep: usize,
+        deadline: Duration,
+    ) -> Result<SyncOutcome, SyncError> {
+        if self.session.is_running() {
+            return Err(SyncError::Busy { index: self.running_unit() });
+        }
+        let budget = Budget::new(deadline);
+        let units = split(bytes).map_err(SyncError::Split)?;
+        let hashes: Vec<u64> = self.admitted.iter().map(|a| a.hash).collect();
+        let allowed = keep.min(common_prefix(&hashes, &units));
+        let mut out = SyncOutcome {
+            reused: allowed,
+            rolled_back: self.admitted.len() - allowed,
+            ..SyncOutcome::default()
+        };
+        if self.dirty {
+            // The admitted list is already under suspicion; replaying
+            // exactly the kept prefix restores it by construction, and the
+            // retraction rides along for free.
+            out.rebuilt = true;
+            out.failed = self.rebuild(bytes, allowed, &budget)?;
+            return Ok(out);
+        }
+        if allowed == self.admitted.len() {
+            return Ok(out); // nothing to undo; no submission spent
+        }
+        match self.rollback_to(allowed, budget.floored()) {
+            Ok(()) => {}
+            // P3, as in sync: an undo that cannot be verified degrades to
+            // replay rather than being trusted.
+            Err(SyncError::RollbackFailed { .. })
+            | Err(SyncError::RollbackUnverified { .. }) => {
+                out.rebuilt = true;
+                out.failed = self.rebuild(bytes, allowed, &budget)?;
+            }
+            Err(e) => return Err(e),
         }
         Ok(out)
     }

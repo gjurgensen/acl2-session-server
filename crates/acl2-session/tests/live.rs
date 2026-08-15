@@ -179,6 +179,52 @@ fn sync_bytes_follows_the_buffer_not_the_disk() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Retraction undoes admitted units on request; under an edited buffer it
+/// keeps only what is both requested and still current.
+#[test]
+#[ignore = "needs ACL2"]
+fn retraction_keeps_what_is_asked_and_still_current() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("retract");
+    let book = dir.join("demo.lisp");
+    write(&book, &["(in-package \"ACL2\")", ALPHA,
+                   "(defthm r1 (equal (alpha nil) nil))",
+                   "(defthm r2 (equal (alpha (cons 1 nil)) nil))"]);
+    let mut b = Book::open(&acl2, &book).expect("open");
+    assert_eq!(b.sync(None, D).expect("sync").admitted.len(), 4);
+    let bytes = std::fs::read(&book).expect("read book");
+
+    // Asking to keep more than exists is a no-op, spending no submission.
+    let o = b.retract_to(&bytes, 9, D).expect("no-op retract");
+    assert_eq!((o.reused, o.rolled_back), (4, 0));
+
+    // Undo the two theorems; r1 is really gone from the world.
+    let probe = "(acl2::pe 'acl2::r1)";
+    assert_eq!(b.eval(probe, D).expect("probe").outcome, acl2_session::Outcome::Ok);
+    let o = b.retract_to(&bytes, 2, D).expect("retract");
+    assert_eq!((o.reused, o.rolled_back, o.rebuilt), (2, 2, false));
+    assert!(o.admitted.is_empty() && o.failed.is_none());
+    assert_eq!(b.eval(probe, D).expect("probe").outcome, acl2_session::Outcome::Failed,
+               "r1 must not survive the retraction");
+
+    // Retraction alone pauses nothing: an untargeted sync re-admits...
+    let o = b.sync(None, D).expect("re-sync");
+    assert_eq!((o.reused, o.admitted.len()), (2, 2));
+
+    // ...while the daemon's paired target holds the world where it was put.
+    b.retract_to(&bytes, 2, D).expect("retract again");
+    let o = b.sync(Some(3), D).expect("sync held by target");
+    assert_eq!((o.reused, o.admitted.len(), o.rolled_back), (2, 0, 0));
+
+    // A buffer edited above the request bounds it: unit 2 differs, so only
+    // the in-package before it is both requested and still current.
+    let edited = format!("(in-package \"ACL2\")\n\n{}\n", ALPHA.replace("alpha", "alfa"));
+    let o = b.retract_to(edited.as_bytes(), 2, D).expect("bounded retract");
+    assert_eq!((o.reused, o.rolled_back), (1, 1));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Rebuild by replay leaves a world the prefix diff accepts.
 #[test]
 #[ignore = "needs ACL2"]
