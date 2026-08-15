@@ -366,6 +366,12 @@ impl Session {
         self.control.clone()
     }
 
+    /// The ACL2 process id. Exposed for tests that must be able to kill the
+    /// child out from under the session and watch the bookkeeping notice.
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     /// Whether the ACL2 process itself is still there.
     ///
     /// `try_wait` rather than bookkeeping: `inflight` says a form was

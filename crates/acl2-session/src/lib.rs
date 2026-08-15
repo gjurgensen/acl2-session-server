@@ -29,6 +29,6 @@ pub use image::{find_checkout, ImageError, ImagePolicy};
 pub use output::{OutputRef, OutputSlice, OutputStore, Slice};
 pub use session::Progress;
 pub use sync::{
-    Book, Checkpoint, EvalResult, Health, InnerEvent, InterruptEnvelope, InterruptReport,
-    Resumed, Status, SyncError, SyncOutcome, WorldChange,
+    Book, Budget, Checkpoint, EvalResult, Health, InnerEvent, InterruptEnvelope,
+    InterruptReport, Resumed, Status, SyncError, SyncOutcome, WorldChange,
 };

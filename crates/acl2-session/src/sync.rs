@@ -957,9 +957,18 @@ fn parse_checkpoints(sub: &crate::session::Submission) -> Checkpoints {
 /// they sit inside `progn`s in real books -- so the first error in a compound
 /// unit may be an expected decoy. The genuine failure is the one the `ld`
 /// stopped at, and nothing prints an error after it.
+///
+/// With one exception: a `.cert.out` ends with certification's own wrap-up
+/// (`ACL2 Error [Failure] in (CERTIFY-BOOK ...): See :DOC failure.`), printed
+/// *after* the event's real error. That summary carries no information, so
+/// the last error that is not one is preferred, and the summary is only ever
+/// reported when nothing better exists.
 pub(crate) fn error_message(output: &str) -> Option<String> {
     let lines: Vec<&str> = output.lines().collect();
-    let at = lines.iter().rposition(|l| l.contains("ACL2 Error"))?;
+    let at = lines
+        .iter()
+        .rposition(|l| l.contains("ACL2 Error") && !l.contains("CERTIFY-BOOK"))
+        .or_else(|| lines.iter().rposition(|l| l.contains("ACL2 Error")))?;
     let mut msg = lines[at].trim().to_string();
     for l in &lines[at + 1..] {
         if l.trim().is_empty() {
@@ -1877,6 +1886,13 @@ impl Book {
         &self.path
     }
 
+    /// Where this image keeps its books, as ACL2 itself reported it at
+    /// startup. `None` when the report was lost -- certify then falls back to
+    /// walking for a checkout.
+    pub fn books_dir(&self) -> Option<&Path> {
+        self.books_dir.as_deref()
+    }
+
     /// The unit currently in flight, if any.
     pub fn running_unit(&self) -> Option<usize> {
         self.pending.as_ref().map(|p| p.index)
@@ -2155,6 +2171,20 @@ mod tests {
         let m = super::error_message(out).expect("an error is present");
         assert!(m.contains("REAL"), "must pick the last error paragraph: {m:?}");
         assert!(!m.contains("EXPECTED"), "the decoy must not be reported: {m:?}");
+    }
+
+    /// A `.cert.out` ends with certification's own summary error, after the
+    /// event's real one. The summary says nothing; the event error must win.
+    #[test]
+    fn certifications_wrapup_error_is_not_the_message() {
+        let out = "ACL2 Error [Failure] in ( DEFTHM H-BOGUS ...):  See :DOC\nfailure.\n\
+                   \n\
+                   ACL2 Error [Failure] in (CERTIFY-BOOK \"dep\" ...):  See :DOC\nfailure.\n";
+        let m = super::error_message(out).expect("an error is present");
+        assert!(m.contains("H-BOGUS"), "the event's own error must win: {m:?}");
+        // But when the summary is all there is, it is still reported.
+        let only = "ACL2 Error in (CERTIFY-BOOK \"dep\" ...):  something.\n";
+        assert!(super::error_message(only).unwrap().contains("CERTIFY-BOOK"));
     }
 
     /// The shapes `in_package_target` must accept, and the ones it must not.

@@ -18,7 +18,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use acl2_session::{Book, Health, Resumed, Session, Slice, Status, WorldChange};
+use acl2_session::{
+    Book, Budget, Health, Resumed, Session, SessionControl, Slice, Status, WorldChange,
+};
 
 /// The ACL2 to drive, or `None` to skip.
 fn acl2() -> Option<PathBuf> {
@@ -61,7 +63,7 @@ const FIB: &str = "(defun fib (n) (if (zp n) 0 (if (= n 1) 1 \
 fn session_submits_and_classifies() {
     let acl2 = acl2_or_skip!();
     let dir = scratch("session");
-    let mut s = Session::start(&acl2, &dir).expect("start");
+    let mut s = Session::start(&acl2, &dir, SessionControl::new()).expect("start");
 
     let ok = s
         .submit("(acl2::cw \"pkg=~x0~%\" (acl2::@ acl2::current-package))", D)
@@ -158,7 +160,8 @@ fn rebuild_restores_the_prefix() {
 
     // Its real trigger -- an unverifiable rollback -- cannot be produced on
     // demand, so drive the mechanism and check the world it leaves behind.
-    b.rebuild(2, D).expect("rebuild");
+    let r = b.rebuild(2, &Budget::new(D)).expect("rebuild");
+    assert!(r.is_none(), "the replay fits comfortably in the budget");
     assert_eq!(b.rebuilds(), 1);
     let o = b.sync(None, D).expect("sync after rebuild");
     assert_eq!(o.reused, 2, "the replayed prefix is recognised");
@@ -231,7 +234,8 @@ fn deadline_hands_back_control_without_disturbing_acl2() {
         other => panic!("expected StillRunning, got {:?}", other.is_some()),
     }
 
-    assert!(b.interrupt().expect("interrupt"), "the session recovers");
+    let ir = b.interrupt().expect("interrupt");
+    assert!(ir.ok, "the session recovers");
     assert!(b.running_unit().is_none());
     assert_eq!(b.health(Duration::from_secs(5)), Health::Ready);
 
@@ -403,10 +407,15 @@ fn a_proof_that_reverts_to_induction_reports_real_checkpoints() {
     let c = &f.checkpoints;
     assert!(c.pre_revert, "this proof reverts to induction");
     let top = c.top.first().expect("a top-level checkpoint");
-    assert!(!top.contains("<goal>"), "placeholder leaked through: {top:?}");
+    assert!(!top.term.contains("<goal>"), "placeholder leaked through: {top:?}");
     assert!(
-        top.contains("my-rev") && top.contains("equal"),
+        top.term.contains("my-rev") && top.term.contains("equal"),
         "expected the real goal term, got {top:?}"
+    );
+    assert!(
+        top.goal.as_deref().is_some_and(|g| g.starts_with("Goal") || g.starts_with("Subgoal")),
+        "the checkpoint must carry its goal name for mode:goal, got {:?}",
+        top.goal
     );
 
     // And the error message is not cut mid-sentence.
@@ -442,7 +451,7 @@ fn an_ordinary_failure_still_reports_top_stack_checkpoints() {
     assert!(!c.pre_revert, "induction was disabled, so nothing reverted");
     assert_eq!(c.abort_cause.as_deref(), Some("do-not-induct"));
     assert!(
-        c.top.first().map_or(false, |g| g.contains("17")),
+        c.top.first().map_or(false, |g| g.term.contains("17")),
         "expected the goal, got {:?}",
         c.top
     );
@@ -697,12 +706,15 @@ fn an_interrupted_forms_output_survives() {
     let mut b = Book::open(&acl2, &file).unwrap();
     b.sync(None, Duration::from_secs(60)).unwrap();
 
-    let noisy = "(ld (make-list 4000 :initial-element '(cw \"~x0~%\" (make-list 200))))";
-    let r = b.eval(noisy, Duration::from_millis(400)).unwrap();
+    // Large enough that the printing certainly outlives the deadline: the
+    // capture path got fast enough that the old 4000-element version could
+    // finish inside it.
+    let noisy = "(ld (make-list 60000 :initial-element '(cw \"~x0~%\" (make-list 200))))";
+    let r = b.eval(noisy, Duration::from_millis(200)).unwrap();
     assert_eq!(r.outcome, acl2_session::Outcome::StillRunning);
     let handed_out = r.output_ref.clone();
 
-    assert!(b.interrupt().expect("interrupt"), "the form must be interruptible");
+    assert!(b.interrupt().expect("interrupt").ok, "the form must be interruptible");
 
     let got = b.output(&handed_out, Slice::All).expect("still readable after interrupt");
     assert!(got.total_lines > 0,
@@ -752,4 +764,292 @@ fn inner_names_are_complete_and_the_failing_event_carries_detail() {
         assert!(e.rules.is_empty() && e.abort_causes.is_none(),
                 "no detail is read past the window: {}", e.name);
     }
+}
+
+/// A crashed ACL2 must read as dead, not busy forever.
+///
+/// `is_running` is bookkeeping; a child that dies mid-form leaves it set. The
+/// EOF reader then returns instantly, resume says still_running on every
+/// call, health says busy, and nothing ever tells the client the truth. The
+/// exit is close-and-reopen, and the session must say so.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_killed_acl2_reads_as_dead_not_busy() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("killed");
+    let file = dir.join("k.lisp");
+    std::fs::write(&file, "(in-package \"ACL2\")\n").unwrap();
+    let mut b = Book::open(&acl2, &file).unwrap();
+    b.sync(None, Duration::from_secs(60)).unwrap();
+
+    // Put a form in flight, then kill the child the way an oom-killer would.
+    let noisy = "(ld (make-list 4000 :initial-element '(cw \"~x0~%\" (make-list 200))))";
+    let r = b.eval(noisy, Duration::from_millis(1)).unwrap();
+    assert_eq!(r.outcome, acl2_session::Outcome::StillRunning);
+    let pid = b.session().pid();
+    let killed = std::process::Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .status()
+        .expect("run kill");
+    assert!(killed.success(), "kill -9 must reach the child");
+
+    // Resume must not report still_running about a corpse.
+    let err = loop {
+        match b.resume(Duration::from_secs(2)) {
+            Err(e) => break e,
+            Ok(Some(Resumed::StillRunning { .. })) => continue,
+            Ok(other) => panic!("a dead child cannot finish a form: {:?}", other.is_some()),
+        }
+    };
+    let msg = err.to_string();
+    assert!(msg.contains("exited"), "the error must say what happened: {msg}");
+    assert!(msg.contains("close"), "and what to do about it: {msg}");
+
+    assert_eq!(b.health(Duration::from_secs(2)), Health::Dead);
+}
+
+/// A value ACL2's fmt wraps at the margin survives the block protocol.
+///
+/// The environment report used to travel in one-line `ASS-DATA` markers, and
+/// ACL2 wraps `~x` at the right margin, so a books path longer than the
+/// margin lost its closing `>>>` -- the datum silently vanished and the
+/// marker fragments leaked into the capture. The report now travels in a
+/// BEGIN/END block. This drives a value long past the margin through the real
+/// fmt and asserts nothing is lost and nothing leaks; the width cannot be
+/// exercised via `system-books-dir` itself, since that path is baked into the
+/// image, not something a test controls.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_wrapped_block_value_survives_the_real_fmt() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("wrap");
+    let mut s = Session::start(&acl2, &dir, SessionControl::new()).expect("start");
+
+    let long: String =
+        (0..14).map(|i| format!("/deeply-nested-directory-{i:02}")).collect::<String>() + "/books/";
+    assert!(long.len() > 120, "the value must outrun ACL2's margin");
+    let probe = format!(
+        "(acl2::prog2$ (acl2::cw \"~%<<<ASS-BEGIN env>>>~%inhibit ~x0~%sbd ~x1~%<<<ASS-END env>>>~%\" \
+           '(acl2::proof-tree acl2::observation acl2::warning acl2::history acl2::summary) \
+           \"{long}\") \
+         (acl2::value :invisible))"
+    );
+    let sub = s.submit(&probe, D).expect("submit");
+    assert_eq!(sub.outcome, acl2_session::Outcome::Ok);
+
+    let body = sub.block("env").expect("the block must arrive as a block");
+    let flat: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(flat.contains(&long),
+            "the wrapped value must survive whole; got block: {body:?}");
+    assert!(flat.contains("proof-tree") || flat.to_lowercase().contains("proof-tree"),
+            "the inhibit list survives too: {body:?}");
+    assert!(!sub.output.contains("<<<ASS-"),
+            "no marker fragments may leak into the capture: {:?}", sub.output);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A deeply nested book directory works end to end, and the environment
+/// report survives it.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_deeply_nested_book_directory_works() {
+    let acl2 = acl2_or_skip!();
+    let mut dir = scratch("deep");
+    for _ in 0..6 {
+        dir = dir.join("a-rather-deeply-nested-directory-level");
+    }
+    std::fs::create_dir_all(&dir).expect("deep scratch dir");
+    assert!(dir.to_str().unwrap().len() > 120, "the path must be genuinely deep");
+    let file = dir.join("deep.lisp");
+    std::fs::write(&file, "(in-package \"ACL2\")\n(defun deep-f (x) x)\n").unwrap();
+
+    let mut b = Book::open(&acl2, &file).unwrap();
+    let sbd = b.books_dir().expect("the books dir must survive").to_path_buf();
+    assert!(sbd.is_absolute(), "ACL2 reports an absolute books dir: {sbd:?}");
+    assert!(sbd.join("system").is_dir() || sbd.join("std").is_dir(),
+            "expected a real books tree, got {sbd:?}");
+
+    let o = b.sync(None, D).expect("sync");
+    assert!(o.failed.is_none());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Interrupting a waterfall proof yields an envelope, not a bare boolean.
+///
+/// The interrupted form never reports, so everything a client learns must
+/// come from the interrupt itself: what was interrupted, after how long, and
+/// -- this is what the test settles -- whether `gag-state-saved` carries real
+/// checkpoints when the interrupt lands mid-waterfall rather than inside an
+/// executable grind.
+#[test]
+#[ignore = "needs ACL2"]
+fn interrupting_a_waterfall_proof_reports_an_envelope() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("wf-intr");
+    let file = dir.join("wf.lisp");
+    // A boolean tautology over many variables: clausification and rewriting
+    // grind through an exponential case split, all inside the waterfall.
+    let vars: Vec<String> = (1..=20).map(|i| format!("b{i}")).collect();
+    let mut chain = vars.last().unwrap().clone();
+    for v in vars.iter().rev().skip(1) {
+        chain = format!("(xor {v} {chain})");
+    }
+    let mut rev_chain = vars.first().unwrap().clone();
+    for v in vars.iter().skip(1) {
+        rev_chain = format!("(xor {v} {rev_chain})");
+    }
+    let hyps: Vec<String> = vars.iter().map(|v| format!("(booleanp {v})")).collect();
+    std::fs::write(
+        &file,
+        format!(
+            "(in-package \"ACL2\")\n\
+             (defthm xor-grind (implies (and {}) (iff {chain} {rev_chain}))\n\
+               :rule-classes nil)\n",
+            hyps.join(" ")
+        ),
+    )
+    .unwrap();
+
+    let mut b = Book::open(&acl2, &file).unwrap();
+    let o = b.sync(None, Duration::from_secs(3)).expect("sync");
+    assert_eq!(o.failed.as_ref().map(|f| f.status), Some(Status::DeadlineExceeded),
+               "the grind must outrun the deadline for this test to mean anything");
+
+    let r = b.interrupt().expect("interrupt");
+    assert!(r.ok, "the session recovers");
+    let env = r.interrupted.expect("an interrupted proof must carry an envelope");
+    assert!(
+        env.abort_cause.as_deref().unwrap_or("").to_lowercase().contains("interrupt"),
+        "the envelope's cause is the interrupt: {:?}", env.abort_cause
+    );
+    assert!(env.time.is_some(), "the elapsed prove time is recorded");
+    assert!(env.event.as_deref().unwrap_or("").to_lowercase().contains("xor-grind"),
+            "the envelope names what was interrupted: {:?}", env.event);
+    assert!(env.output_ref.is_some(), "the partial capture is attached");
+    // Whether a waterfall interrupt carries checkpoints was an open question;
+    // record the answer loudly either way rather than asserting a guess.
+    eprintln!(
+        "waterfall interrupt checkpoints: n_top={} n_sub={} (top={}, sub={})",
+        env.checkpoints.n_top, env.checkpoints.n_sub,
+        env.checkpoints.top.len(), env.checkpoints.sub.len()
+    );
+
+    assert_eq!(b.health(Duration::from_secs(5)), Health::Ready);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A top-level `(in-package "P")` sticks, and rollback restores the package.
+///
+/// In a directory with no `acl2-customization.lsp`, a human session that
+/// types the book's forms reads everything after `(in-package "P")` in `P`.
+/// The `ld`-per-form transport reverts the switch on every exit, so without
+/// the second phase the session silently reads later forms in "ACL2" --
+/// symbols intern elsewhere and the world diverges from the reference. The
+/// package is state, not world, so undoing units must also restore it.
+#[test]
+#[ignore = "needs ACL2"]
+fn in_package_sticks_and_rollback_restores_it() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("inpkg");
+    let file = dir.join("p.lisp");
+    write(&file, &[
+        "(in-package \"ACL2\")",
+        "(defpkg \"IPTEST\" '(defun defthm equal))",
+        "(in-package \"IPTEST\")",
+        "(defun foo (x) x)",
+    ]);
+    let mut b = Book::open(&acl2, &file).unwrap();
+    let o = b.sync(None, D).expect("sync");
+    assert!(o.failed.is_none(), "{:?}", o.failed.as_ref().and_then(|f| f.error_line.clone()));
+    assert_eq!(o.admitted.len(), 4);
+
+    // The switch persisted: an eval reads in IPTEST, so the unqualified name
+    // `foo` names IPTEST::FOO -- exactly what a human session would see.
+    let r = b.eval("(acl2::cw \"FOOPKG=[~s0]~%\" (acl2::symbol-package-name 'foo))", D)
+        .expect("eval");
+    let text = b.output(&r.output_ref, Slice::All).unwrap().text;
+    assert!(text.contains("FOOPKG=[IPTEST]"),
+            "later forms must read in the switched package: {text}");
+
+    // Roll back across the switch by truncating the file above it. The label
+    // planted before the switch must still be reachable (labels intern in the
+    // ACL2 package for exactly this reason), and the session's package must
+    // come back too.
+    write(&file, &[
+        "(in-package \"ACL2\")",
+        "(defpkg \"IPTEST\" '(defun defthm equal))",
+    ]);
+    let o = b.sync(None, D).expect("rollback sync");
+    assert_eq!((o.reused, o.rolled_back, o.rebuilt), (2, 2, false),
+               "an undo, not a replay, must cross the package switch");
+    let r = b.eval(
+        "(acl2::cw \"PKGNOW=[~s0]~%\" \
+         (acl2::f-get-global 'acl2::current-package acl2::state))", D)
+        .expect("eval");
+    let text = b.output(&r.output_ref, Slice::All).unwrap().text;
+    assert!(text.contains("PKGNOW=[ACL2]"),
+            "rollback must restore the package along with the world: {text}");
+
+    // And an unknown package still fails cleanly through the wrapper -- the
+    // failure signal is the reason for the two-phase scheme.
+    write(&file, &[
+        "(in-package \"ACL2\")",
+        "(defpkg \"IPTEST\" '(defun defthm equal))",
+        "(in-package \"NOPE\")",
+    ]);
+    let o = b.sync(None, D).expect("bad package sync");
+    let f = o.failed.expect("an unknown package must fail the unit");
+    assert_eq!(f.status, Status::Rejected);
+    assert!(f.error_line.is_some(), "with the error surfaced");
+    assert_eq!(b.health(Duration::from_secs(5)), Health::Ready, "and no hang");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The deadline bounds the call, not each unit within it.
+///
+/// Under the old per-unit deadline, a long book of individually fast forms
+/// ran to completion however small the deadline: five hundred forms at a few
+/// milliseconds each never tripped a per-unit clock, and the "bounded" call
+/// ran for however long the file needed.
+#[test]
+#[ignore = "needs ACL2"]
+fn the_deadline_bounds_the_whole_call() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("budget");
+    let file = dir.join("many.lisp");
+    let mut forms = vec!["(in-package \"ACL2\")".to_string()];
+    for i in 0..500 {
+        forms.push(format!("(defun budget-f{i} (x) x)"));
+    }
+    let joined: Vec<&str> = forms.iter().map(|s| s.as_str()).collect();
+    write(&file, &joined);
+
+    let mut b = Book::open(&acl2, &file).unwrap();
+    let started = std::time::Instant::now();
+    let o = b.sync(None, Duration::from_millis(200)).expect("sync");
+    let took = started.elapsed();
+    assert!(o.failed.as_ref().is_some_and(|f| f.still_running),
+            "the call must stop at the budget with a unit in flight");
+    assert!(o.admitted.len() < 500, "and cannot have admitted everything");
+    assert!(took < Duration::from_secs(30),
+            "a 200ms budget must not run the whole book: took {took:?}");
+
+    // The in-flight unit finishes on resume, and the next sync carries on.
+    let mut done = false;
+    for _ in 0..30 {
+        match b.resume(Duration::from_secs(5)).expect("resume") {
+            Some(Resumed::StillRunning { .. }) => continue,
+            Some(Resumed::Admitted(_)) => { done = true; break; }
+            other => panic!("expected the trivial unit to admit, got {:?}", other.is_some()),
+        }
+    }
+    assert!(done, "the pending unit must complete");
+    let o = b.sync(None, D).expect("continue");
+    assert!(o.failed.is_none());
+    assert_eq!(o.reused + o.admitted.len(), 501, "the book completes across calls");
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
