@@ -86,7 +86,12 @@ it is the default or lives under a trusted directory. That holds for images
 named explicitly in `acl2_session_open` as well, so a repository cannot supply
 its own "ACL2" by shipping an `acl2.lisp` next to an executable, and neither
 can a client that was told to. `acl2_images` lists what is permitted, and
-`acl2_session_open` reports which image the session actually got.
+`acl2_session_open` reports which image the session actually got. Note that
+trust is subtree-wide and forward-open: it covers every checkout under the
+directory, including ones cloned there *after* you granted it — and
+innermost-checkout-wins means anything checked out inside a trusted root can
+carry its own image and be selected. Trust a directory whose contents you
+control, not one others can write into.
 
 Twelve tools: `session_open`, `session_close`, `sessions`, `images`, `sync`,
 `eval`, `certify`, `resume`, `status`, `interrupt`, `health`, `output`.
