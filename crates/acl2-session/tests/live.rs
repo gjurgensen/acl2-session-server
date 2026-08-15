@@ -145,6 +145,40 @@ fn sync_reuses_rolls_back_and_stops_at_failure() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A buffer snapshot drives the world exactly as a file would, the disk is
+/// never consulted, and the two entries interleave freely on one `Book`.
+#[test]
+#[ignore = "needs ACL2"]
+fn sync_bytes_follows_the_buffer_not_the_disk() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("bytes");
+    let book = dir.join("demo.lisp");
+    write(&book, &["(in-package \"ACL2\")", ALPHA]);
+    let mut b = Book::open(&acl2, &book).expect("open");
+    assert_eq!(b.sync(None, D).expect("file sync").admitted.len(), 2);
+
+    // The buffer holds a theorem the disk does not.
+    let buffer =
+        format!("(in-package \"ACL2\")\n\n{ALPHA}\n\n(defthm b1 (equal (alpha nil) nil))\n");
+    let o = b.sync_bytes(buffer.as_bytes(), None, D).expect("buffer sync");
+    assert_eq!(o.reused, 2, "the saved prefix is recognised inside the buffer");
+    assert_eq!(o.admitted.len(), 1, "only the unsaved theorem is admitted");
+    assert!(o.failed.is_none());
+
+    // An identical buffer is a no-op, like any unchanged snapshot.
+    let o = b.sync_bytes(buffer.as_bytes(), None, D).expect("same buffer");
+    assert_eq!((o.reused, o.admitted.len(), o.rolled_back), (3, 0, 0));
+
+    // Back to the disk file: the unsaved theorem is not in it, so it rolls
+    // back -- a save that never happened leaves no residue in the world.
+    let o = b.sync(None, D).expect("file sync again");
+    assert_eq!(o.reused, 2);
+    assert_eq!(o.rolled_back, 1);
+    assert!(o.admitted.is_empty());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Rebuild by replay leaves a world the prefix diff accepts.
 #[test]
 #[ignore = "needs ACL2"]
@@ -160,7 +194,8 @@ fn rebuild_restores_the_prefix() {
 
     // Its real trigger -- an unverifiable rollback -- cannot be produced on
     // demand, so drive the mechanism and check the world it leaves behind.
-    let r = b.rebuild(2, &Budget::new(D)).expect("rebuild");
+    let bytes = std::fs::read(&book).expect("read book");
+    let r = b.rebuild(&bytes, 2, &Budget::new(D)).expect("rebuild");
     assert!(r.is_none(), "the replay fits comfortably in the budget");
     assert_eq!(b.rebuilds(), 1);
     let o = b.sync(None, D).expect("sync after rebuild");

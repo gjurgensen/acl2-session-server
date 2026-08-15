@@ -3,10 +3,11 @@
 //! > The session world equals the result of admitting file units `1..N` in a
 //! > plain interactive ACL2 session started in the book's own directory.
 //!
-//! The client never tells us what changed. Every sync re-reads and re-hashes
-//! the file, so the mechanism is self-correcting: there is no edit-notification
-//! protocol to fall out of step with. Rollback stops being something a client
-//! requests and becomes a consequence of editing.
+//! The client never tells us what changed. Every sync re-hashes the whole
+//! snapshot -- the file on disk, or the buffer bytes an editor hands in
+//! (`sync_bytes`) -- so the mechanism is self-correcting: there is no
+//! edit-notification protocol to fall out of step with. Rollback stops being
+//! something a client requests and becomes a consequence of editing.
 
 #![forbid(unsafe_code)]
 // This module is pure logic; all FFI lives in pty.rs and session.rs.
@@ -1421,16 +1422,49 @@ impl Book {
 
     /// Bring the session into agreement with the file on disk.
     ///
-    /// `through_line` is optional and omitted means "to the end of the file",
-    /// which should be the common call: because sync stops at the first
-    /// failure, the edit-fix-edit loop never needs a target.
+    /// Reads the current file contents and hands them to
+    /// [`Book::sync_bytes`], which owns the semantics: where the snapshot
+    /// comes from is the entire difference between the two calls.
+    pub fn sync(
+        &mut self,
+        through_line: Option<usize>,
+        deadline: Duration,
+    ) -> Result<SyncOutcome, SyncError> {
+        let bytes = std::fs::read(&self.path)?;
+        self.sync_bytes(&bytes, through_line, deadline)
+    }
+
+    /// Bring the session into agreement with a caller-supplied snapshot.
+    ///
+    /// The editor entry. An editor's source of truth is its buffer, not its
+    /// last save, so it hands the text in instead of having the disk read;
+    /// `path` still anchors everything content does not decide -- the
+    /// session's working directory, image resolution, `certify` -- and the
+    /// invariant simply reads "snapshot" for "file": the world equals the
+    /// result of admitting units `1..N` of the last synced snapshot.
+    ///
+    /// BYTES is the text exactly as a save would write it. Offsets, hashes
+    /// and the splitter all work on bytes (see `split` for why: ACL2 source
+    /// is not UTF-8), so a client that encodes its buffer the way it saves
+    /// it gets hashes that survive a save round-trip. Getting the encoding
+    /// wrong is safe -- the hashes differ and the affected suffix re-proves,
+    /// wasteful but never wrong, like any other unrecognised change.
+    ///
+    /// File and buffer syncs interleave freely on one `Book`: nothing
+    /// records where a snapshot came from, and every call diffs against the
+    /// admitted hashes alone.
+    ///
+    /// `through_line` is optional and omitted means "to the end of the
+    /// snapshot", which should be the common call: because sync stops at the
+    /// first failure, the edit-fix-edit loop never needs a target.
     ///
     /// A target bounds how far *forward* to admit; it never retracts. Syncing
     /// through line 3 when six units are already admitted leaves all six in
-    /// place and simply admits nothing new. Undoing is driven by the file
+    /// place and simply admits nothing new. Undoing is driven by the snapshot
     /// changing, not by asking for less of it.
-    pub fn sync(
+    pub fn sync_bytes(
         &mut self,
+        bytes: &[u8],
         through_line: Option<usize>,
         deadline: Duration,
     ) -> Result<SyncOutcome, SyncError> {
@@ -1447,10 +1481,9 @@ impl Book {
             // An undo we could not verify: rebuild rather than trust it. With
             // `keep` 0 nothing is replayed, so this cannot report in-flight;
             // rebuild itself clears the flag.
-            self.rebuild(0, &budget)?;
+            self.rebuild(bytes, 0, &budget)?;
         }
-        let bytes = std::fs::read(&self.path)?;
-        let units = split(&bytes).map_err(SyncError::Split)?;
+        let units = split(bytes).map_err(SyncError::Split)?;
 
         let mut out = SyncOutcome::default();
 
@@ -1476,7 +1509,7 @@ impl Book {
                 Err(SyncError::RollbackFailed { .. })
                 | Err(SyncError::RollbackUnverified { .. }) => {
                     out.rebuilt = true;
-                    if let Some(f) = self.rebuild(keep, &budget)? {
+                    if let Some(f) = self.rebuild(bytes, keep, &budget)? {
                         // The budget ran out mid-replay. The session holds a
                         // valid shorter prefix plus one unit in flight, which
                         // is exactly the shape of an ordinary deadline expiry:
@@ -1496,7 +1529,7 @@ impl Book {
         out.resolved_through = Some(target);
 
         for (i, u) in units.iter().enumerate().take(target + 1).skip(keep) {
-            let (sub, output_ref) = self.admit_unit(u, i, &bytes, budget.remaining())?;
+            let (sub, output_ref) = self.admit_unit(u, i, bytes, budget.remaining())?;
             let output_lines = self.outs().lines(&output_ref).unwrap_or(0);
             match sub.outcome {
                 Outcome::Ok => {
@@ -2058,13 +2091,22 @@ impl Book {
     /// `ReplayFailed` made a book whose replay exceeds one deadline
     /// unrecoverable: each sync killed the half-rebuilt session and started
     /// over.
+    ///
+    /// BYTES is the snapshot `keep` was computed against -- the caller
+    /// supplies it rather than rebuild re-reading the file. The re-read left
+    /// a hole: an edit landing between a sync's read and its mid-sync
+    /// rebuild meant `keep` counted units of one text while the replay ran
+    /// another, mixing the two in one world until the next sync's diff
+    /// caught up. Taking the caller's bytes closes that by construction, and
+    /// is also what lets a buffer-anchored sync rebuild without consulting
+    /// the disk at all.
     pub fn rebuild(
         &mut self,
+        bytes: &[u8],
         keep: usize,
         budget: &Budget,
     ) -> Result<Option<FailureReport>, SyncError> {
-        let bytes = std::fs::read(&self.path)?;
-        let units = split(&bytes).map_err(SyncError::Split)?;
+        let units = split(bytes).map_err(SyncError::Split)?;
         let keep = keep.min(units.len());
 
         let dir = match self.path.parent() {
@@ -2087,7 +2129,7 @@ impl Book {
         self.dirty = false;
 
         for (i, u) in units.iter().enumerate().take(keep) {
-            let (sub, output_ref) = self.admit_unit(u, i, &bytes, budget.remaining())?;
+            let (sub, output_ref) = self.admit_unit(u, i, bytes, budget.remaining())?;
             match sub.outcome {
                 Outcome::Ok => {}
                 Outcome::StillRunning => {

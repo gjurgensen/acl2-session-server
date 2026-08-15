@@ -3,7 +3,9 @@
 //! A session keeps an ACL2 process in agreement with a `.lisp` file: its world
 //! is the result of admitting file forms `1..N` in a plain interactive session
 //! started in the book's own directory. Editing the file and asking for a sync
-//! is the whole interface; the prefix that did not change is reused.
+//! is the whole interface; the prefix that did not change is reused. The
+//! snapshot can equally be an editor's unsaved buffer (`Book::sync_bytes`);
+//! the path then anchors only what content does not decide.
 //!
 //! Results are read out of ACL2's own state -- `get-event-data` and
 //! `gag-state` -- rather than scraped from its prose, and the complete log is
