@@ -1,0 +1,63 @@
+{
+  "name": "acl2-session",
+  "displayName": "ACL2 Session",
+  "description": "Live form-by-form checking of ACL2 books, driven by the acl2-session-editor daemon",
+  "version": "0.0.1",
+  "publisher": "gjurgensen",
+  "private": true,
+  "license": "BSD-3-Clause",
+  "engines": {
+    "vscode": "^1.77.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gjurgensen/acl2-session-server"
+  },
+  "main": "./out/extension.js",
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [],
+  "contributes": {
+    "commands": [
+      { "command": "acl2-session.start", "title": "ACL2: Start Live Checking" },
+      { "command": "acl2-session.stop", "title": "ACL2: Stop Live Checking" },
+      { "command": "acl2-session.interrupt", "title": "ACL2: Interrupt" },
+      { "command": "acl2-session.retractToCursor", "title": "ACL2: Retract to Cursor" },
+      { "command": "acl2-session.targetAtCursor", "title": "ACL2: Target at Cursor" },
+      { "command": "acl2-session.clearTarget", "title": "ACL2: Clear Target" },
+      { "command": "acl2-session.showOutput", "title": "ACL2: Show Output for Form at Cursor" },
+      { "command": "acl2-session.gotoFrontier", "title": "ACL2: Go to Frontier" }
+    ],
+    "configuration": {
+      "title": "ACL2 Session",
+      "properties": {
+        "acl2-session.daemonPath": {
+          "type": "string",
+          "default": "acl2-session-editor",
+          "description": "Path to the acl2-session-editor binary."
+        },
+        "acl2-session.defaultImage": {
+          "type": "string",
+          "default": "",
+          "description": "ACL2 image for books outside any trusted checkout (--default). ACL2_DEFAULT in the environment works too."
+        },
+        "acl2-session.trusted": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Directories whose ACL2 checkouts are trusted (--trusted, repeatable). ACL2_TRUSTED in the environment works too."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^16.11.7",
+    "@types/vscode": "^1.77.0",
+    "typescript": "^5.0.2"
+  }
+}

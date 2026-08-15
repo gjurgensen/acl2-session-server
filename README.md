@@ -152,7 +152,11 @@ crates/
                         splitting, structured extraction. No transport.
   acl2-session-mcp/     MCP server: wire types and a mapping onto the core.
   acl2-session-editor/  editor daemon: JSON-RPC over stdio, one stepping
-                        driver per book. Early; a VSCode client is next.
+                        driver per book.
+editors/
+  vscode/               VSCode client of the daemon: live coloring,
+                        diagnostics from failure envelopes, an output view
+                        following the cursor. No runtime dependencies.
 ```
 
 The core is transport-neutral, and the editor daemon is its second client.
