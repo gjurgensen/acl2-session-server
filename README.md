@@ -29,6 +29,40 @@ proof used, warnings, timings and abort causes all come from `get-event-data`
 and `gag-state`, without adding anything to the ACL2 world. A failed proof comes
 back with its checkpoints as terms and a typed reason, not a wall of text.
 
+Concretely, the `failed` object of a sync reply, for a theorem whose proof
+reverts to induction and runs out of depth (abridged: the induction-step term
+and ten more runes are elided):
+
+```json
+"failed": {
+  "status": "proof_failure",
+  "abort_cause": "induction-depth-limit-exceeded",
+  "failed_event": "car-of-my-rev",
+  "failed_kind": "defthm",
+  "error_line": "ACL2 Error [Failure] in ( defthm car-of-my-rev ...):  See :DOC failure.",
+  "index": 2, "line_start": 8, "line_end": 9,
+  "prover_steps": 1178,
+  "checkpoints": {
+    "pre_revert": true, "forced": false, "n_top": 1, "n_sub": 1,
+    "top": [ { "goal": "Goal",
+               "term": "(equal (car (my-rev x)) (car x))" } ],
+    "sub": [ { "goal": "Subgoal *1/2''",
+               "term": "(implies (and (consp x) ..." } ]
+  },
+  "inner": [ { "name": "car-of-my-rev", "kind": "defthm",
+               "abort_causes": "(induction-depth-limit-exceeded revert)",
+               "prove_ms": 2, "prover_steps": 1178,
+               "rules": [ "(:definition my-rev)",
+                          "(:induction my-rev)", "..." ] } ],
+  "inner_detail_through": 1,
+  "output_ref": "s653-0:f3", "output_lines": 94
+}
+```
+
+A checkpoint's `goal` is exactly what `acl2_output mode:"goal"` takes, so
+"show me what the prover did under `Subgoal *1/2''`" is one call, with no
+names guessed out of a log.
+
 The complete log is still captured and retrievable by handle, because some
 things — the induction scheme the prover chose, per-goal rewriting detail,
 arbitrary macro output — exist only in the printed narrative. The structured
@@ -74,24 +108,21 @@ tree, or a set of git worktrees — name the directory holding them instead:
          "--default", "/home/you/acl2-builds/release/saved_acl2"]
 ```
 
-`--trusted` vouches for the ACL2 checkouts under a directory. A book inside one
-runs under **its own checkout's image**, which is usually what you want, since a
-book was certified against the checkout it lives in. One entry covers every
-build under that directory, including ones added later. `--default` is used for
-books outside every trusted directory. `ACL2_TRUSTED` (colon-separated) and
-`ACL2_DEFAULT` work too, for clients where editing `args` is awkward.
+`--trusted` vouches for the ACL2 checkouts under a directory: a book inside one
+runs under **its own checkout's image** — the image it was certified against —
+and one entry covers every build there, including ones added later. `--default`
+is used for books outside every trusted directory. `ACL2_TRUSTED`
+(colon-separated) and `ACL2_DEFAULT` work too, for clients where editing `args`
+is awkward.
 
-The trusted set is an allowlist, not just a search path: an image is run only if
-it is the default or lives under a trusted directory. That holds for images
-named explicitly in `acl2_session_open` as well, so a repository cannot supply
-its own "ACL2" by shipping an `acl2.lisp` next to an executable, and neither
-can a client that was told to. `acl2_images` lists what is permitted, and
-`acl2_session_open` reports which image the session actually got. Note that
-trust is subtree-wide and forward-open: it covers every checkout under the
-directory, including ones cloned there *after* you granted it — and
-innermost-checkout-wins means anything checked out inside a trusted root can
-carry its own image and be selected. Trust a directory whose contents you
-control, not one others can write into.
+The trusted set is an allowlist, not a search path: an image runs only if it is
+the default or lives under a trusted directory, and that holds for images named
+explicitly in `acl2_session_open` too — so neither a repository nor a client
+can supply its own "ACL2". `acl2_images` lists what is permitted, and every
+open reports which image it got. Trust is subtree-wide and forward-open — it
+covers checkouts cloned under the root *after* you granted it, and an inner
+checkout wins over the one above it — so trust a directory whose contents you
+control.
 
 Twelve tools: `session_open`, `session_close`, `sessions`, `images`, `sync`,
 `eval`, `certify`, `resume`, `status`, `interrupt`, `health`, `output`.
