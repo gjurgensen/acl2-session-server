@@ -12,7 +12,7 @@
 // This module is pure logic; all FFI lives in pty.rs and session.rs.
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use crate::session::{Outcome, Session, SessionControl};
@@ -1046,7 +1046,11 @@ pub struct Book {
     admitted: Vec<Admitted>,
     label_gen: u64,
     rebuilds: usize,
-    outputs: OutputStore,
+    /// Captured output, shared so `acl2_output`-style reads never queue
+    /// behind this book's lock: a client reading a *completed* form's log
+    /// while a sync grinds gets it immediately. Session calls lock it
+    /// briefly per operation.
+    outputs: Arc<Mutex<OutputStore>>,
     /// The unit whose submission has not reported yet.
     pending: Option<PendingUnit>,
     /// Command number just after the base label, i.e. the empty prefix.
@@ -1119,7 +1123,7 @@ impl Book {
             admitted: Vec::new(),
             label_gen: 0,
             rebuilds: 0,
-            outputs: OutputStore::new()?,
+            outputs: Arc::new(Mutex::new(OutputStore::new()?)),
             pending: None,
             base_command_number: None,
             base_package: None,
@@ -1171,6 +1175,20 @@ impl Book {
     /// The control block shared with lock-free readers. See `SessionControl`.
     pub fn control(&self) -> Arc<SessionControl> {
         self.control.clone()
+    }
+
+    /// The output store, shared for the same reason as the control block:
+    /// reading a captured log must not wait behind whatever call holds this
+    /// book. Callers lock it per operation.
+    pub fn output_store(&self) -> Arc<Mutex<OutputStore>> {
+        self.outputs.clone()
+    }
+
+    fn outs(&self) -> MutexGuard<'_, OutputStore> {
+        // A poisoned store means a panic mid-write elsewhere; the index and
+        // files are still readable, and refusing every later read would
+        // compound the damage.
+        self.outputs.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// How many times this book has been rebuilt by replay.
@@ -1289,7 +1307,7 @@ impl Book {
         deadline: Duration,
     ) -> Result<EvalResult, SyncError> {
         let output_ref = self.record_output(&sub)?;
-        let output_lines = self.outputs.lines(&output_ref).unwrap_or(0);
+        let output_lines = self.outs().lines(&output_ref).unwrap_or(0);
         // Probe before the undo: rolling back is itself a submission, and the
         // envelope must describe the form that failed, not the bookkeeping
         // after it. Floored like every post-mortem probe.
@@ -1478,7 +1496,7 @@ impl Book {
 
         for (i, u) in units.iter().enumerate().take(target + 1).skip(keep) {
             let (sub, output_ref) = self.admit_unit(u, i, &bytes, budget.remaining())?;
-            let output_lines = self.outputs.lines(&output_ref).unwrap_or(0);
+            let output_lines = self.outs().lines(&output_ref).unwrap_or(0);
             match sub.outcome {
                 Outcome::Ok => {
                     let (inner, inner_total) = parse_inner(&sub);
@@ -1552,7 +1570,7 @@ impl Book {
             let r = match self.in_flight_output.clone() {
                 Some(r) => r,
                 None => {
-                    let fresh = self.outputs.put("")?;
+                    let fresh = self.outs().put("")?;
                     self.in_flight_output = Some(fresh.clone());
                     fresh
                 }
@@ -1561,10 +1579,10 @@ impl Book {
         }
         match self.in_flight_output.take() {
             Some(r) => {
-                self.outputs.fill(&r, &sub.output)?;
+                self.outs().fill(&r, &sub.output)?;
                 Ok(r)
             }
-            None => Ok(self.outputs.put(&sub.output)?),
+            None => Ok(self.outs().put(&sub.output)?),
         }
     }
 
@@ -1728,7 +1746,7 @@ impl Book {
             return Ok(Some(Resumed::Evaluated(r)));
         };
         let output_ref = self.record_output(&sub)?;
-        let output_lines = self.outputs.lines(&output_ref).unwrap_or(0);
+        let output_lines = self.outs().lines(&output_ref).unwrap_or(0);
         if sub.outcome == Outcome::Ok {
             self.admitted.push(Admitted {
                 hash: p.hash,
@@ -1805,8 +1823,8 @@ impl Book {
     /// Abort the unit in flight and make the session usable again.
     ///
     /// Callers that cannot take the session lock ask via the control block
-    /// first (`control().request_abort()`), which makes whatever call is
-    /// blocked on the session hand the lock over within a poll slice.
+    /// first (`control().request_abort()`), which wakes whatever call is
+    /// blocked on the session and makes it hand the lock over at once.
     pub fn interrupt(&mut self) -> io::Result<InterruptReport> {
         // A build is a separate process tree, so stopping it is a different
         // act from interrupting the prover -- but a caller asking to stop
@@ -1828,8 +1846,8 @@ impl Book {
         let mut output_ref = None;
         let mut output_lines = 0;
         if let Some(r) = &self.in_flight_output {
-            let _ = self.outputs.fill(r, &partial);
-            output_lines = self.outputs.lines(r).unwrap_or(0);
+            let _ = self.outs().fill(r, &partial);
+            output_lines = self.outs().lines(r).unwrap_or(0);
             output_ref = Some(r.clone());
         }
         if !ok {
@@ -1839,7 +1857,7 @@ impl Book {
         if let Some(r) = self.in_flight_output.take() {
             // It describes a form that was abandoned rather than the world
             // as it now stands, which is what `superseded` is for.
-            self.outputs.mark_superseded(&r);
+            self.outs().mark_superseded(&r);
         }
         if !was_running {
             return Ok(InterruptReport { ok: true, interrupted: None });
@@ -1941,8 +1959,8 @@ impl Book {
         // blamed would be exactly the silent-wrong-answer failure mode.
         let ok = status.success() && failed_books.is_empty();
         let error_line = failed_books.first().and_then(|b| cert_out_error(b));
-        let output_ref = self.outputs.put(&log)?;
-        let output_lines = self.outputs.lines(&output_ref).unwrap_or(0);
+        let output_ref = self.outs().put(&log)?;
+        let output_lines = self.outs().lines(&output_ref).unwrap_or(0);
         Ok(CertReport {
             status: if ok { CertStatus::Certified } else { CertStatus::Failed },
             book: self.path.clone(),
@@ -1974,7 +1992,7 @@ impl Book {
 
     /// Read part of a captured output.
     pub fn output(&self, r: &OutputRef, slice: Slice) -> io::Result<OutputSlice> {
-        self.outputs.get(r, slice)
+        self.outs().get(r, slice)
     }
 
     /// Discard the ACL2 process and replay the first `keep` units of the file.
@@ -2034,7 +2052,7 @@ impl Book {
             match sub.outcome {
                 Outcome::Ok => {}
                 Outcome::StillRunning => {
-                    let output_lines = self.outputs.lines(&output_ref).unwrap_or(0);
+                    let output_lines = self.outs().lines(&output_ref).unwrap_or(0);
                     return Ok(Some(FailureReport {
                         index: i,
                         line_start: u.line_start,
@@ -2116,7 +2134,7 @@ impl Book {
         // what a form used to print is useful -- but is flagged so it cannot be
         // mistaken for a description of the current world.
         for a in &self.admitted[keep..] {
-            self.outputs.mark_superseded(&a.output_ref);
+            self.outs().mark_superseded(&a.output_ref);
         }
         self.admitted.truncate(keep);
         Ok(())

@@ -29,7 +29,7 @@ fn fail(e: impl std::fmt::Display) -> ErrorData {
     ErrorData::internal_error(e.to_string(), None)
 }
 
-/// The last `n` lines of `s`, for tails served from the status mirror.
+/// The last `n` lines of `s`, for tails served from a stream snapshot.
 fn last_lines(s: &str, n: usize) -> String {
     let v: Vec<&str> = s.lines().rev().take(n).collect();
     v.into_iter().rev().collect::<Vec<_>>().join("\n")
@@ -406,8 +406,8 @@ impl Acl2Mcp {
         let reply = blocking!({
             // A blocked sync/eval holds the session lock for its whole
             // deadline, and status exists precisely to be usable then. Try
-            // the lock; on contention, answer from the control block's
-            // mirror, which the reader updates as output arrives.
+            // the lock; on contention, snapshot the output stream, which the
+            // reader thread keeps current.
             match book.try_lock() {
                 Ok(mut b) => {
                     let unit = b.running_unit();
@@ -486,10 +486,10 @@ impl Acl2Mcp {
         &self,
         Parameters(a): Parameters<SessionArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        // Ask through the control block first: the blocked call returns
-        // within a poll slice and hands the lock over, instead of after its
-        // whole deadline -- which used to make interrupting a 600-second sync
-        // wait 600 seconds.
+        // Ask through the control block first: the blocked call is woken
+        // off its condvar and hands the lock over at once, instead of after
+        // its whole deadline -- which used to make interrupting a 600-second
+        // sync wait 600 seconds.
         let control = self.control(&a.session_id)?;
         control.request_abort();
         let book = self.book(&a.session_id)?;
@@ -511,11 +511,11 @@ impl Acl2Mcp {
         let control = self.control(&a.session_id)?;
         let book = self.book(&a.session_id)?;
         let reply = blocking!({
-            // A busy session answers from the mirror rather than queueing
-            // behind the very call it is being asked about. Both conditions,
-            // deliberately: a mirror that says running with a free lock means
-            // the form outran its call's deadline, and the locked path then
-            // gives the fuller answer.
+            // A busy session answers from the stream snapshot rather than
+            // queueing behind the very call it is being asked about. Both
+            // conditions, deliberately: a snapshot that says running with a
+            // free lock means the form outran its call's deadline, and the
+            // locked path then gives the fuller answer.
             if control.snapshot().is_some() && book.try_lock().is_err() {
                 return Ok::<_, String>(wire::HealthReply {
                     state: "busy".to_string(),
@@ -543,12 +543,25 @@ impl Acl2Mcp {
 
     #[tool(description = "Read part of a form's captured output, by handle. The \
         structured results are a projection: the induction scheme the prover \
-        chose, per-goal rewriting detail, and macro output exist only here.")]
+        chose, per-goal rewriting detail, and macro output exist only here. \
+        Works immediately even while a sync or eval is blocked on the session.")]
     async fn acl2_output(
         &self,
         Parameters(a): Parameters<OutputArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let book = self.book(&a.session_id)?;
+        // The store, not the book: reading a completed form's log must not
+        // queue behind a blocked call's deadline.
+        let outputs = self
+            .registry
+            .lock()
+            .map_err(fail)?
+            .outputs_of(&SessionId::from(a.session_id.as_str()))
+            .ok_or_else(|| {
+                fail(format!(
+                    "no session {}; it was never opened, or has been closed",
+                    a.session_id
+                ))
+            })?;
         let slice = match a.mode.as_deref().unwrap_or("tail") {
             "all" => Slice::All,
             "head" => Slice::Head(a.lines.unwrap_or(40)),
@@ -566,8 +579,8 @@ impl Acl2Mcp {
         };
         let r = acl2_session::OutputRef::from(a.output_ref.as_str());
         let out = blocking!({
-            let b = book.lock().map_err(|e| e.to_string())?;
-            b.output(&r, slice).map_err(|e| e.to_string())
+            let store = outputs.lock().map_err(|e| e.to_string())?;
+            store.get(&r, slice).map_err(|e| e.to_string())
         })
         .map_err(fail)?;
         json(wire::OutputReply {

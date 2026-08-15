@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::image::{ImageError, ImagePolicy};
+use crate::output::OutputStore;
 use crate::session::SessionControl;
 use crate::sync::{Book, SyncError};
 
@@ -86,10 +87,10 @@ impl From<SyncError> for RegistryError {
 /// Within one session the operations serialise on this lock, and a blocking
 /// call holds it for up to its whole deadline. That is why the entry also
 /// carries the session's control block: an interrupt *asks through the block
-/// first* (`request_abort`), the blocked call hands the lock over within a
-/// poll slice, and only then does the interrupt take the lock to escalate --
-/// so stopping a proof you regret costs a poll slice, not the proof's
-/// deadline. Status reads the block's mirror and needs no lock at all.
+/// first* (`request_abort`), which wakes the blocked call off its condvar at
+/// once, and only then does the interrupt take the lock to escalate -- so
+/// stopping a proof you regret costs a wakeup, not the proof's deadline.
+/// Status reads the session's output stream and needs no lock at all.
 pub type SharedBook = Arc<Mutex<Book>>;
 
 /// Everything the registry records about one session. `path` and `image` are
@@ -104,6 +105,9 @@ struct Entry {
     image: PathBuf,
     path: PathBuf,
     control: Arc<SessionControl>,
+    /// Shared for the same reason as `control`: reading a captured log must
+    /// not wait behind whatever call holds the book.
+    outputs: Arc<Mutex<OutputStore>>,
 }
 
 /// Several open books, each with its own ACL2 process.
@@ -148,6 +152,7 @@ impl Registry {
             Entry {
                 path: book.path().to_path_buf(),
                 control: book.control(),
+                outputs: book.output_store(),
                 book: Arc::new(Mutex::new(book)),
                 image,
             },
@@ -179,6 +184,12 @@ impl Registry {
         self.entries.get(id).map(|e| e.control.clone())
     }
 
+    /// The output store for reading a session's captured logs without its
+    /// lock.
+    pub fn outputs_of(&self, id: &SessionId) -> Option<Arc<Mutex<OutputStore>>> {
+        self.entries.get(id).map(|e| e.outputs.clone())
+    }
+
     /// Close a session, killing its ACL2 and discarding its captured output.
     ///
     /// Returns whether there was anything to close, so a double close is a
@@ -188,7 +199,7 @@ impl Registry {
     /// process itself survives inside that call's `Arc` until the call
     /// returns. Without the request that meant "until its deadline expires" --
     /// an unreachable ACL2 grinding on for ten minutes after its session was
-    /// closed. With it, the call returns within a poll slice and the drop
+    /// closed. With it, the call wakes and returns at once, and the drop
     /// kills the child.
     pub fn close(&mut self, id: &SessionId) -> bool {
         match self.entries.remove(id) {

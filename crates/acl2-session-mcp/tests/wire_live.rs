@@ -256,12 +256,13 @@ fn a_failure_reports_named_numbers_not_rationals() {
 }
 
 /// The calls that exist to escape a blocked session actually escape it, on
-/// the wire: status and health answer promptly from the mirror, interrupt
-/// lands within the poll-slice regime and reports its envelope, and the
-/// blocked sync itself comes back as in-flight.
+/// the wire: status and health answer promptly from the stream, a completed
+/// form's log stays readable, interrupt lands within the abort-wakeup regime
+/// and reports its envelope, and the blocked sync itself comes back as
+/// in-flight.
 #[test]
 #[ignore = "needs ACL2"]
-fn a_blocked_session_answers_status_health_and_interrupt() {
+fn a_blocked_session_answers_status_health_output_and_interrupt() {
     let acl2 = acl2_or_skip!();
     let dir = scratch("blocked");
     let book = dir.join("grind.lisp");
@@ -279,6 +280,7 @@ fn a_blocked_session_answers_status_health_and_interrupt() {
         &book,
         format!(
             "(in-package \"ACL2\")\n\
+             (defun wire-mark (x) (cons :wire-mark x))\n\
              (defthm xor-grind (implies (and {}) (iff {chain} {rev_chain}))\n\
                :rule-classes nil)\n",
             hyps.join(" ")
@@ -292,6 +294,12 @@ fn a_blocked_session_answers_status_health_and_interrupt() {
         .unwrap()
         .to_string();
 
+    // Bank a completed form's handle before anything blocks: sync only
+    // through the defun on line 2.
+    let o = s.tool("acl2_sync", json!({"session_id": sid, "through_line": 2,
+                                       "deadline_seconds": 120}));
+    let banked = o["admitted"][1]["output_ref"].as_str().expect("a banked ref").to_string();
+
     // A long-deadline sync we do not wait for: the session lock is now held.
     let sync_id = s.send_tool("acl2_sync", json!({"session_id": sid, "deadline_seconds": 120}));
     std::thread::sleep(Duration::from_secs(3));
@@ -302,7 +310,17 @@ fn a_blocked_session_answers_status_health_and_interrupt() {
             "status must not wait behind the sync deadline: {:?}", t.elapsed());
     assert_eq!(st["running"].as_bool(), Some(true), "{st}");
     assert!(st["bytes_so_far"].as_u64().unwrap_or(0) > 0,
-            "the mirror serves live progress: {st}");
+            "the stream serves live progress: {st}");
+
+    // Reading a *completed* form's log goes through the shared store, not
+    // the book lock, so it answers while the sync grinds.
+    let t = Instant::now();
+    let out = s.tool("acl2_output", json!({"session_id": sid, "output_ref": banked,
+                                           "mode": "all"}));
+    assert!(t.elapsed() < Duration::from_secs(5),
+            "output must not wait behind the sync deadline: {:?}", t.elapsed());
+    assert!(out["text"].as_str().unwrap_or("").to_lowercase().contains("wire-mark"),
+            "and it is the banked form's own log: {out}");
 
     let t = Instant::now();
     let h = s.tool("acl2_health", json!({"session_id": sid}));
@@ -313,7 +331,7 @@ fn a_blocked_session_answers_status_health_and_interrupt() {
     let ir = s.tool("acl2_interrupt", json!({"session_id": sid}));
     assert!(
         t.elapsed() < Duration::from_secs(15),
-        "interrupt must land in the poll-slice regime, not the deadline: {:?}",
+        "interrupt must land in the abort-wakeup regime, not the deadline: {:?}",
         t.elapsed()
     );
     assert_eq!(ir["ok"].as_bool(), Some(true), "{ir}");

@@ -1,4 +1,16 @@
 //! A live ACL2 session: one process, one book directory, one form at a time.
+//!
+//! One **reader thread** per session owns the PTY's read side. Everything
+//! ACL2 prints lands in a shared stream the moment it arrives; the callers
+//! that used to do the reading are now *waiters* on that stream. That split
+//! is what the whole concurrency story hangs on: a submission waits for its
+//! completion marker on a condvar and is woken the instant it arrives, an
+//! abort request wakes the same condvar instead of waiting out a poll slice,
+//! a status reader sees the complete, current output without any session
+//! lock, and the child's death is one EOF observed in one place. Attribution
+//! -- which bytes belong to which form -- becomes offset arithmetic on one
+//! stream, replacing the carried-`pending` shuffling where misattribution
+//! bugs used to live.
 
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
@@ -6,7 +18,8 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::pty::{become_session_leader, set_no_echo, wait_readable, Pty};
@@ -16,17 +29,19 @@ use crate::pty::{become_session_leader, set_no_echo, wait_readable, Pty};
 const INTERRUPT_STEP: Duration = Duration::from_millis(1500);
 const INTERRUPT_TRIES: usize = 4;
 
-/// The longest a blocked read waits before looking up from the descriptor.
-///
-/// This is the reaction time to an abort request: a caller blocked for its
-/// whole deadline would otherwise be exactly the wall an interrupt cannot get
-/// past, since every call on a session serialises on one lock. Ten polls a
-/// second costs nothing measurable and bounds that wait at a tenth of a
-/// second.
-const POLL_SLICE: Duration = Duration::from_millis(100);
+/// How often the reader thread looks up from the descriptor to notice a
+/// shutdown request. This is teardown responsiveness only -- data and EOF
+/// wake it immediately, and no *caller* polls anything: waiters sit on a
+/// condvar and are notified per append.
+const READER_POLL: Duration = Duration::from_millis(500);
 
-/// How much of the in-flight output the status mirror retains.
-const MIRROR_TAIL: usize = 4096;
+/// How much of the in-flight output a lock-free status snapshot copies.
+/// Bounds the copy, not the stream; the full text is in the capture.
+const SNAPSHOT_TAIL: usize = 16384;
+
+/// Deadlines are capped so `Instant` arithmetic cannot overflow; a month is
+/// "forever" for a tool call.
+const DEADLINE_CAP: Duration = Duration::from_secs(60 * 60 * 24 * 30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
@@ -62,121 +77,233 @@ pub struct StatusSnapshot {
     pub tail: String,
 }
 
-/// The handle other threads hold on a running session.
+/// The stream every party meets at, and the handle other threads hold on a
+/// running session.
 ///
-/// Every call on a session serialises on one lock, and a blocking call holds
-/// it for its whole deadline. This block lives *outside* that lock so that the
-/// two things which must not wait behind a ten-minute proof do not:
+/// The reader thread appends; session calls wait and consume; status readers
+/// peek; an interrupt asks the blocked waiter to yield. One mutex and one
+/// condvar carry all of it:
 ///
-/// - **Abort.** `request_abort` sets a flag the blocked reader polls every
-///   [`POLL_SLICE`]; the blocked call returns early exactly as if its deadline
-///   had expired, the lock frees, and the interrupt's own escalation runs
-///   within a poll slice instead of after the caller's deadline.
-/// - **Status.** The reader keeps a small mirror of the in-flight form's
-///   progress here, so "how far along is it?" needs no lock at all.
+/// - **Abort.** `request_abort` sets a flag and notifies; a blocked waiter
+///   wakes immediately and returns as if its deadline expired, the session
+///   lock frees, and the interrupt's escalation runs at once. (The book-level
+///   lock still serialises operations -- that is what makes a session a
+///   session -- so the handoff is still needed; it is just no longer paced
+///   by a poll.)
+/// - **Status.** A snapshot reads the actual stream: complete, current, no
+///   session lock, no shadow copy to fall behind.
+/// - **Consumption.** A completed form's capture is the stream from the last
+///   consumption point to its completion marker; consuming advances the
+///   base offset. What one form leaves past its marker is simply what the
+///   next capture starts with -- the old carried-`pending` dance, now a
+///   number.
 ///
-/// One control block belongs to one [`sync::Book`](crate::sync::Book) for its
-/// whole life and is threaded into every `Session` the book starts, so a
-/// rebuild does not orphan the handle a registry already gave out.
-///
-/// This is the interim shape of a fuller design in which one reader thread
-/// owns the PTY and every waiter consumes from a shared buffer; that version
-/// also frees `acl2_output`-style readers from the lock, and is the end
-/// state. The flag-and-mirror gets the two capabilities
-/// that matter without restructuring the session's ownership story.
+/// One control block belongs to one [`sync::Book`](crate::sync::Book) for
+/// its whole life. Sessions come and go beneath it (rebuild starts a new
+/// process); the stream is *epoch-tagged* so a predecessor's reader thread,
+/// still draining during teardown, cannot write into the successor's stream.
 pub struct SessionControl {
-    /// Set to ask whatever call is blocked on the session to hand back
-    /// control. Consumed by the reader; cleared by the interrupt path before
-    /// escalation so a stale request cannot cut the *next* call short.
-    ///
-    /// Relaxed ordering: no data is published through the flag, it is only a
-    /// nudge that something else wants the lock.
-    abort: AtomicBool,
-    mirror: Mutex<Mirror>,
+    inner: Mutex<Shared>,
+    cond: Condvar,
 }
 
-struct Mirror {
+struct Shared {
+    /// Output not yet consumed by a completed submission.
+    buf: Vec<u8>,
+    /// Absolute stream offset of `buf[0]`. Only consumption advances it, and
+    /// only session calls consume, one at a time, so a waiter's offsets stay
+    /// valid for the whole wait.
+    base: u64,
+    /// The reader saw end-of-file: every copy of the slave side is closed,
+    /// which in practice means the child is gone.
+    eof: bool,
+    /// Set by `request_abort`; consumed by the waiter it wakes.
+    abort: bool,
+    /// Which session generation owns the stream. Appends from any other are
+    /// dropped: on rebuild the replacement session is constructed while its
+    /// predecessor -- and the predecessor's reader -- still lives.
+    epoch: u64,
+    // What a lock-free status reader may know. Metadata, not stream.
     running: bool,
     started: Option<Instant>,
-    bytes: usize,
-    /// Set by the book layer before a unit's submission; cleared when a form
-    /// completes. `begin` leaves it alone, because the book sets it first.
     unit: Option<usize>,
-    tail: Vec<u8>,
+    /// Absolute offset where the in-flight form's output begins.
+    form_start: u64,
+}
+
+/// Why a wait ended.
+enum WaitEnd {
+    /// The marker is in the stream; the payload is the absolute offset just
+    /// past it.
+    Found(u64),
+    Timeout,
+    Aborted,
+    /// No marker, and no more bytes are ever coming.
+    Eof,
 }
 
 impl SessionControl {
     pub fn new() -> Arc<SessionControl> {
         Arc::new(SessionControl {
-            abort: AtomicBool::new(false),
-            mirror: Mutex::new(Mirror {
+            inner: Mutex::new(Shared {
+                buf: Vec::new(),
+                base: 0,
+                eof: false,
+                abort: false,
+                epoch: 0,
                 running: false,
                 started: None,
-                bytes: 0,
                 unit: None,
-                tail: Vec::new(),
+                form_start: 0,
             }),
+            cond: Condvar::new(),
         })
     }
 
-    /// Name the file unit about to run, for lock-free status readers.
-    pub fn set_unit(&self, unit: Option<usize>) {
-        if let Ok(mut m) = self.mirror.lock() {
-            m.unit = unit;
-        }
+    fn lock(&self) -> std::sync::MutexGuard<'_, Shared> {
+        // A poisoned lock means a panic while appending or snapshotting;
+        // the data is plain bytes and counters, valid regardless.
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Ask the call currently blocked on this session to return early.
     pub fn request_abort(&self) {
-        self.abort.store(true, Ordering::Relaxed);
+        self.lock().abort = true;
+        self.cond.notify_all();
     }
 
     pub fn clear_abort(&self) {
-        self.abort.store(false, Ordering::Relaxed);
+        self.lock().abort = false;
     }
 
-    fn take_abort(&self) -> bool {
-        self.abort.swap(false, Ordering::Relaxed)
+    /// Name the file unit about to run, for lock-free status readers.
+    pub fn set_unit(&self, unit: Option<usize>) {
+        self.lock().unit = unit;
     }
 
     /// Progress of the form in flight, or `None` when nothing is.
     pub fn snapshot(&self) -> Option<StatusSnapshot> {
-        let m = self.mirror.lock().ok()?;
-        if !m.running {
+        let g = self.lock();
+        if !g.running {
             return None;
         }
+        let from = (g.form_start.max(g.base) - g.base) as usize;
+        let form = &g.buf[from.min(g.buf.len())..];
+        let tail = &form[form.len().saturating_sub(SNAPSHOT_TAIL)..];
         Some(StatusSnapshot {
-            elapsed: m.started.map(|s| s.elapsed()).unwrap_or_default(),
-            bytes_so_far: m.bytes,
-            unit: m.unit,
-            tail: String::from_utf8_lossy(&m.tail).into_owned(),
+            elapsed: g.started.map(|s| s.elapsed()).unwrap_or_default(),
+            bytes_so_far: form.len(),
+            unit: g.unit,
+            tail: String::from_utf8_lossy(tail).into_owned(),
         })
     }
 
     fn begin(&self) {
-        if let Ok(mut m) = self.mirror.lock() {
-            m.running = true;
-            m.started = Some(Instant::now());
-            m.bytes = 0;
-            m.tail.clear();
-        }
+        let mut g = self.lock();
+        g.running = true;
+        g.started = Some(Instant::now());
+        g.form_start = g.base + g.buf.len() as u64;
     }
 
     fn end(&self) {
-        if let Ok(mut m) = self.mirror.lock() {
-            m.running = false;
-            m.unit = None;
+        let mut g = self.lock();
+        g.running = false;
+        g.unit = None;
+    }
+
+    /// Claim the stream for a new session, orphaning any predecessor's
+    /// reader. Returns the epoch that session's reader must present.
+    fn adopt(&self) -> u64 {
+        let mut g = self.lock();
+        g.buf.clear();
+        g.base = 0;
+        g.eof = false;
+        g.abort = false;
+        g.running = false;
+        g.started = None;
+        g.unit = None;
+        g.form_start = 0;
+        g.epoch += 1;
+        g.epoch
+    }
+
+    /// Reader-side: file freshly arrived output.
+    fn append(&self, epoch: u64, bytes: &[u8]) {
+        let mut g = self.lock();
+        if g.epoch == epoch {
+            g.buf.extend_from_slice(bytes);
+            self.cond.notify_all();
         }
     }
 
-    fn update(&self, buf: &[u8]) {
-        if let Ok(mut m) = self.mirror.lock()
-            && m.running
-        {
-            m.bytes = buf.len();
-            let from = buf.len().saturating_sub(MIRROR_TAIL);
-            m.tail.clear();
-            m.tail.extend_from_slice(&buf[from..]);
+    /// Reader-side: no more bytes are coming.
+    fn mark_eof(&self, epoch: u64) {
+        let mut g = self.lock();
+        if g.epoch == epoch {
+            g.eof = true;
+            self.cond.notify_all();
+        }
+    }
+
+    /// Where the unconsumed region begins.
+    fn consumed_offset(&self) -> u64 {
+        self.lock().base
+    }
+
+    /// Everything printed and not yet consumed, as of now.
+    fn peek_all(&self) -> Vec<u8> {
+        self.lock().buf.clone()
+    }
+
+    /// Take the stream from its base up to `end`, advancing the base: this
+    /// is a completed submission claiming its capture. Bytes past `end`
+    /// remain for whatever comes next.
+    fn consume_to(&self, end: u64) -> Vec<u8> {
+        let mut g = self.lock();
+        let n = (end.saturating_sub(g.base) as usize).min(g.buf.len());
+        let head: Vec<u8> = g.buf.drain(..n).collect();
+        g.base += n as u64;
+        head
+    }
+
+    /// Block until `marker` appears at or after absolute offset `from`, the
+    /// deadline passes, an abort is requested, or the stream ends.
+    ///
+    /// Scanning is incremental with a marker-length overlap, so a wait over a
+    /// six-figure-line capture rescans only what each wakeup added. The base
+    /// cannot move during the wait -- only session calls consume, and they
+    /// hold the session's lock -- so absolute offsets stay valid throughout.
+    fn wait_for_marker(&self, marker: &[u8], from: u64, deadline: Duration) -> WaitEnd {
+        let deadline = Instant::now() + deadline.min(DEADLINE_CAP);
+        let overlap = (marker.len() - 1) as u64;
+        let mut scanned = from;
+        let mut g = self.lock();
+        loop {
+            let end = g.base + g.buf.len() as u64;
+            if end > scanned {
+                let scan_from = scanned.saturating_sub(overlap).max(from);
+                let a = (scan_from - g.base) as usize;
+                if let Some(i) = find_bytes(&g.buf[a..], marker) {
+                    return WaitEnd::Found(scan_from + (i + marker.len()) as u64);
+                }
+                scanned = end;
+            }
+            if g.abort {
+                g.abort = false;
+                return WaitEnd::Aborted;
+            }
+            if g.eof {
+                return WaitEnd::Eof;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return WaitEnd::Timeout;
+            }
+            let (g2, _) = self
+                .cond
+                .wait_timeout(g, deadline - now)
+                .unwrap_or_else(|e| e.into_inner());
+            g = g2;
         }
     }
 }
@@ -226,19 +353,12 @@ struct InFlight {
     raw: bool,
 }
 
-/// What `read_until` came back with, and why it stopped.
-struct ReadEnd {
-    buf: Vec<u8>,
-    /// The marker was seen.
-    found: bool,
-    /// The descriptor reported end-of-file or an error: the child has gone
-    /// away, or every copy of the slave side has been closed.
-    eof: bool,
-}
-
 pub struct Session {
     child: Child,
-    master: OwnedFd,
+    /// The PTY master's write side, from this thread's point of view; the
+    /// reader thread holds its own clone for the read side. One descriptor,
+    /// two directions, two owners.
+    writer: Arc<OwnedFd>,
     /// The book's directory, absolute.
     ///
     /// Every submission re-establishes this as ACL2's connected book
@@ -254,17 +374,35 @@ pub struct Session {
     inflight: Option<InFlight>,
     tmpdir: PathBuf,
     generation: u64,
-    /// Output read past the end of the previous form. Carried forward so it is
-    /// never misattributed to the next one.
-    ///
-    /// Bytes, not `String`. Output arrives in arbitrary 64 KB chunks, and a
-    /// multi-byte sequence split across a chunk boundary decodes to U+FFFD if
-    /// each chunk is decoded alone -- corrupting even perfectly valid UTF-8.
-    /// Decoding happens once, at the submission boundary. (ISO-8859-1 high
-    /// bytes a book prints still become U+FFFD there; that is the decode
-    /// being lossy on genuinely non-UTF-8 text, not a framing artefact.)
-    pending: Vec<u8>,
     control: Arc<SessionControl>,
+    shutdown: Arc<AtomicBool>,
+    reader: Option<JoinHandle<()>>,
+}
+
+/// The reader thread: own the PTY's read side, file everything into the
+/// stream, and say so when it ends. Exits on EOF, on a read error, or when
+/// the session asks it to stand down.
+fn reader_loop(fd: Arc<OwnedFd>, control: Arc<SessionControl>, epoch: u64, shutdown: Arc<AtomicBool>) {
+    let mut chunk = [0u8; 65536];
+    loop {
+        if shutdown.load(Ordering::Relaxed) {
+            return;
+        }
+        match wait_readable(fd.as_fd(), READER_POLL) {
+            Ok(false) => continue,
+            Ok(true) => match rustix::io::read(fd.as_fd(), &mut chunk) {
+                Ok(0) | Err(_) => {
+                    control.mark_eof(epoch);
+                    return;
+                }
+                Ok(n) => control.append(epoch, &chunk[..n]),
+            },
+            Err(_) => {
+                control.mark_eof(epoch);
+                return;
+            }
+        }
+    }
 }
 
 impl Session {
@@ -277,9 +415,9 @@ impl Session {
     /// `.acl2` parsing and no `cert.pl` emulation, so the session is the one a
     /// person gets by `cd`-ing here and starting ACL2.
     ///
-    /// `control` is shared with whoever must reach a busy session without its
-    /// lock; the caller that owns several sessions over one book passes the
-    /// same block to each.
+    /// `control` is the shared stream; the caller that owns several sessions
+    /// over one book passes the same block to each, and this session adopts
+    /// it (see `SessionControl`).
     pub fn start(
         acl2: &Path,
         book_dir: &Path,
@@ -335,17 +473,30 @@ impl Session {
         // would be resolved against whatever cbd happened to be.
         let cwd = std::fs::canonicalize(book_dir).unwrap_or_else(|_| book_dir.to_path_buf());
 
-        control.clear_abort();
-        control.end();
+        // Adopt the stream before the reader exists, so nothing from a
+        // predecessor session can interleave with this one's epoch.
+        let epoch = control.adopt();
+        let writer = Arc::new(master);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let reader = {
+            let fd = writer.clone();
+            let control = control.clone();
+            let shutdown = shutdown.clone();
+            std::thread::Builder::new()
+                .name("acl2-session-reader".into())
+                .spawn(move || reader_loop(fd, control, epoch, shutdown))?
+        };
+
         let mut s = Session {
             child,
-            master,
+            writer,
             cwd,
             tmpdir,
             generation: 0,
             inflight: None,
-            pending: Vec::new(),
             control,
+            shutdown,
+            reader: Some(reader),
         };
         // Drain the startup banner and everything the customization file
         // prints, by handshake rather than by looking for a prompt.
@@ -376,9 +527,8 @@ impl Session {
     ///
     /// `try_wait` rather than bookkeeping: `inflight` says a form was
     /// submitted and never reported, which is exactly the lie a crashed child
-    /// leaves behind -- the EOF reader returns, nothing completes, and the
-    /// session reads as busy forever. An error from `try_wait` counts as
-    /// alive, because condemning a working session is the worse mistake.
+    /// leaves behind. An error from `try_wait` counts as alive, because
+    /// condemning a working session is the worse mistake.
     pub fn alive(&mut self) -> bool {
         !matches!(self.child.try_wait(), Ok(Some(_)))
     }
@@ -394,15 +544,16 @@ impl Session {
              (acl2::value :invisible))\n"
         );
         self.write_all(line.as_bytes())?;
-        let end = self.read_until(Some(done.as_bytes()), deadline)?;
-        if end.found {
-            self.split_after(end.buf, done.as_bytes());
-            Ok(true)
-        } else {
-            // Keep what was read: a failed handshake during an interrupt
-            // escalation must not eat the output the form printed meanwhile.
-            self.pending = end.buf;
-            Ok(false)
+        let from = self.control.consumed_offset();
+        match self.control.wait_for_marker(done.as_bytes(), from, deadline) {
+            WaitEnd::Found(end) => {
+                self.control.consume_to(end);
+                Ok(true)
+            }
+            // Keep what was read -- it stays in the stream: a failed
+            // handshake during an interrupt escalation must not eat the
+            // output the form printed meanwhile.
+            _ => Ok(false),
         }
     }
 
@@ -423,18 +574,6 @@ impl Session {
             ));
         }
         self.handshake(deadline)
-    }
-
-    /// Keep everything up to and including `marker`; carry the remainder
-    /// forward as `pending` so it can never be attributed to the next form.
-    fn split_after(&mut self, mut buf: Vec<u8>, marker: &[u8]) -> Vec<u8> {
-        match find_bytes(&buf, marker) {
-            Some(i) => {
-                self.pending = buf.split_off(i + marker.len());
-                buf
-            }
-            None => buf,
-        }
     }
 
     /// Submit one form and wait up to `deadline` for it to finish.
@@ -514,10 +653,12 @@ impl Session {
                              (acl2::value :invisible)))\n",
             lisp_string(&path.display().to_string())
         );
-        self.write_all(line.as_bytes())?;
-
-        self.inflight = Some(InFlight { generation: genid, started: Instant::now(), raw: false });
         self.control.begin();
+        if let Err(e) = self.write_all(line.as_bytes()) {
+            self.control.end();
+            return Err(e);
+        }
+        self.inflight = Some(InFlight { generation: genid, started: Instant::now(), raw: false });
         self.await_completion(deadline)
     }
 
@@ -549,9 +690,12 @@ impl Session {
             "{form}\n(acl2::prog2$ (acl2::cw \"~%<<<ASS-DONE {genid}>>>~%\") \
              (acl2::value :invisible))\n"
         );
-        self.write_all(line.as_bytes())?;
-        self.inflight = Some(InFlight { generation: genid, started: Instant::now(), raw: true });
         self.control.begin();
+        if let Err(e) = self.write_all(line.as_bytes()) {
+            self.control.end();
+            return Err(e);
+        }
+        self.inflight = Some(InFlight { generation: genid, started: Instant::now(), raw: true });
         self.await_completion(deadline)
     }
 
@@ -573,17 +717,14 @@ impl Session {
             return Err(io::Error::other("nothing in flight"));
         };
         let done = format!("<<<ASS-DONE {genid}>>>");
-        let end = self.read_until(Some(done.as_bytes()), deadline)?;
-
-        if !end.found {
-            // Keep everything read so far so a later resume continues where
-            // this one stopped rather than losing the head of the output.
-            self.pending = end.buf;
-            if end.eof && !self.alive() {
+        let from = self.control.consumed_offset();
+        let end = match self.control.wait_for_marker(done.as_bytes(), from, deadline) {
+            WaitEnd::Found(end) => end,
+            WaitEnd::Eof if !self.alive() => {
                 // The child is gone; the form will never report. Without this
-                // check the EOF reader returns instantly, `resume` says
-                // `still_running` on every call, and health says `busy`,
-                // forever, about a corpse.
+                // check nothing ever completes and the bookkeeping says
+                // "busy", forever, about a corpse. The partial output stays
+                // in the stream for `captured_so_far`.
                 self.inflight = None;
                 self.control.end();
                 return Err(io::Error::new(
@@ -592,17 +733,22 @@ impl Session {
                      close the session and open it again",
                 ));
             }
-            return Ok(Submission {
-                outcome: Outcome::StillRunning,
-                output: String::new(),
-                data: Vec::new(),
-                blocks: Vec::new(),
-                elapsed: started.elapsed(),
-            });
-        }
-
-        // Anything read past our sentinel belongs to whatever comes next.
-        let kept = self.split_after(end.buf, done.as_bytes());
+            // Timeout, abort, or an EOF with the child somehow still alive
+            // (its descriptors handed to something else): the form is still
+            // in flight and the stream keeps accumulating.
+            _ => {
+                return Ok(Submission {
+                    outcome: Outcome::StillRunning,
+                    output: String::new(),
+                    data: Vec::new(),
+                    blocks: Vec::new(),
+                    elapsed: started.elapsed(),
+                });
+            }
+        };
+        // This form's capture is the stream up to its marker; anything past
+        // the marker belongs to whatever comes next.
+        let kept = self.control.consume_to(end);
         self.inflight = None;
         self.control.end();
         // One decode for the whole capture. Doing this per read chunk split
@@ -625,17 +771,14 @@ impl Session {
     /// Progress on the form in flight: how long it has been running, and the
     /// tail of what it has printed so far.
     ///
-    /// Drains without blocking, so it is safe to call repeatedly. The tail is
-    /// the only thing offered here; anything more belongs behind an output
-    /// handle once the form completes.
+    /// The reader thread has already ingested everything available, so this
+    /// is a snapshot, not a drain; safe to call repeatedly.
     pub fn progress(&mut self, tail_lines: usize) -> io::Result<Option<Progress>> {
         let Some(InFlight { started, .. }) = self.inflight else {
             return Ok(None);
         };
-        // A short poll rather than the deadline: this reports, it does not wait.
-        let end = self.read_until(None, Duration::from_millis(50))?;
-        self.pending = end.buf;
-        let text = String::from_utf8_lossy(&self.pending);
+        let bytes = self.control.peek_all();
+        let text = String::from_utf8_lossy(&bytes);
         let tail: Vec<&str> = text
             .lines()
             .rev()
@@ -647,8 +790,18 @@ impl Session {
         Ok(Some(Progress {
             elapsed: started.elapsed(),
             tail: tail.join("\n"),
-            bytes_so_far: self.pending.len(),
+            bytes_so_far: bytes.len(),
         }))
+    }
+
+    /// Everything read for the form in flight, so far.
+    ///
+    /// A form that is interrupted never reports, so its output would otherwise
+    /// be unreachable -- and a proof interrupted because it was going badly is
+    /// exactly the one whose partial output you want. A peek, not a drain:
+    /// the bytes stay in the stream.
+    pub fn captured_so_far(&mut self) -> String {
+        String::from_utf8_lossy(&self.control.peek_all()).into_owned()
     }
 
     /// Interrupt a running form.
@@ -662,19 +815,6 @@ impl Session {
     /// what produces the "interrupt twice" ritual users complain about.
     ///
     /// Verified to behave identically on ACL2 images built on SBCL and CCL.
-    /// Everything read for the form in flight, so far.
-    ///
-    /// A form that is interrupted never reports, so its output would otherwise
-    /// be unreachable -- and a proof interrupted because it was going badly is
-    /// exactly the one whose partial output you want. Call before interrupting:
-    /// the interrupt handshake reads more, which would be mixed in.
-    pub fn captured_so_far(&mut self) -> String {
-        if let Ok(end) = self.read_until(None, Duration::from_millis(50)) {
-            self.pending = end.buf;
-        }
-        String::from_utf8_lossy(&self.pending).into_owned()
-    }
-
     pub fn interrupt(&mut self) -> io::Result<bool> {
         // A stale abort request must not cut the next call short; whoever
         // asked for this interrupt is being answered right now.
@@ -698,7 +838,7 @@ impl Session {
 
     fn write_all(&mut self, mut buf: &[u8]) -> io::Result<()> {
         while !buf.is_empty() {
-            let n = rustix::io::write(self.master.as_fd(), buf)?;
+            let n = rustix::io::write(self.writer.as_fd(), buf)?;
             if n == 0 {
                 return Err(io::Error::from(io::ErrorKind::WriteZero));
             }
@@ -706,60 +846,21 @@ impl Session {
         }
         Ok(())
     }
-
-    /// Accumulate output until `marker` appears, the deadline expires, the
-    /// child's descriptor reports EOF, or an abort is requested. Waits in
-    /// [`POLL_SLICE`] steps so an abort is honoured promptly.
-    ///
-    /// Only the tail of the buffer is rescanned for the marker on each chunk
-    /// -- the unscanned suffix plus one marker-length of overlap -- because
-    /// rescanning from the start made a 600k-line capture cost gigabytes of
-    /// re-scanning over its lifetime.
-    fn read_until(&mut self, marker: Option<&[u8]>, deadline: Duration) -> io::Result<ReadEnd> {
-        let mut buf = std::mem::take(&mut self.pending);
-        let mut found = match marker {
-            Some(m) => find_bytes(&buf, m).is_some(),
-            None => false,
-        };
-        let mut eof = false;
-        let mut scanned = buf.len();
-        let start = Instant::now();
-        let mut chunk = [0u8; 65536];
-        while !found {
-            if self.control.take_abort() {
-                break;
-            }
-            let left = match deadline.checked_sub(start.elapsed()) {
-                Some(d) if !d.is_zero() => d,
-                _ => break,
-            };
-            if !wait_readable(self.master.as_fd(), left.min(POLL_SLICE))? {
-                continue;
-            }
-            let n = match rustix::io::read(self.master.as_fd(), &mut chunk) {
-                Ok(0) | Err(_) => {
-                    eof = true;
-                    break;
-                }
-                Ok(n) => n,
-            };
-            buf.extend_from_slice(&chunk[..n]);
-            if let Some(m) = marker {
-                let from = scanned.saturating_sub(m.len().saturating_sub(1));
-                found = find_bytes(&buf[from..], m).is_some();
-            }
-            scanned = buf.len();
-            self.control.update(&buf);
-        }
-        Ok(ReadEnd { buf, found, eof })
-    }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
+        // Kill first: the child's death closes the slave side, which is what
+        // wakes a reader blocked on the descriptor. The shutdown flag covers
+        // the corner where something inherited the slave and keeps the PTY
+        // open; the reader notices within its poll.
+        self.shutdown.store(true, Ordering::Relaxed);
         let _ = self.child.kill();
         let _ = self.child.wait();
-        // `master` is an OwnedFd and closes itself.
+        if let Some(r) = self.reader.take() {
+            let _ = r.join();
+        }
+        // `writer` is the last owner of the master once the reader is gone.
         let _ = std::fs::remove_dir_all(&self.tmpdir);
     }
 }
