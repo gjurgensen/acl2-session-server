@@ -462,6 +462,18 @@ fn parse_inner(sub: &crate::session::Submission) -> (Vec<InnerEvent>, usize) {
     // a long one: the reporter found two of a clique's own functions in the
     // world and absent from this list, with nothing to say it was truncated.
     let names = items(&pairs, "iname");
+    // Names are complete; the per-event detail is read for the first three.
+    //
+    // That number is a leftover -- fmt indexes `~x0` to `~x9`, so one `cw`
+    // carried three events' worth -- but it costs nothing where it matters.
+    // `event-data-fal` is newest-first and a compound form stops at the event
+    // that failed, so **the failing event is always at index 0**. Measured on
+    // a `progn` of four theorems whose fourth fails: names come back
+    // `(p4-bogus p3 p2 p1)` with the abort cause at slot 0, not slot 3.
+    //
+    // What the limit does cost is the rules used by *non-failing* inner events
+    // past the third, on a form that failed. Raising it means more `~*` passes,
+    // one per slot; do that if anyone ever wants them, not before.
     let detail = [("a0", "r0rune"), ("a1", "r1rune"), ("a2", "r2rune")];
     let mut out = Vec::new();
     for (i, name) in names.iter().enumerate() {
