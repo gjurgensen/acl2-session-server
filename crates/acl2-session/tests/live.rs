@@ -825,6 +825,42 @@ fn a_failed_eval_carries_the_failure_envelope() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A broken image must report its own complaint, at open, as the diagnosis.
+///
+/// An "ACL2 image" is often a wrapper script, and one that dies -- an unset
+/// environment variable, a missing core -- used to yield an apparently open
+/// session whose first submission then failed "mid-form" with advice to
+/// close and reopen: wrong diagnosis, wrong remedy, and the script's own
+/// words nowhere. Needs no ACL2, so it is not gated and runs in CI.
+#[test]
+fn a_failing_image_reports_its_own_error() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch("badimage");
+    let image = dir.join("saved_acl2");
+    std::fs::write(
+        &image,
+        "#!/bin/sh\n\
+         echo \"FATAL: MY_ACL2_HOME is not set; cannot locate the ACL2 core\" >&2\n\
+         exit 1\n",
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(&image).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&image, perms).unwrap();
+    let book = dir.join("b.lisp");
+    std::fs::write(&book, "(in-package \"ACL2\")\n").unwrap();
+
+    let err = Book::open(&image, &book).err().expect("a dead image cannot open");
+    let msg = err.to_string();
+    assert!(msg.contains("MY_ACL2_HOME"),
+            "the script's own words are the diagnosis: {msg}");
+    assert!(msg.contains("exited during startup"), "{msg}");
+    assert!(!msg.contains("mid-form"),
+            "no misleading mid-form report at startup: {msg}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A crashed ACL2 must read as dead, not busy forever.
 ///
 /// `is_running` is bookkeeping; a child that dies mid-form leaves it set. The

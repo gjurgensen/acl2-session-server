@@ -43,6 +43,10 @@ const SNAPSHOT_TAIL: usize = 16384;
 /// "forever" for a tool call.
 const DEADLINE_CAP: Duration = Duration::from_secs(60 * 60 * 24 * 30);
 
+/// How long startup may take before the session is declared not to have
+/// come up. Generous because the customization file may build packages.
+const STARTUP_DEADLINE: Duration = Duration::from_secs(120);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     /// The form was admitted.
@@ -129,6 +133,10 @@ struct Shared {
     unit: Option<usize>,
     /// Absolute offset where the in-flight form's output begins.
     form_start: u64,
+    /// A certification in progress: when it started and for which book.
+    /// Belongs to the *book*, not the session -- `adopt` leaves it alone,
+    /// since a rebuild does not touch a running build.
+    build: Option<(Instant, PathBuf)>,
 }
 
 /// Why a wait ended.
@@ -155,6 +163,7 @@ impl SessionControl {
                 started: None,
                 unit: None,
                 form_start: 0,
+                build: None,
             }),
             cond: Condvar::new(),
         })
@@ -245,6 +254,45 @@ impl SessionControl {
         }
     }
 
+    /// Wait up to `dur` for an abort request, consuming it.
+    ///
+    /// For calls that block holding the book's lock on something that is
+    /// *not* a session submission -- certification's wait -- so an interrupt
+    /// still cuts through at once instead of after the call's deadline.
+    pub(crate) fn wait_abort(&self, dur: Duration) -> bool {
+        let deadline = Instant::now() + dur.min(DEADLINE_CAP);
+        let mut g = self.lock();
+        loop {
+            if g.abort {
+                g.abort = false;
+                return true;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            let (g2, _) = self
+                .cond
+                .wait_timeout(g, deadline - now)
+                .unwrap_or_else(|e| e.into_inner());
+            g = g2;
+        }
+    }
+
+    /// Note that a certification build started, for lock-free status readers.
+    pub fn begin_build(&self, book: PathBuf) {
+        self.lock().build = Some((Instant::now(), book));
+    }
+
+    pub fn end_build(&self) {
+        self.lock().build = None;
+    }
+
+    /// The running build's elapsed time and book, without any book lock.
+    pub fn build_snapshot(&self) -> Option<(Duration, PathBuf)> {
+        self.lock().build.as_ref().map(|(t, b)| (t.elapsed(), b.clone()))
+    }
+
     /// Where the unconsumed region begins.
     fn consumed_offset(&self) -> u64 {
         self.lock().base
@@ -253,6 +301,15 @@ impl SessionControl {
     /// Everything printed and not yet consumed, as of now.
     fn peek_all(&self) -> Vec<u8> {
         self.lock().buf.clone()
+    }
+
+    /// A bounded copy of the unconsumed tail, plus the total unconsumed
+    /// length. For displays that want a tail, not a multi-megabyte clone of
+    /// a noisy form's whole stream.
+    fn peek_tail(&self, max: usize) -> (Vec<u8>, usize) {
+        let g = self.lock();
+        let from = g.buf.len().saturating_sub(max);
+        (g.buf[from..].to_vec(), g.buf.len())
     }
 
     /// Take the stream from its base up to `end`, advancing the base: this
@@ -465,6 +522,13 @@ impl Session {
                 format!("cannot start ACL2 at {}: {e}", acl2.display()),
             )
         })?;
+        // Both of these matter, and the second is easy to miss: `Command`
+        // *owns* the three Stdio clones until it drops, and this function
+        // does not return until the startup handshake resolves. Held here,
+        // the parent itself keeps the slave side open, no EOF can ever reach
+        // the reader, and an image that dies at startup reads as a two-minute
+        // silence instead of an exit. Measured, not hypothesised.
+        drop(cmd);
         drop(slave);
 
         let tmpdir = std::env::temp_dir().join(format!("acl2-session-{}", child.id()));
@@ -507,7 +571,41 @@ impl Session {
         // startup and every later form then reports the previous one's tail.
         // A sentinel we chose cannot appear early by accident. This is P2
         // applied to startup: never parse ACL2's prose for control flow.
-        s.handshake(Duration::from_secs(120))?;
+        //
+        // And the answer is *checked*. An "image" is often a wrapper script,
+        // and a script that dies -- an unset variable, a missing core -- used
+        // to yield an apparently open session whose first submission then
+        // failed "mid-form" with advice to reopen: wrong diagnosis, wrong
+        // remedy, and the script's own complaint nowhere. Whatever the child
+        // printed IS the diagnosis, so the error carries it.
+        let answered = match s.handshake(STARTUP_DEADLINE) {
+            Ok(a) => a,
+            // The write itself can fail if the child died first; that is the
+            // same startup failure, not an I/O mystery.
+            Err(_) if !s.alive() => false,
+            Err(e) => return Err(e),
+        };
+        if !answered {
+            let said = tail_text(&s.control.peek_all(), 2048);
+            let said = if said.is_empty() {
+                "it printed nothing".to_string()
+            } else {
+                format!("it printed:\n{said}")
+            };
+            let what = if s.alive() {
+                format!(
+                    "did not answer within {}s of starting; an \
+                     acl2-customization.lsp may be hung or awaiting input",
+                    STARTUP_DEADLINE.as_secs()
+                )
+            } else {
+                "exited during startup".to_string()
+            };
+            return Err(io::Error::other(format!(
+                "ACL2 at {} {what}; {said}",
+                acl2.display()
+            )));
+        }
         Ok(s)
     }
 
@@ -720,23 +818,27 @@ impl Session {
         let from = self.control.consumed_offset();
         let end = match self.control.wait_for_marker(done.as_bytes(), from, deadline) {
             WaitEnd::Found(end) => end,
-            WaitEnd::Eof if !self.alive() => {
-                // The child is gone; the form will never report. Without this
-                // check nothing ever completes and the bookkeeping says
-                // "busy", forever, about a corpse. The partial output stays
+            WaitEnd::Eof => {
+                // No more bytes are ever coming, so the marker cannot arrive
+                // and "still running" would be a permanent lie -- reported
+                // instantly on every resume, since the EOF short-circuits the
+                // wait. Say what actually happened; the partial output stays
                 // in the stream for `captured_so_far`.
                 self.inflight = None;
                 self.control.end();
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
+                let msg = if self.alive() {
+                    "the ACL2 session's terminal closed while the process \
+                     survives (something else may hold its descriptors); the \
+                     form cannot report, so close the session and open it again"
+                } else {
                     "the ACL2 process exited mid-form (crashed or killed); \
-                     close the session and open it again",
-                ));
+                     close the session and open it again"
+                };
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, msg));
             }
-            // Timeout, abort, or an EOF with the child somehow still alive
-            // (its descriptors handed to something else): the form is still
-            // in flight and the stream keeps accumulating.
-            _ => {
+            WaitEnd::Timeout | WaitEnd::Aborted => {
+                // The form is still in flight and the stream keeps
+                // accumulating; the caller decides what to do with the time.
                 return Ok(Submission {
                     outcome: Outcome::StillRunning,
                     output: String::new(),
@@ -751,6 +853,11 @@ impl Session {
         let kept = self.control.consume_to(end);
         self.inflight = None;
         self.control.end();
+        // The submission's temp file is dead once its form completes; left
+        // in place, a long session accumulates one per submission for its
+        // whole life. Raw submissions have none; removal is best-effort
+        // either way.
+        let _ = std::fs::remove_file(self.tmpdir.join(format!("form-{genid}.lisp")));
         // One decode for the whole capture. Doing this per read chunk split
         // multi-byte sequences at arbitrary 64 KB boundaries.
         let captured = String::from_utf8_lossy(&kept).into_owned();
@@ -759,7 +866,7 @@ impl Session {
         } else {
             Outcome::Failed
         };
-        let (output, data, blocks) = strip_sentinels(&captured, genid);
+        let (output, data, blocks) = strip_sentinels(&captured);
         Ok(Submission { outcome, output, data, blocks, elapsed: started.elapsed() })
     }
 
@@ -777,7 +884,10 @@ impl Session {
         let Some(InFlight { started, .. }) = self.inflight else {
             return Ok(None);
         };
-        let bytes = self.control.peek_all();
+        // A bounded tail, not the whole stream: a noisy form's stream runs to
+        // megabytes, and cloning all of it to render twenty lines was real
+        // memcpy on every status call.
+        let (bytes, total) = self.control.peek_tail(64 * 1024);
         let text = String::from_utf8_lossy(&bytes);
         let tail: Vec<&str> = text
             .lines()
@@ -790,7 +900,7 @@ impl Session {
         Ok(Some(Progress {
             elapsed: started.elapsed(),
             tail: tail.join("\n"),
-            bytes_so_far: bytes.len(),
+            bytes_so_far: total,
         }))
     }
 
@@ -873,6 +983,13 @@ fn find_bytes(hay: &[u8], needle: &[u8]) -> Option<usize> {
     (0..=hay.len() - needle.len()).find(|&i| &hay[i..i + needle.len()] == needle)
 }
 
+/// The last `max` bytes of `bytes`, decoded lossily and trimmed. For error
+/// messages that must carry what a child actually printed.
+fn tail_text(bytes: &[u8], max: usize) -> String {
+    let tail = &bytes[bytes.len().saturating_sub(max)..];
+    String::from_utf8_lossy(tail).trim().to_string()
+}
+
 /// Escape a string for interpolation into Lisp source between double quotes.
 fn lisp_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -918,7 +1035,7 @@ type Stripped = (String, Vec<(String, String)>, Vec<(String, String)>);
 /// which therefore lands at the head of the capture. This is cosmetic only --
 /// the prompt is never used to decide anything (P2); it is just noise at the
 /// front of otherwise clean output.
-fn strip_sentinels(s: &str, _genid: u64) -> Stripped {
+fn strip_sentinels(s: &str) -> Stripped {
     let mut data = Vec::new();
     let mut blocks: Vec<(String, String)> = Vec::new();
     let mut kept: Vec<&str> = Vec::new();

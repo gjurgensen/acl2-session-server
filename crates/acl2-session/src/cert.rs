@@ -164,16 +164,13 @@ impl Build {
         })
     }
 
-    /// Wait up to `deadline`. `None` means it is still going.
-    pub fn wait(&mut self, deadline: Duration) -> Result<Option<ExitStatus>, CertError> {
-        let start = Instant::now();
-        loop {
-            match self.child.try_wait().map_err(CertError::Io)? {
-                Some(st) => return Ok(Some(st)),
-                None if start.elapsed() >= deadline => return Ok(None),
-                None => std::thread::sleep(Duration::from_millis(50)),
-            }
-        }
+    /// Whether the build has finished, without waiting.
+    ///
+    /// The waiting itself belongs to the caller: a build wait holds the
+    /// book's lock, so it must be interruptible through the session's
+    /// control block, which this crate knows nothing about.
+    pub fn poll(&mut self) -> Result<Option<ExitStatus>, CertError> {
+        self.child.try_wait().map_err(CertError::Io)
     }
 
     /// Everything printed so far.
@@ -202,6 +199,15 @@ impl Build {
         let _ = self.child.kill();
         let _ = self.child.wait();
         Ok(())
+    }
+}
+
+/// A dropped build is a killed build. Without this, closing a session whose
+/// certification was still running orphaned the whole `make` tree of provers
+/// -- at `-j 12`, a dozen ACL2s grinding for a session that no longer exists.
+impl Drop for Build {
+    fn drop(&mut self) {
+        let _ = self.kill();
     }
 }
 

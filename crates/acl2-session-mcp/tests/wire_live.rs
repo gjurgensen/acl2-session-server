@@ -354,6 +354,63 @@ fn a_blocked_session_answers_status_health_output_and_interrupt() {
     s.tool("acl2_session_close", json!({"session_id": sid}));
 }
 
+/// A certification wait holds the book's lock like any blocked call, and the
+/// same escape hatches must work: status and health answer from the build
+/// stamp, and an interrupt cuts through the wait at once and kills the build.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_blocked_certification_answers_status_health_and_interrupt() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("certblock");
+    let book = dir.join("slowcert.lisp");
+    // The include makes the scratch book's own certification take seconds --
+    // its dependency is already certified, so nothing outside the scratch
+    // directory is built or written.
+    std::fs::write(
+        &book,
+        "(in-package \"ACL2\")\n\
+         (include-book \"std/strings/top\" :dir :system)\n\
+         (defun certblock-f (x) x)\n",
+    )
+    .unwrap();
+
+    let mut s = Server::start(&acl2);
+    let sid = s.tool("acl2_session_open", json!({"file": book}))["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let cert_id = s.send_tool("acl2_certify", json!({"session_id": sid, "deadline_seconds": 60}));
+    std::thread::sleep(Duration::from_secs(1));
+
+    let t = Instant::now();
+    let st = s.tool("acl2_status", json!({"session_id": sid}));
+    assert!(t.elapsed() < Duration::from_secs(5),
+            "status must not wait behind the certify deadline: {:?}", t.elapsed());
+    assert!(st["build"]["book"].as_str().unwrap_or("").contains("slowcert"),
+            "the build stamp names the book: {st}");
+
+    let t = Instant::now();
+    let h = s.tool("acl2_health", json!({"session_id": sid}));
+    assert!(t.elapsed() < Duration::from_secs(5), "health must answer promptly");
+    assert_eq!(h["state"].as_str(), Some("busy"), "a building session is busy: {h}");
+
+    let t = Instant::now();
+    let ir = s.tool("acl2_interrupt", json!({"session_id": sid}));
+    assert!(t.elapsed() < Duration::from_secs(15),
+            "interrupt must cut through the certify wait: {:?}", t.elapsed());
+    assert_eq!(ir["ok"].as_bool(), Some(true), "{ir}");
+
+    // The blocked certify call hands back still_running promptly; its build
+    // was killed by the interrupt it yielded to.
+    let cr = Server::payload(s.wait(cert_id, Duration::from_secs(20)));
+    assert_eq!(cr["outcome"].as_str(), Some("still_running"), "{cr}");
+
+    let h = s.tool("acl2_health", json!({"session_id": sid}));
+    assert_eq!(h["state"].as_str(), Some("ready"), "usable again: {h}");
+    s.tool("acl2_session_close", json!({"session_id": sid}));
+}
+
 /// A failed eval's envelope arrives on the wire, and a successful one
 /// carries nothing.
 #[test]

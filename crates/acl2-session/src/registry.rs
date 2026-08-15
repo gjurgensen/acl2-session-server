@@ -230,7 +230,13 @@ impl Registry {
             .iter()
             .map(|(id, e)| (id.clone(), e.path.clone(), e.image.clone()))
             .collect();
-        v.sort();
+        // Ids are "s<n>"; sorted as strings, s10 lands before s2.
+        v.sort_by_key(|(id, ..)| {
+            id.as_str()
+                .strip_prefix('s')
+                .and_then(|n| n.parse::<u64>().ok())
+                .unwrap_or(u64::MAX)
+        });
         v
     }
 

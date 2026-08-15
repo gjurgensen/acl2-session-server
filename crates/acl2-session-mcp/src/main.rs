@@ -29,6 +29,18 @@ fn fail(e: impl std::fmt::Display) -> ErrorData {
     ErrorData::internal_error(e.to_string(), None)
 }
 
+/// A build's progress as far as the lock-free stamp knows it: the book and
+/// elapsed time. The log's lines and tail live behind the book lock, which
+/// is exactly what a caller reading the stamp is avoiding.
+fn build_stamp(control: &acl2_session::SessionControl) -> Option<wire::BuildProgressReply> {
+    control.build_snapshot().map(|(elapsed, book)| wire::BuildProgressReply {
+        book: book.display().to_string(),
+        elapsed_ms: elapsed.as_millis(),
+        lines_so_far: 0,
+        tail: String::new(),
+    })
+}
+
 /// The last `n` lines of `s`, for tails served from a stream snapshot.
 fn last_lines(s: &str, n: usize) -> String {
     let v: Vec<&str> = s.lines().rev().take(n).collect();
@@ -439,11 +451,23 @@ impl Acl2Mcp {
                         elapsed_ms: s.elapsed.as_millis(),
                         tail: last_lines(&s.tail, n),
                         bytes_so_far: s.bytes_so_far,
-                        // A build's progress lives behind the lock; the form's
-                        // progress is the thing a blocked session is asked
-                        // about.
-                        build: None,
+                        // The build stamp knows the build exists and how long
+                        // it has run; its log lives behind the lock.
+                        build: build_stamp(&control),
                     }),
+                    // No form in flight but the lock is held: a running
+                    // certification's wait holds it for its whole deadline,
+                    // and the stamp answers without joining the queue.
+                    None if control.build_snapshot().is_some() => {
+                        Ok(wire::ProgressReply {
+                            running: false,
+                            unit_index: None,
+                            elapsed_ms: 0,
+                            tail: String::new(),
+                            bytes_so_far: 0,
+                            build: build_stamp(&control),
+                        })
+                    }
                     // Contended for an instant between submissions: a brief
                     // wait is bounded and honest.
                     None => {
@@ -512,11 +536,14 @@ impl Acl2Mcp {
         let book = self.book(&a.session_id)?;
         let reply = blocking!({
             // A busy session answers from the stream snapshot rather than
-            // queueing behind the very call it is being asked about. Both
-            // conditions, deliberately: a snapshot that says running with a
-            // free lock means the form outran its call's deadline, and the
-            // locked path then gives the fuller answer.
-            if control.snapshot().is_some() && book.try_lock().is_err() {
+            // queueing behind the very call it is being asked about -- and a
+            // session whose certification wait holds the lock is busy in the
+            // same sense. Both conditions, deliberately: a snapshot that says
+            // running with a free lock means the form outran its call's
+            // deadline, and the locked path then gives the fuller answer.
+            if (control.snapshot().is_some() || control.build_snapshot().is_some())
+                && book.try_lock().is_err()
+            {
                 return Ok::<_, String>(wire::HealthReply {
                     state: "busy".to_string(),
                     running_unit: control.snapshot().and_then(|s| s.unit),

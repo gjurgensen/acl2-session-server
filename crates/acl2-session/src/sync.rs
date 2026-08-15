@@ -1832,13 +1832,31 @@ impl Book {
         // yes would be the more surprising outcome.
         if let Some(mut b) = self.build.take() {
             let _ = b.kill();
+            self.control.end_build();
         }
         let was_running = self.session.is_running();
         // Capture before interrupting: the form will never report, so this is
         // the only chance to keep what it printed, and the interrupt handshake
         // reads more that would otherwise be mixed in.
         let partial = self.session.captured_so_far();
-        let ok = self.session.interrupt()?;
+        // A dead child cannot be interrupted, and asking would surface a raw
+        // I/O error from the handshake's write; report a clean non-recovery
+        // instead, with health's `dead` one call away. And an *idle* session
+        // that answers a ping must not be signalled at all: with nothing in
+        // flight the build above was the whole job, and a SIGINT at ACL2's
+        // idle reader can wedge it into a raw break loop -- measured, four
+        // failed recovery handshakes after signalling an idle image. The
+        // escalation stays reserved for the running and the unresponsive,
+        // where it is the recovery tool.
+        let ok = if !self.session.alive() {
+            false
+        } else if was_running {
+            self.session.interrupt()?
+        } else if self.session.ping(Duration::from_millis(1500)).unwrap_or(false) {
+            true
+        } else {
+            self.session.interrupt()?
+        };
         // Filed in *both* arms: after a failed interrupt, the wedged session
         // is exactly the one whose partial log is the only evidence. The
         // handle stays linked on failure, so a form that later completes
@@ -1931,9 +1949,26 @@ impl Book {
                 None => cert_pl_for(&self.acl2)?,
             };
             self.build = Some(Build::start(&cert_pl, &self.acl2, &self.path, jobs)?);
+            self.control.begin_build(self.path.clone());
         }
         let b = self.build.as_mut().expect("just started");
-        let finished = b.wait(deadline)?;
+        // The wait holds this book's lock exactly like a blocked submission,
+        // and used to be the one such wait an interrupt could not reach: the
+        // abort flag woke session waiters, and this was not one. Waiting on
+        // the control block's condvar closes that -- an interrupt cuts
+        // through at once and then kills the build it queued behind. The
+        // 50 ms cadence only bounds try_wait staleness.
+        let started_wait = Instant::now();
+        let finished = loop {
+            if let Some(status) = b.poll()? {
+                break Some(status);
+            }
+            if started_wait.elapsed() >= deadline
+                || self.control.wait_abort(Duration::from_millis(50))
+            {
+                break None;
+            }
+        };
         let elapsed = b.elapsed();
         let Some(status) = finished else {
             let log = b.output();
@@ -1951,6 +1986,7 @@ impl Book {
         };
         let log = b.output();
         self.build = None;
+        self.control.end_build();
 
         let failed_books = blamed_books(&log);
         // Trust the exit status for pass/fail, and the log only for *which*
@@ -2104,10 +2140,10 @@ impl Book {
         // order, because the target package is certainly known in the older
         // world (it was current there), while the package we are leaving may
         // be about to lose its very definition to the undo.
-        if let Some(p) = target_package
+        if let Some(p) = &target_package
             && self.current_package() != Some(p.as_str())
         {
-            self.make_package_stick(&p, deadline)
+            self.make_package_stick(p, deadline)
                 .map_err(|e| SyncError::RollbackFailed { output: e.to_string() })?;
         }
         // `ubu!` is a macro that passes its argument into a *function* call, so
@@ -2129,6 +2165,18 @@ impl Book {
             && actual != Some(expected)
         {
             return Err(SyncError::RollbackUnverified { expected, actual });
+        }
+        // The package was re-established before the undo, and the probe
+        // reports where it actually stands -- so check that too, same P3.
+        if let Some(p) = &target_package
+            && sub.get("pkg").and_then(unquote).as_deref() != Some(p.as_str())
+        {
+            return Err(SyncError::RollbackFailed {
+                output: format!(
+                    "package after undo is {:?}, expected {p:?}",
+                    sub.get("pkg").and_then(unquote)
+                ),
+            });
         }
         // Output from rolled-back units stays readable -- comparing against
         // what a form used to print is useful -- but is flagged so it cannot be
