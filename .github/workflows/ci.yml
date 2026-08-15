@@ -1,0 +1,39 @@
+# What CI can check without an ACL2: build, the ACL2-free test suites, and
+# clippy with warnings promoted to errors.
+#
+# The live suites -- 25 core tests plus 4 wire tests that drive the built
+# server over stdio -- need a real saved_acl2 image and stay local:
+#
+#   ACL2=/path/to/saved_acl2 cargo test -- --ignored --test-threads=1
+#
+# They are the tests that matter most, so green CI means "nothing that can be
+# checked cheaply broke", not "the server works"; run the live suite before
+# trusting a change. rustfmt is deliberately not enforced: the tree carries
+# hand-laid formatting (probe strings, aligned narration) that a formatter
+# would churn.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Build everything, tests included
+        run: cargo build --workspace --all-targets
+      - name: Run the ACL2-free suites
+        run: cargo test --workspace
+      - name: Clippy, warnings as errors
+        run: cargo clippy --workspace --all-targets -- -D warnings
