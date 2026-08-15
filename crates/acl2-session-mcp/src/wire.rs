@@ -38,10 +38,13 @@ pub struct InnerEvent {
     /// its log (see `Admitted`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<String>,
-    /// This event's own prove time `(prove print proof-tree other)`. For a
-    /// clique, this is "which member was slow" -- the outer total cannot say.
+    /// This event's own prove time, in milliseconds. For a clique, this is
+    /// "which member was slow" -- the outer total cannot say. ACL2 records a
+    /// `(prove print proof-tree other)` tuple of exact rationals; the prove
+    /// component is the one that answers questions, so it is the one carried,
+    /// and the full tuple is in the form's log for whoever wants the rest.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub time: Option<String>,
+    pub prove_ms: Option<u64>,
     /// Prover steps this event took, when non-negative.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prover_steps: Option<u64>,
@@ -58,6 +61,29 @@ fn steps_split(steps: Option<i64>) -> (Option<u64>, Option<u64>) {
     }
 }
 
+/// The prove component of ACL2's `(prove print proof-tree other)` time
+/// tuple, rendered as milliseconds.
+///
+/// ACL2 records the components as exact rationals in seconds --
+/// `(4929/20000 663/250000 0 877/500000)` -- which cannot be compared at a
+/// glance and whose meaning an agent had to guess (wrongly, which is
+/// the point). A named integer can. `None` for anything that does not parse:
+/// a value we cannot read honestly is a value not reported.
+fn prove_ms_of(time: Option<&str>) -> Option<u64> {
+    let t = time?.trim().strip_prefix('(')?.strip_suffix(')')?;
+    let first = t.split_whitespace().next()?;
+    let (num, den) = match first.split_once('/') {
+        Some((n, d)) => (n.parse::<u128>().ok()?, d.parse::<u128>().ok()?),
+        None => (first.parse::<u128>().ok()?, 1),
+    };
+    if den == 0 {
+        return None;
+    }
+    // Round half up, in integer arithmetic: exactness is the one virtue of
+    // the rational form worth keeping.
+    Some(((num * 1000 + den / 2) / den).try_into().ok()?)
+}
+
 /// An inner event of a form that failed: full detail.
 fn inner_failed(e: &core::InnerEvent) -> InnerEvent {
     let (prover_steps, step_limit_reached) = steps_split(e.prover_steps);
@@ -66,7 +92,7 @@ fn inner_failed(e: &core::InnerEvent) -> InnerEvent {
         abort_causes: e.abort_causes.clone(),
         kind: e.kind.clone(),
         rules: e.rules.clone(),
-        time: e.time.clone(),
+        prove_ms: prove_ms_of(e.time.as_deref()),
         prover_steps,
         step_limit_reached,
     }
@@ -562,9 +588,11 @@ pub struct Interrupted {
     /// The interrupted event, abbreviated. An outline, not the form.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub event: Option<String>,
-    /// `(prove print proof-tree other)` seconds up to the interrupt.
+    /// Prove time up to the interrupt, in milliseconds -- the "how long had
+    /// it been grinding" number, comparable at a glance with `elapsed_ms`
+    /// figures elsewhere.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub time: Option<String>,
+    pub prove_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prover_steps: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -588,7 +616,7 @@ pub fn interrupted(r: &core::InterruptReport) -> InterruptReply {
             Interrupted {
                 abort_cause: e.abort_cause.clone(),
                 event: e.event.clone(),
-                time: e.time.clone(),
+                prove_ms: prove_ms_of(e.time.as_deref()),
                 prover_steps,
                 step_limit_reached,
                 checkpoints: checkpoints(&e.checkpoints),
@@ -666,6 +694,29 @@ pub struct CertifyReply {
     #[serde(skip_serializing_if = "String::is_empty")]
     pub tail: String,
     pub elapsed_ms: u128,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prove_ms_of;
+
+    /// Real tuples from the field session, plus the shapes that must fail
+    /// closed. The first component is prove time in seconds.
+    #[test]
+    fn prove_time_renders_as_milliseconds() {
+        // 259459/1000000 s = 259.459 ms -> 259.
+        assert_eq!(prove_ms_of(Some("(259459/1000000 2623/1000000 0 39/25000)")), Some(259));
+        // Sub-millisecond rounds to zero rather than inflating.
+        assert_eq!(prove_ms_of(Some("(17/200000 0 0 1551/500000)")), Some(0));
+        // Integer seconds, and half-up rounding.
+        assert_eq!(prove_ms_of(Some("(2 0 0 0)")), Some(2000));
+        assert_eq!(prove_ms_of(Some("(1/2000 0 0 0)")), Some(1)); // 0.5 ms up
+        // Unparseable shapes report nothing rather than something wrong.
+        assert_eq!(prove_ms_of(Some("NIL")), None);
+        assert_eq!(prove_ms_of(Some("(x y z)")), None);
+        assert_eq!(prove_ms_of(Some("(1/0 0 0 0)")), None);
+        assert_eq!(prove_ms_of(None), None);
+    }
 }
 
 pub fn certified(r: &acl2_session::cert::CertReport) -> CertifyReply {
