@@ -10,7 +10,13 @@
 //! of real files, and the failure mode we care about (a construct we cannot
 //! lex) is exactly what it detects. Every bug found in the splitter so far was
 //! found by running it at scale, and none by reasoning about it -- `#!PKG`,
-//! `#{"""..."""}` and `#0=`/`#0#` all surfaced this way.
+//! `#{"""..."""}`, `#0=`/`#0#`, and both normalize/lexer divergences (`#\;`,
+//! `A\ ` before `)`) all surfaced this way.
+//!
+//! Point `ACL2_BOOKS` at a tree of ACL2 books. `books/quicklisp/bundle` is
+//! vendored raw Common Lisp -- `#p` pathnames and friends, which ACL2's own
+//! reader also rejects -- and fails by design; aim at `books/kestrel` or
+//! exclude the bundle when sweeping a whole community checkout.
 
 use std::path::{Path, PathBuf};
 
@@ -50,7 +56,33 @@ fn splits_every_book_in_the_corpus() {
     for f in &files {
         match std::fs::read(f) {
             Ok(bytes) => match acl2_session::split(&bytes) {
-                Ok(forms) => units += forms.len(),
+                Ok(forms) => {
+                    units += forms.len();
+                    // `split(normalize(u))` must give exactly the one unit
+                    // back, and normalising again must change nothing. A
+                    // normalize/lexer divergence that drops or extends text
+                    // fails loudly here, usually as an unterminated list --
+                    // the regression net for the `#\;` hash collision, and
+                    // for any future divergence between the two lexers.
+                    for u in &forms {
+                        let norm = acl2_session::split::normalize(&bytes[u.start..u.end]);
+                        match acl2_session::split(&norm) {
+                            Ok(v) if v.len() == 1 => {
+                                if acl2_session::split::normalize(&norm) != norm {
+                                    failures.push(format!(
+                                        "{}:{}: normalize is not a fixpoint",
+                                        f.display(), u.line_start));
+                                }
+                            }
+                            Ok(v) => failures.push(format!(
+                                "{}:{}: normalize yields {} forms, not 1",
+                                f.display(), u.line_start, v.len())),
+                            Err(e) => failures.push(format!(
+                                "{}:{}: normalize does not re-split: {e}",
+                                f.display(), u.line_start)),
+                        }
+                    }
+                }
                 Err(e) => failures.push(format!("{}: {e}", f.display())),
             },
             Err(e) => failures.push(format!("{}: unreadable: {e}", f.display())),

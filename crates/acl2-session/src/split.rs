@@ -91,6 +91,7 @@ impl<'a> Splitter<'a> {
 
     fn forms(&self) -> Result<Vec<Form>, SplitError> {
         let mut out = Vec::new();
+        let mut lines = LineCursor::new();
         let mut i = 0;
         loop {
             i = self.skip_ws(i)?;
@@ -98,11 +99,15 @@ impl<'a> Splitter<'a> {
                 return Ok(out);
             }
             let j = self.datum(i)?;
+            // One cursor serves both bounds: start offsets and end offsets
+            // interleave monotonically (i <= j-1 < next i).
+            let line_start = lines.advance(self.s, i);
+            let line_end = lines.advance(self.s, j.saturating_sub(1));
             out.push(Form {
                 start: i,
                 end: j,
-                line_start: line_of(self.s, i),
-                line_end: line_of(self.s, j.saturating_sub(1)),
+                line_start,
+                line_end,
                 hash: fnv1a(&normalize(&self.s[i..j])),
             });
             i = j;
@@ -219,13 +224,7 @@ impl<'a> Splitter<'a> {
         match next {
             // Character literal: #\a, #\(, #\Space. The character after the
             // backslash is taken literally whatever it is, then any name tail.
-            b'\\' => {
-                let mut j = i + 3.min(self.s.len() - i);
-                while j < self.s.len() && (self.s[j].is_ascii_alphanumeric() || self.s[j] == b'-') {
-                    j += 1;
-                }
-                Ok(j)
-            }
+            b'\\' => Ok(char_literal_end(self.s, i)),
             // Reader conditional: reads the feature expression AND the guarded
             // form, and the pair is ONE unit. `#+skip (defthm ...)` is the
             // common idiom for disabling a top-level form; treating it as two
@@ -247,7 +246,8 @@ impl<'a> Splitter<'a> {
             b'\'' => self.datum(i + 2),
             b'.' => self.datum(i + 2),
             b'(' => self.list(i + 1),
-            b'|' => self.skip_ws(i),
+            // No `b'|'` arm: `#|...|#` never reaches datum, because skip_ws
+            // consumes block comments everywhere a datum may begin.
             // #b101 #x1F #2A(..) #0=(..) #0#
             _ => {
                 let mut j = i + 1;
@@ -290,6 +290,45 @@ fn line_of(s: &[u8], offset: usize) -> usize {
     s[..offset.min(s.len())].iter().filter(|&&b| b == b'\n').count() + 1
 }
 
+/// Offset just past the `#\...` character literal starting at `i`.
+///
+/// Shared by the splitter and [`normalize`] so the two can never disagree
+/// about where a literal ends. The character after the backslash is taken
+/// literally whatever it is -- `#\;`, `#\"`, `#\|`, `#\(` -- then any
+/// alphanumeric name tail (`#\Space`, `#\Tab`).
+fn char_literal_end(s: &[u8], i: usize) -> usize {
+    let mut j = i + 3.min(s.len() - i);
+    while j < s.len() && (s[j].is_ascii_alphanumeric() || s[j] == b'-') {
+        j += 1;
+    }
+    j
+}
+
+/// A cursor that turns byte offsets into 1-based line numbers incrementally.
+///
+/// `line_of` recounts newlines from offset 0 on every call, which is quadratic
+/// over the forms of a file; form offsets are non-decreasing, so one pass
+/// suffices. Offsets given to `advance` must not go backwards.
+struct LineCursor {
+    pos: usize,
+    line: usize,
+}
+
+impl LineCursor {
+    fn new() -> LineCursor {
+        LineCursor { pos: 0, line: 1 }
+    }
+
+    /// The 1-based line of `to`, which must be `>=` every earlier argument.
+    fn advance(&mut self, s: &[u8], to: usize) -> usize {
+        let to = to.min(s.len());
+        debug_assert!(to >= self.pos, "LineCursor must advance monotonically");
+        self.line += s[self.pos..to].iter().filter(|&&b| b == b'\n').count();
+        self.pos = to;
+        self.line
+    }
+}
+
 /// Canonical form used for hashing: comments removed, runs of whitespace
 /// collapsed to one space, and space dropped next to parentheses.
 ///
@@ -310,9 +349,13 @@ fn line_of(s: &[u8], offset: usize) -> usize {
 /// All errors are in the safe direction. Normalising only merges inputs that
 /// are certainly equivalent, so the worst case is a spurious *difference* --
 /// costing re-proving that was not strictly needed. A spurious *match* would be
-/// a correctness bug, and nothing here can produce one. Note for instance that
-/// case is preserved even though ACL2's reader upcases unescaped symbols, so
-/// re-casing a form does force a re-admit.
+/// a correctness bug. Keeping that true requires copying every span whose body
+/// the lexer must not reinterpret -- strings, `|bars|`, `#\` character
+/// literals, `#{"""..."""}` fancy strings -- verbatim: a `;` that is the
+/// *character* `#\;` must not open a comment here, or everything after it on
+/// the line vanishes from the hash input and forms differing only there
+/// collide. Note also that case is preserved even though ACL2's reader upcases
+/// unescaped symbols, so re-casing a form does force a re-admit.
 ///
 /// # Examples
 ///
@@ -333,6 +376,18 @@ pub fn normalize(form: &[u8]) -> Vec<u8> {
     let sp = Splitter { s: form };
     let b = form;
     let mut out: Vec<u8> = Vec::with_capacity(form.len());
+    // Bytes at or below this index were copied verbatim and are *content*.
+    // The space that is the character `#\ `, or an escaped `A\ `, must not be
+    // taken for a separator -- popped before a `)` or merged with a gap --
+    // and a content `(` (the literal `#\(`, an escaped `A\(`) must not
+    // suppress the separator, or `A\( B` and `A\(B` would collide. Both
+    // found by the corpus invariant, not by reasoning.
+    let mut verbatim_end = 0usize;
+    // A separator space or an opening paren, but only when structural.
+    let sep_last = |out: &Vec<u8>, verbatim_end: usize| {
+        out.len() > verbatim_end
+            && matches!(out.last(), Some(b' ') | Some(b'('))
+    };
     let mut i = 0usize;
     while i < b.len() {
         let j = match sp.skip_ws(i) {
@@ -341,25 +396,56 @@ pub fn normalize(form: &[u8]) -> Vec<u8> {
         };
         if j > i {
             // A gap of whitespace or comments: significant only as a separator.
-            if !matches!(out.last(), None | Some(b' ') | Some(b'(')) {
+            if !out.is_empty() && !sep_last(&out, verbatim_end) {
                 out.push(b' ');
             }
             i = j;
             continue;
         }
         match b[i] {
+            // `#\` and `#{`: spans whose bodies must not be re-lexed. A
+            // character literal's character may be `;`, `"` or `|`, and a
+            // fancy string's body may hold unbalanced quotes; handing either
+            // to the arms below drops or extends text, and two *different*
+            // forms can then normalise -- and hash -- identically. `#\;` did
+            // exactly that: its `;` opened a "comment" running to end of
+            // line, so any two forms differing only after it collided.
+            b'#' if sp.at(i + 1, b'\\') => {
+                let e = char_literal_end(b, i);
+                out.extend_from_slice(&form[i..e]);
+                i = e;
+                verbatim_end = out.len();
+            }
+            b'#' if sp.at(i + 1, b'{') => {
+                let e = find(&b[i + 2..], b"\"\"\"}").map_or(b.len(), |k| i + 2 + k + 4);
+                out.extend_from_slice(&form[i..e]);
+                i = e;
+                verbatim_end = out.len();
+            }
+            // A backslash escapes the next byte inside an atom -- `A\;B`,
+            // `A\"B` -- exactly as `atom` lexes it. The escaped byte is
+            // content: found in the corpus as an escaped `;` that opened a
+            // phantom comment here.
+            b'\\' => {
+                let e = (i + 2).min(b.len());
+                out.extend_from_slice(&form[i..e]);
+                i = e;
+                verbatim_end = out.len();
+            }
             b'"' => {
                 let e = sp.string(i).unwrap_or(b.len());
                 out.extend_from_slice(&form[i..e]);
                 i = e;
+                verbatim_end = out.len();
             }
             b'|' => {
                 let e = sp.bars(i).unwrap_or(b.len());
                 out.extend_from_slice(&form[i..e]);
                 i = e;
+                verbatim_end = out.len();
             }
             b')' => {
-                if out.last() == Some(&b' ') {
+                if out.last() == Some(&b' ') && out.len() > verbatim_end {
                     out.pop();
                 }
                 out.push(b')');
@@ -371,7 +457,7 @@ pub fn normalize(form: &[u8]) -> Vec<u8> {
             }
         }
     }
-    while out.last() == Some(&b' ') {
+    while out.last() == Some(&b' ') && out.len() > verbatim_end {
         out.pop();
     }
     out
@@ -464,6 +550,55 @@ mod tests {
         let a = split_str("(f ab)").unwrap()[0].hash;
         let b = split_str("(f a b)").unwrap()[0].hash;
         assert_ne!(a, b, "whitespace between tokens is significant");
+    }
+
+    /// Two forms differing only *after* a `#\;` on the same line must not hash
+    /// alike. Without the `#` arm in `normalize`, the `;` opened a line
+    /// comment and both normalised to `"(member c (list #\"`.
+    #[test]
+    fn char_literal_semicolon_does_not_truncate_the_hash() {
+        let a = split_str(r"(member c (list #\; #\, #\.))").unwrap()[0].hash;
+        let b = split_str(r"(member c (list #\; #\! #\?))").unwrap()[0].hash;
+        assert_ne!(a, b, "text after #\\; must stay in the hash input");
+    }
+
+    /// An escaped `(` is content, so the separating space after it is
+    /// significant: `A\( B` is two atoms where `A\(B` is one.
+    #[test]
+    fn a_space_after_escaped_content_is_not_dropped() {
+        let a = split_str(r"(f A\( B)").unwrap()[0].hash;
+        let b = split_str(r"(f A\(B)").unwrap()[0].hash;
+        assert_ne!(a, b, "two atoms must not normalise like one");
+    }
+
+    /// `split(normalize(f))` must yield exactly one form, and normalising
+    /// again must change nothing. The corpus test checks this at scale; these
+    /// pin the reader macros whose bodies invite re-lexing.
+    #[test]
+    fn normalize_survives_reader_macros() {
+        for src in [
+            r"(member c (list #\; #\, #\.))",
+            r#"(a #\" b)"#,
+            r"(a #\| b)",
+            r"(a #\( #\) #\Space b)",
+            r#"(a #{"""x ; y"""} b)"#,
+            "(defun f (x)  ; note\n  x)",
+            // Atom-level escapes, from the corpus (acl2pl/reader-tests.lisp).
+            r#"(assert-event (equal (symbol-name 'A\;B) "A;B"))"#,
+            r#"(equal (symbol-name 'A\"B) x)"#,
+            r"(equal (symbol-name 'A\|B) x)",
+            // Content that *ends* in a space or `(`: the space of `#\ ` and
+            // an escaped `A\ ` are data, not separators (infix/latex-init).
+            r"(list #\ )",
+            r"(equal (symbol-name 'A\ B) x)",
+            r"(f A\( B)",
+        ] {
+            let n = normalize(src.as_bytes());
+            let forms = split(&n)
+                .unwrap_or_else(|e| panic!("normalize broke {src:?}: {e}"));
+            assert_eq!(forms.len(), 1, "normalize of {src:?} must stay one form");
+            assert_eq!(normalize(&n), n, "normalize must be a fixpoint on {src:?}");
+        }
     }
 
     #[test]
