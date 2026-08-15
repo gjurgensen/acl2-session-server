@@ -861,6 +861,61 @@ fn a_failing_image_reports_its_own_error() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A stopped session reads as unresponsive -- the one health verdict that
+/// had never been observed -- and interrupt reports honestly that it could
+/// not help.
+///
+/// SIGSTOP is the deterministic wedge: the process is alive and its
+/// descriptors work, but nothing answers, which is the verdict's definition.
+/// (An external SIGINT is *not* a wedge, also measured here: an idle ACL2
+/// given a moment shrugs one off -- see the interrupt escalation's notes on
+/// why signalling idle sessions is still forbidden.)
+#[test]
+#[ignore = "needs ACL2"]
+fn a_stopped_session_reads_as_unresponsive() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("wedged");
+    let file = dir.join("w.lisp");
+    std::fs::write(&file, "(in-package \"ACL2\")\n").unwrap();
+    let mut b = Book::open(&acl2, &file).unwrap();
+    b.sync(None, D).unwrap();
+
+    // First, the non-wedge: a stray SIGINT to an idle session is shrugged
+    // off. This pins the measurement behind interrupt's ping-first design.
+    let pid = b.session().pid();
+    let signal = |sig: &str| {
+        let ok = std::process::Command::new("kill")
+            .args([sig, &pid.to_string()])
+            .status()
+            .expect("run kill")
+            .success();
+        assert!(ok, "the signal must reach the child");
+    };
+    signal("-INT");
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(b.health(Duration::from_secs(5)), Health::Ready,
+               "an idle ACL2 shrugs off a lone external SIGINT");
+
+    // Now the wedge. Alive, idle by the books, answering nothing:
+    // unresponsive, distinct from busy (silence we caused) and from dead
+    // (no process).
+    signal("-STOP");
+    assert_eq!(b.health(Duration::from_secs(2)), Health::Unresponsive);
+
+    // Interrupt cannot lift this -- signals queue against a stopped process
+    // -- and must say so rather than claim recovery.
+    let r = b.interrupt().expect("the interrupt call itself must not error");
+    assert!(!r.ok, "no recovery may be claimed for a stopped process");
+
+    // The wedge lifted from outside, the session is usable again: the
+    // verdict was about reachability, not damage.
+    signal("-CONT");
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(b.health(Duration::from_secs(5)), Health::Ready);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A crashed ACL2 must read as dead, not busy forever.
 ///
 /// `is_running` is bookkeeping; a child that dies mid-form leaves it set. The

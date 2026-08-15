@@ -1387,10 +1387,11 @@ impl Book {
     ///   or something may have swallowed a completion sentinel. Recoverable by
     ///   interrupt or, failing that, by rebuild.
     ///
-    ///   This is the one answer resting on reasoning rather than measurement:
-    ///   nothing in the test suite can wedge ACL2 on demand, so the branch is
-    ///   untested. It is also the answer that matters most when something has
-    ///   genuinely gone wrong.
+    ///   Observed on demand by stopping the child (SIGSTOP): alive,
+    ///   descriptors intact, answering nothing -- and interrupt then reports
+    ///   honestly that it could not help, since signals queue against a
+    ///   stopped process. The verdict is about reachability, not damage: the
+    ///   same session reads ready again once the stop is lifted.
     /// - `Dead` -- the process is gone. Only close-and-reopen will help, and
     ///   the check comes *first*, because a dead child otherwise wears `Busy`
     ///   forever: the reader sees EOF and returns, nothing ever completes,
@@ -1843,11 +1844,13 @@ impl Book {
         // I/O error from the handshake's write; report a clean non-recovery
         // instead, with health's `dead` one call away. And an *idle* session
         // that answers a ping must not be signalled at all: with nothing in
-        // flight the build above was the whole job, and a SIGINT at ACL2's
-        // idle reader can wedge it into a raw break loop -- measured, four
-        // failed recovery handshakes after signalling an idle image. The
-        // escalation stays reserved for the running and the unresponsive,
-        // where it is the recovery tool.
+        // flight the build above was the whole job, and the escalation is
+        // self-defeating at an idle reader -- it couples each SIGINT with an
+        // immediately written handshake, and an interrupt discards exactly
+        // that pending input, so four rounds failed four times (measured;
+        // an idle ACL2 given a moment shrugs a lone SIGINT off entirely).
+        // The escalation stays reserved for the running and the
+        // unresponsive, where it is the recovery tool.
         let ok = if !self.session.alive() {
             false
         } else if was_running {
