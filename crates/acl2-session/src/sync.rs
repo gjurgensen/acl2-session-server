@@ -38,6 +38,10 @@ struct Admitted {
     /// here.
     package: Option<String>,
     output_ref: OutputRef,
+    /// Admitted with its proofs skipped (`ContinuePastFailure`). A
+    /// rebuild must replay such a unit under `skip-proofs` too, and every
+    /// admitted unit after the first of these is conditional.
+    skipped: bool,
 }
 
 /// How far the deadline of one call has been spent.
@@ -291,6 +295,10 @@ pub struct FailureReport {
     pub checkpoints: Checkpoints,
     pub inner: Vec<InnerEvent>,
     pub inner_total: usize,
+    /// The skip-proofs retry's admission log, when `ContinuePastFailure`
+    /// retried this unit. The main `output_ref` stays the original failure:
+    /// the retry's chatter never replaces the informative log.
+    pub retry_output_ref: Option<OutputRef>,
 }
 
 impl FailureReport {
@@ -310,6 +318,23 @@ impl FailureReport {
             .find(|e| e.abort_causes.is_some())
             .or_else(|| self.inner.iter().find(|e| e.has_namex == Some(false)))
     }
+}
+
+/// What a sync does when a unit fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SyncMode {
+    /// Stop at the first failure -- the default, and the agent-facing
+    /// behavior: later units almost always depend on the failed one, and
+    /// continuing produces cascading noise rather than information.
+    #[default]
+    StopAtFailure,
+    /// Retry a completed failure under `(acl2::skip-proofs ...)` and keep
+    /// going -- the editor's triage mode. The
+    /// skipped unit is admitted assuming its unproved claim, every admitted
+    /// unit after it is conditional on that, and the reply reports both.
+    /// What skip-proofs cannot rescue -- anything that is not a proof
+    /// obligation -- remains a terminal failure.
+    ContinuePastFailure,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -333,6 +358,15 @@ pub struct SyncOutcome {
     /// visible warning, since the redundant work is unexpected from a user's
     /// point of view.
     pub rebuilt: bool,
+    /// Units this call admitted under `skip-proofs` after they failed
+    /// (`ContinuePastFailure` only), each carrying its original failure
+    /// envelope. Always empty under `StopAtFailure`.
+    pub skipped: Vec<FailureReport>,
+    /// The earliest skip-proofs-admitted unit currently in the world --
+    /// session state, not just this call's work. Every admitted unit after
+    /// it is conditional on unproved claims; a client paints from this one
+    /// number without remembering earlier replies.
+    pub conditional_from: Option<usize>,
 }
 
 /// Whether an `eval` disturbed the logical world.
@@ -431,6 +465,10 @@ pub enum Resumed {
     StillRunning { elapsed: Duration },
     Admitted(UnitReport),
     Failed(FailureReport),
+    /// The unit failed and `ContinuePastFailure` then admitted it under
+    /// `skip-proofs`: the world moved past it, the report is the original
+    /// failure's envelope, and the next sync treats the unit as prefix.
+    Skipped(FailureReport),
     /// A form started by `eval` finished. `eval` is not part of the file, so
     /// it completes as an eval rather than as a unit.
     Evaluated(EvalResult),
@@ -1062,6 +1100,8 @@ pub struct Book {
     base_package: Option<String>,
     /// Set when an undo could not be verified; the next sync rebuilds.
     dirty: bool,
+    /// What a sync does at a failed unit. See [`SyncMode`].
+    mode: SyncMode,
     /// `inhibit-output-lst` as inherited, before the server removed PROVE.
     inherited_inhibit: Option<String>,
     /// The handle handed out for a form that outran its deadline.
@@ -1097,6 +1137,14 @@ struct PendingUnit {
     /// Detected at submission, because the file may change on disk while the
     /// unit runs.
     in_package: Option<String>,
+    /// The unit's text exactly as submitted. A `ContinuePastFailure` retry
+    /// at resume time must resubmit precisely what failed, and the snapshot
+    /// it came from may be gone by then -- the file changed on disk, or the
+    /// buffer moved on.
+    text: String,
+    /// This submission *is* the skip-proofs retry. Its failure is terminal:
+    /// never retry a retry.
+    skipped: bool,
 }
 
 impl Book {
@@ -1130,6 +1178,7 @@ impl Book {
             base_command_number: None,
             base_package: None,
             dirty: false,
+            mode: SyncMode::StopAtFailure,
             inherited_inhibit: None,
             books_dir: None,
             in_flight_output: None,
@@ -1177,6 +1226,17 @@ impl Book {
     /// The control block shared with lock-free readers. See `SessionControl`.
     pub fn control(&self) -> Arc<SessionControl> {
         self.control.clone()
+    }
+
+    /// Set how syncs treat a failed unit. See [`SyncMode`].
+    ///
+    /// A property of the book rather than of a call, because `resume` must
+    /// honor it too: a unit that outruns its deadline and then fails at
+    /// resume gets the same skip-proofs retry, or the next sync would
+    /// re-prove the failure from scratch. Per-call flags would let sync and
+    /// resume be called inconsistently and reopen exactly that hole.
+    pub fn set_sync_mode(&mut self, mode: SyncMode) {
+        self.mode = mode;
     }
 
     /// The output store, shared for the same reason as the control block:
@@ -1516,6 +1576,7 @@ impl Book {
                         // is exactly the shape of an ordinary deadline expiry:
                         // resume finishes the unit, the next sync continues.
                         out.failed = Some(f);
+                        out.conditional_from = self.first_skipped();
                         return Ok(out);
                     }
                 }
@@ -1525,7 +1586,11 @@ impl Book {
 
         let target = match resolve_target(&units, through_line) {
             Some(t) => t,
-            None => return Ok(out), // nothing selected; nothing to admit
+            None => {
+                // Nothing selected; nothing to admit.
+                out.conditional_from = self.first_skipped();
+                return Ok(out);
+            }
         };
         out.resolved_through = Some(target);
 
@@ -1567,10 +1632,7 @@ impl Book {
                         Status::Rejected
                     };
                     let error_line = error_message(&sub.output);
-                    // Stop here. The world is sequential, so later units almost
-                    // always depend on this one and continuing produces
-                    // cascading noise rather than information.
-                    out.failed = Some(FailureReport {
+                    let mut report = FailureReport {
                         index: i,
                         line_start: u.line_start,
                         line_end: u.line_end,
@@ -1583,11 +1645,52 @@ impl Book {
                         checkpoints: cp,
                         inner,
                         inner_total,
-                    });
+                        retry_output_ref: None,
+                    };
+                    // Under ContinuePastFailure a *completed* failure is
+                    // retried under skip-proofs -- triage, not truth.
+                    // Never a still-running one: the unit is mid-proof, and
+                    // there is nothing to retry yet.
+                    if self.mode == SyncMode::ContinuePastFailure
+                        && sub.outcome == Outcome::Failed
+                    {
+                        let text = String::from_utf8_lossy(&bytes[u.start..u.end]);
+                        let (rsub, rref) = self.admit_text(
+                            &text, u.hash, u.line_start, u.line_end, i, true,
+                            budget.floored(),
+                        )?;
+                        report.retry_output_ref = Some(rref);
+                        match rsub.outcome {
+                            Outcome::Ok => {
+                                // Admitted assuming its claim. The envelope
+                                // reported is the original failure's: the
+                                // retry produces no proof data.
+                                out.skipped.push(report);
+                                continue;
+                            }
+                            Outcome::StillRunning => {
+                                // The retry itself outran the budget -- a
+                                // make-event still expands under skip-proofs.
+                                // The envelope stays the original failure's;
+                                // still_running says resume finishes the
+                                // skip attempt.
+                                report.still_running = true;
+                            }
+                            // Terminal: what survives skip-proofs is not a
+                            // proof obligation, and it failed the same
+                            // way twice. Never retry a retry.
+                            Outcome::Failed => {}
+                        }
+                    }
+                    // Stop here. The world is sequential, so later units almost
+                    // always depend on this one and continuing produces
+                    // cascading noise rather than information.
+                    out.failed = Some(report);
                     break;
                 }
             }
         }
+        out.conditional_from = self.first_skipped();
         Ok(out)
     }
 
@@ -1642,9 +1745,11 @@ impl Book {
             // retraction rides along for free.
             out.rebuilt = true;
             out.failed = self.rebuild(bytes, allowed, &budget)?;
+            out.conditional_from = self.first_skipped();
             return Ok(out);
         }
         if allowed == self.admitted.len() {
+            out.conditional_from = self.first_skipped();
             return Ok(out); // nothing to undo; no submission spent
         }
         match self.rollback_to(allowed, budget.floored()) {
@@ -1658,6 +1763,7 @@ impl Book {
             }
             Err(e) => return Err(e),
         }
+        out.conditional_from = self.first_skipped();
         Ok(out)
     }
 
@@ -1733,10 +1839,37 @@ impl Book {
         deadline: Duration,
     ) -> Result<(crate::session::Submission, OutputRef), SyncError> {
         let text = String::from_utf8_lossy(&bytes[u.start..u.end]).into_owned();
+        self.admit_text(&text, u.hash, u.line_start, u.line_end, index, false, deadline)
+    }
+
+    /// The submission itself, for a unit's text however obtained -- sliced
+    /// from a snapshot (`admit_unit`), replayed by a rebuild, or retried by
+    /// `ContinuePastFailure`, which is what SKIPPED means: the text goes in
+    /// wrapped as `(acl2::skip-proofs <text>)`, the per-form mechanism
+    /// chosen -- honest in the history (`pe` shows the wrap), and no
+    /// ld-special mode for an abort to leak.
+    #[allow(clippy::too_many_arguments)]
+    fn admit_text(
+        &mut self,
+        text: &str,
+        hash: u64,
+        line_start: usize,
+        line_end: usize,
+        index: usize,
+        skipped: bool,
+        deadline: Duration,
+    ) -> Result<(crate::session::Submission, OutputRef), SyncError> {
         self.label_gen += 1;
         let label = self.label_gen;
+        // The newline before the closing paren guards a unit that ends in a
+        // line comment.
+        let payload = if skipped {
+            format!("(acl2::skip-proofs\n{text}\n)")
+        } else {
+            text.to_owned()
+        };
         let body = format!(
-            "{CLEAR_STALE}\n{text}\n{EVENT_DATA_PROBE}\n{INNER_EVENTS_PROBE}\n\
+            "{CLEAR_STALE}\n{payload}\n{EVENT_DATA_PROBE}\n{INNER_EVENTS_PROBE}\n\
              (acl2::with-output :off :all (acl2::deflabel {}))\n{CMD_PROBE}",
             Self::label_name(label)
         );
@@ -1749,23 +1882,26 @@ impl Book {
             // what is needed to finish recording it when it reports.
             self.pending = Some(PendingUnit {
                 index,
-                hash: u.hash,
-                line_start: u.line_start,
-                line_end: u.line_end,
+                hash,
+                line_start,
+                line_end,
                 label,
-                in_package: in_package_target(&bytes[u.start..u.end]),
+                in_package: in_package_target(text.as_bytes()),
+                text: text.to_owned(),
+                skipped,
             });
         }
         let output_ref = self.record_output(&sub)?;
         if sub.outcome == Outcome::Ok {
             self.admitted.push(Admitted {
-                hash: u.hash,
-                line_start: u.line_start,
-                line_end: u.line_end,
+                hash,
+                line_start,
+                line_end,
                 label,
                 command_number: sub.get("cmd").and_then(|v| v.parse().ok()),
                 package: sub.get("pkg").and_then(unquote),
                 output_ref: output_ref.clone(),
+                skipped,
             });
             // Second phase for a unit that is a top-level `(in-package ...)`:
             // its switch was scoped to the `ld` that just exited, so make it
@@ -1773,7 +1909,7 @@ impl Book {
             // re-issue is idempotent and one round trip, and a staleness bug
             // in a skip condition here would silently misread every form
             // after the switch.
-            if let Some(target) = in_package_target(&bytes[u.start..u.end]) {
+            if let Some(target) = in_package_target(text.as_bytes()) {
                 self.make_package_stick(&target, deadline.max(PROBE_FLOOR))?;
             }
         }
@@ -1861,6 +1997,7 @@ impl Book {
                 command_number: sub.get("cmd").and_then(|v| v.parse().ok()),
                 package: sub.get("pkg").and_then(unquote),
                 output_ref: output_ref.clone(),
+                skipped: p.skipped,
             });
             // The two-phase treatment applies here exactly as in
             // `admit_unit`; the pending record carries the detection made
@@ -1884,7 +2021,7 @@ impl Book {
         }
         let (ed, cp, inner, inner_total) = self.probe_after_failure(deadline.max(PROBE_FLOOR));
         let error_line = error_message(&sub.output);
-        Ok(Some(Resumed::Failed(FailureReport {
+        let mut report = FailureReport {
             index: p.index,
             line_start: p.line_start,
             line_end: p.line_end,
@@ -1897,7 +2034,33 @@ impl Book {
             inner_total,
             output_ref,
             output_lines,
-        })))
+            retry_output_ref: None,
+        };
+        // The same treatment a mid-sync failure gets -- the reason
+        // the mode is a book property, not a sync argument. `p.skipped`
+        // guards the retry of a retry: a skip attempt that itself failed is
+        // terminal.
+        if self.mode == SyncMode::ContinuePastFailure && !p.skipped {
+            let (rsub, rref) = self.admit_text(
+                &p.text,
+                p.hash,
+                p.line_start,
+                p.line_end,
+                p.index,
+                true,
+                deadline.max(PROBE_FLOOR),
+            )?;
+            report.retry_output_ref = Some(rref);
+            match rsub.outcome {
+                Outcome::Ok => return Ok(Some(Resumed::Skipped(report))),
+                // The skip attempt is itself in flight now; resuming again
+                // finishes it, and the p.skipped guard makes its failure
+                // terminal.
+                Outcome::StillRunning => report.still_running = true,
+                Outcome::Failed => {}
+            }
+        }
+        Ok(Some(Resumed::Failed(report)))
     }
 
     /// Progress on the unit in flight, if any.
@@ -2179,6 +2342,11 @@ impl Book {
     ) -> Result<Option<FailureReport>, SyncError> {
         let units = split(bytes).map_err(SyncError::Split)?;
         let keep = keep.min(units.len());
+        // A unit admitted under skip-proofs must be REPLAYED under
+        // skip-proofs: replaying it plainly re-runs the failed proof and
+        // reads as a world that was never reachable -- which the plain world
+        // truly is. Captured before the admitted list is cleared below.
+        let skipped: Vec<bool> = self.admitted.iter().map(|a| a.skipped).collect();
 
         let dir = match self.path.parent() {
             Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
@@ -2200,7 +2368,16 @@ impl Book {
         self.dirty = false;
 
         for (i, u) in units.iter().enumerate().take(keep) {
-            let (sub, output_ref) = self.admit_unit(u, i, bytes, budget.remaining())?;
+            let text = String::from_utf8_lossy(&bytes[u.start..u.end]);
+            let (sub, output_ref) = self.admit_text(
+                &text,
+                u.hash,
+                u.line_start,
+                u.line_end,
+                i,
+                skipped.get(i).copied().unwrap_or(false),
+                budget.remaining(),
+            )?;
             match sub.outcome {
                 Outcome::Ok => {}
                 Outcome::StillRunning => {
@@ -2218,6 +2395,7 @@ impl Book {
                         checkpoints: Checkpoints::default(),
                         inner: Vec::new(),
                         inner_total: 0,
+                        retry_output_ref: None,
                     }));
                 }
                 Outcome::Failed => {
@@ -2307,6 +2485,23 @@ impl Book {
     /// Lines currently believed to be admitted, for reporting.
     pub fn admitted_lines(&self) -> Vec<(usize, usize)> {
         self.admitted.iter().map(|a| (a.line_start, a.line_end)).collect()
+    }
+
+    /// Indices of admitted units whose proofs were skipped -- an editor's
+    /// red forms -- in order. Empty outside `ContinuePastFailure` sessions.
+    pub fn skipped_units(&self) -> Vec<usize> {
+        self.admitted
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.skipped)
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// The earliest skip-proofs-admitted unit in the world, if any. Every
+    /// admitted unit after it is conditional.
+    fn first_skipped(&self) -> Option<usize> {
+        self.admitted.iter().position(|a| a.skipped)
     }
 }
 

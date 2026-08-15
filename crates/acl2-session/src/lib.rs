@@ -32,6 +32,6 @@ pub use output::{OutputRef, OutputSlice, OutputStore, Slice};
 pub use session::Progress;
 pub use sync::{
     Book, Budget, Checkpoint, EvalFailure, EvalResult, Health, InnerEvent,
-    InterruptEnvelope, InterruptReport, Resumed, Status, SyncError, SyncOutcome,
-    WorldChange,
+    InterruptEnvelope, InterruptReport, Resumed, Status, SyncError, SyncMode,
+    SyncOutcome, WorldChange,
 };

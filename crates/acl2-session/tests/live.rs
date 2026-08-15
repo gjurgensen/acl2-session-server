@@ -19,7 +19,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use acl2_session::{
-    Book, Budget, Health, Resumed, Session, SessionControl, Slice, Status, WorldChange,
+    Book, Budget, Health, Resumed, Session, SessionControl, Slice, Status, SyncMode,
+    WorldChange,
 };
 
 /// The ACL2 to drive, or `None` to skip.
@@ -221,6 +222,146 @@ fn retraction_keeps_what_is_asked_and_still_current() {
     let edited = format!("(in-package \"ACL2\")\n\n{}\n", ALPHA.replace("alpha", "alfa"));
     let o = b.retract_to(edited.as_bytes(), 2, D).expect("bounded retract");
     assert_eq!((o.reused, o.rolled_back), (1, 1));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ContinuePastFailure admits a red unit under skip-proofs and keeps going;
+/// fixing it is an ordinary edit, and its conditional dependents are honest
+/// casualties.
+#[test]
+#[ignore = "needs ACL2"]
+fn continue_past_failure_triages_and_recovers() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("cpf");
+    let book = dir.join("demo.lisp");
+    let below = "(defthm cpf-below (equal (alpha (cons a b)) (cons 1 (cons a b))))";
+    write(&book, &["(in-package \"ACL2\")", ALPHA,
+                   "(defthm cpf-bad (equal (alpha x) (cons 1 x)))", below]);
+    let mut b = Book::open(&acl2, &book).expect("open");
+
+    // Default mode: stop at the failure, exactly as before.
+    let o = b.sync(None, D).expect("stop-mode sync");
+    assert_eq!(o.admitted.len(), 2);
+    assert!(o.failed.is_some() && o.skipped.is_empty() && o.conditional_from.is_none());
+
+    // Triage mode: the red unit is admitted under skip-proofs carrying its
+    // original envelope, and the unit below proves -- conditionally, via the
+    // unproved claim.
+    b.set_sync_mode(SyncMode::ContinuePastFailure);
+    let o = b.sync(None, D).expect("cpf sync");
+    assert_eq!(o.reused, 2);
+    assert_eq!(o.skipped.len(), 1);
+    let s = &o.skipped[0];
+    assert_eq!((s.index, s.status), (2, Status::ProofFailure));
+    assert!(s.event_data.prover_steps.is_some(), "the original envelope rides along");
+    assert!(s.retry_output_ref.is_some());
+    assert_eq!(o.admitted.len(), 1);
+    assert_eq!(o.admitted[0].index, 3);
+    assert_eq!(o.conditional_from, Some(2));
+    assert!(o.failed.is_none());
+    assert_eq!(b.skipped_units(), vec![2]);
+
+    // An unchanged red is prefix, not a re-proof: the resync is a no-op.
+    let o = b.sync(None, D).expect("resync");
+    assert_eq!((o.reused, o.admitted.len(), o.skipped.len()), (4, 0, 0));
+    assert_eq!(o.conditional_from, Some(2));
+
+    // Fixing the red form is an ordinary edit: rollback, a real admission --
+    // and the unit below, whose proof leaned on the false claim, becomes the
+    // casualty. (The skipped rule was live, as skip-proofs rules are.)
+    write(&book, &["(in-package \"ACL2\")", ALPHA,
+                   "(defthm cpf-bad (equal (alpha x) nil))", below]);
+    let o = b.sync(None, D).expect("fixed sync");
+    assert_eq!((o.reused, o.rolled_back), (2, 2));
+    assert_eq!(o.admitted.len(), 1, "the fixed unit admits for real");
+    assert_eq!(o.skipped.len(), 1, "the conditional unit below is the casualty");
+    assert_eq!(o.skipped[0].index, 3);
+    assert_eq!(o.conditional_from, Some(3));
+
+    // What skip-proofs cannot rescue stays terminal.
+    write(&book, &["(in-package \"ACL2\")", ALPHA,
+                   "(defthm cpf-bad (equal (alpha x) nil))",
+                   "(in-theory (enable no-such-rune-xyz))"]);
+    let o = b.sync(None, D).expect("terminal sync");
+    let f = o.failed.expect("a non-proof failure stops even this mode");
+    assert_eq!((f.index, f.status), (3, Status::Rejected));
+    assert!(f.retry_output_ref.is_some(), "the refused retry is on record");
+    assert!(o.skipped.is_empty());
+    assert_eq!(o.conditional_from, None, "no skipped unit remains in the world");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A rebuild replays a skipped unit under skip-proofs too -- replaying it
+/// plainly would re-run the failed proof and read as an unreachable world.
+#[test]
+#[ignore = "needs ACL2"]
+fn rebuild_replays_skipped_units_under_skip_proofs() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("cpf-rebuild");
+    let book = dir.join("demo.lisp");
+    write(&book, &["(in-package \"ACL2\")", ALPHA,
+                   "(defthm cpr-bad (equal (alpha x) (cons 1 x)))"]);
+    let mut b = Book::open(&acl2, &book).expect("open");
+    b.set_sync_mode(SyncMode::ContinuePastFailure);
+    let o = b.sync(None, D).expect("cpf sync");
+    assert_eq!((o.skipped.len(), b.skipped_units()), (1, vec![2]));
+
+    let bytes = std::fs::read(&book).expect("read book");
+    let r = b.rebuild(&bytes, 3, &Budget::new(D)).expect("rebuild");
+    assert!(r.is_none(), "the replay fits the budget");
+    assert_eq!(b.skipped_units(), vec![2], "skipped-ness survives the replay");
+    let o = b.sync(None, D).expect("sync after rebuild");
+    assert_eq!((o.reused, o.admitted.len(), o.skipped.len()), (3, 0, 0));
+    assert_eq!(o.conditional_from, Some(2));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A unit that outruns its deadline and then fails at resume gets the same
+/// skip-proofs treatment -- the reason the mode is a book property.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_resumed_failure_is_skipped_under_continue_past_failure() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("cpf-resume");
+    let book = dir.join("demo.lisp");
+    // The red unit must genuinely outrun a ~zero deadline, so it needs real
+    // work before it fails: a ground fib computation, not a fast rewrite.
+    write(&book, &["(in-package \"ACL2\")", FIB,
+                   "(defthm cps-bad (equal (fib 35) 1))"]);
+    let mut b = Book::open(&acl2, &book).expect("open");
+    b.set_sync_mode(SyncMode::ContinuePastFailure);
+    b.sync(Some(3), D).expect("prefix");
+
+    // A ~zero budget puts the red unit in flight instead of retrying it:
+    // there is nothing to retry while it runs.
+    let o = b.sync(None, Duration::from_millis(1)).expect("tiny sync");
+    let f = o.failed.expect("the unit must be in flight");
+    assert!(f.still_running && o.skipped.is_empty());
+
+    let mut resumed = None;
+    for _ in 0..60 {
+        match b.resume(Duration::from_secs(5)).expect("resume") {
+            Some(Resumed::StillRunning { .. }) => continue,
+            other => {
+                resumed = Some(other);
+                break;
+            }
+        }
+    }
+    match resumed {
+        Some(Some(Resumed::Skipped(f))) => {
+            assert_eq!((f.index, f.status), (2, Status::ProofFailure));
+            assert!(f.retry_output_ref.is_some());
+        }
+        other => panic!("expected the resumed failure to be skipped, got {other:?}"),
+    }
+    assert_eq!(b.skipped_units(), vec![2]);
+    let o = b.sync(None, D).expect("sync after");
+    assert_eq!((o.reused, o.skipped.len()), (3, 0));
+    assert_eq!(o.conditional_from, Some(2));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

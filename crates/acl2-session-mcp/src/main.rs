@@ -370,6 +370,15 @@ impl Acl2Mcp {
                 failed: Some(wire::failed(&f)),
                 evaluated: None,
             },
+            // Unreachable today -- this server never sets ContinuePastFailure
+            // on a book -- but mapped honestly for totality.
+            Some(Resumed::Skipped(f)) => wire::ResumeReply {
+                outcome: "skipped".into(),
+                elapsed_ms: 0,
+                admitted: None,
+                failed: Some(wire::failed(&f)),
+                evaluated: None,
+            },
             Some(Resumed::Evaluated(r)) => wire::ResumeReply {
                 outcome: "evaluated".into(),
                 elapsed_ms: r.elapsed.as_millis(),
