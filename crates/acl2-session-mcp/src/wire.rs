@@ -33,8 +33,9 @@ pub struct InnerEvent {
     /// Runes this inner event used, one per entry. Answers questions like
     /// "did the prep-lemma actually get used?", which the outer form cannot.
     ///
-    /// Reported on failures, where the rules are evidence about a proof you
-    /// are debugging. On a form that went in, see `rules_of` below.
+    /// Inner events appear only on failures, where this is evidence about
+    /// the proof being debugged; an admitted form's inner detail lives in
+    /// its log (see `Admitted`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<String>,
     /// This event's own prove time `(prove print proof-tree other)`. For a
@@ -68,24 +69,6 @@ fn inner_failed(e: &core::InnerEvent) -> InnerEvent {
         time: e.time.clone(),
         prover_steps,
         step_limit_reached,
-    }
-}
-
-/// An inner event of a form that was admitted: what it introduced, plus its
-/// own time -- the "which member of the clique was slow" answer is as useful
-/// on success as on failure.
-///
-/// The rules are dropped here rather than at the source: the core still has
-/// them, and a different client may want them. See the note on `Admitted`.
-fn inner_admitted(e: &core::InnerEvent) -> InnerEvent {
-    InnerEvent {
-        name: e.name.clone(),
-        abort_causes: e.abort_causes.clone(),
-        kind: None,
-        rules: Vec::new(),
-        time: e.time.clone(),
-        prover_steps: None,
-        step_limit_reached: None,
     }
 }
 
@@ -137,13 +120,18 @@ fn checkpoints(c: &core::sync::Checkpoints) -> Checkpoints {
 
 /// A form that was admitted.
 ///
-/// Facts about the event, plus a handle to the evidence. Two things ACL2
-/// reports are deliberately *not* here, because on a form that went in they
-/// are bulk rather than news, and a sync reports every form that went in:
-/// the rules the proof used, and the prover-step count. Both are per form in
-/// the log, so ask the one form you care about --
-/// `acl2_output output_ref:"<this form's>" mode:"find" text:"Rules:"`, or
-/// `text:"Prover steps"`. Failures keep both, where they are evidence.
+/// Facts about the event, plus a handle to the evidence. Deliberately
+/// *compact*: a sync reports every form that went in, so anything routine
+/// here is multiplied by the length of the book -- measured in the field at
+/// 63 records of "still works" for one added lemma. What a clean form
+/// reports is its identity, its wall time, and its handle; everything that
+/// describes *unease* (warnings, fired hints, splitter rules) is reported
+/// exactly when present. The trimmed detail -- rules, prover steps, inner
+/// events with their per-event times -- is per form in the log, so ask the
+/// one form you care about: `acl2_output output_ref:"<this form's>"
+/// mode:"find" text:"Rules:"` (or `"Prover steps"`, or `"Form:"` for the
+/// events a compound form introduced). Failures keep everything, where it
+/// is evidence rather than bulk.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct Admitted {
     pub index: usize,
@@ -163,8 +151,9 @@ pub struct Admitted {
     /// this get slow" answer for a form that still went in.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub splitter_rules: Vec<String>,
-    pub inner: Vec<InnerEvent>,
     /// Handle to everything ACL2 printed for this form. Pass to `acl2_output`.
+    /// Kept on every record, however compact: it is the only handle to a
+    /// successful form's log that will ever exist.
     pub output_ref: String,
     /// Lines behind that handle, so you can tell how much you are not seeing.
     pub output_lines: usize,
@@ -318,6 +307,8 @@ impl From<core::SyncOutcome> for SyncReply {
     }
 }
 
+// The inner events are dropped here rather than at the source: the core
+// still carries them on `UnitReport`, and a different client may want them.
 pub fn admitted(u: &core::sync::UnitReport) -> Admitted {
     Admitted {
         index: u.index,
@@ -327,7 +318,6 @@ pub fn admitted(u: &core::sync::UnitReport) -> Admitted {
         warnings: u.event_data.warnings.clone(),
         hint_events: u.event_data.hint_events.clone(),
         splitter_rules: u.event_data.splitter_rules.clone(),
-        inner: u.inner.iter().map(inner_admitted).collect(),
         output_ref: u.output_ref.to_string(),
         output_lines: u.output_lines,
     }
