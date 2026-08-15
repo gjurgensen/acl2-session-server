@@ -19,11 +19,19 @@ exercised under plain node (see below).
 cd editors/vscode
 npm install
 npm run compile
-code .   # then F5 -> Extension Development Host
+code .   # then F5 ("Run Extension") -> a new [Extension Development Host] window
 ```
 
 Install the daemon first (`cargo install --path crates/acl2-session-editor`),
 or point `acl2-session.daemonPath` at a built binary.
+
+To use it day to day without F5, load it as an unpacked extension:
+
+```sh
+ln -s "$(pwd)" ~/.vscode/extensions/gjurgensen.acl2-session-0.0.1
+```
+
+and restart VSCode (recompile with `npm run compile` after pulling changes).
 
 ## Configure
 
