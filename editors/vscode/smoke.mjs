@@ -155,6 +155,48 @@ assert(
   'and says when it went'
 );
 
+// describe: the hover answer. The interesting cases are the two that are not
+// "a name was found" -- a token that is no name at all (which is what every
+// hover over a variable or a comment word is), and the busy reply, which must
+// be distinguishable from "not found" or a hover during a proof would render
+// as an authoritative "no such thing".
+const { hoverMarkdown } = require('./out/names.js');
+
+const fn = await c.request('describe', { book: opened.book, name: 'alpha' });
+assert(fn.available && fn.found, 'describe finds a name from this file');
+assert(fn.kind === 'function', 'and says what kind it is');
+assert(fn.formals === '(x)', 'with its formals');
+assert(fn.book === undefined, 'a name defined here reports no book');
+assert(hoverMarkdown(fn).includes('(alpha x)'), 'the hover shows the call form');
+assert(hoverMarkdown(fn).includes('this file'), 'and says it is defined here');
+
+const thm = await c.request('describe', { book: opened.book, name: 'vs-bad' });
+assert(thm.found && thm.kind === 'theorem', 'a theorem is a theorem');
+assert(hoverMarkdown(thm).includes('alpha'), 'and its statement is shown');
+
+const missing = await c.request('describe', { book: opened.book, name: 'not-a-name-here' });
+assert(missing.available && !missing.found, 'an unknown token answers "not found"');
+assert(hoverMarkdown(missing) === undefined, 'and renders no tooltip');
+
+const unsafe = await c.request('describe', { book: opened.book, name: '(' });
+assert(unsafe.available && !unsafe.found, 'an unsafe token never reaches a probe');
+
+// A hover must never wait on the prover. Sent right behind an update, it
+// either answers from cache or declines -- but it comes back promptly either
+// way, and a decline is `available: false`, not `found: false`.
+events.length = 0;
+c.notify('update', { book: opened.book, text, target_line: null, revision: 3 });
+const t0 = Date.now();
+const hovered = await c.request('describe', { book: opened.book, name: 'alpha' });
+assert(Date.now() - t0 < 20000, 'a hover sent mid-check does not wait for the check');
+assert(
+  hovered.available ? hovered.found : hovered.found === false,
+  'a busy hover declines rather than reporting the name absent'
+);
+if (!hovered.available) {
+  assert(hoverMarkdown(hovered) === undefined, 'and a declined hover renders nothing');
+}
+
 const closed = await c.request('close', { book: opened.book });
 assert(closed.closed === true, 'close closes');
 c.dispose();

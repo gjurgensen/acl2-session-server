@@ -8,12 +8,12 @@
 //! edit lands within a slice of arriving -- and only an edit that touches the
 //! prefix through the running unit aborts its proof.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
 use std::time::Duration;
 
 use acl2_session::registry::SharedBook;
-use acl2_session::{split, Form, Outcome, Resumed, SyncError, WorldChange};
+use acl2_session::{split, Form, NameDetail, Outcome, Resumed, SyncError, WorldChange};
 use serde_json::Value;
 
 use crate::wire;
@@ -26,6 +26,10 @@ pub enum Cmd {
     /// A form to run outside the file. `id` is the JSON-RPC request's, since
     /// the driver owns the session and therefore sends the reply itself.
     Eval { id: Value, form: String },
+    /// What does the world know about this name? Answered from the cache, or
+    /// from a 10 ms probe when the session is free, and otherwise declined --
+    /// never queued. See [`Driver::describe`].
+    Describe { id: Value, name: String },
     Pause,
     Close,
 }
@@ -47,10 +51,19 @@ const TAIL_LINES: usize = 40;
 /// a rustix-only core free of a watcher dependency, and at this cadence the
 /// cost is unmeasurable.
 const DEP_TICK: Duration = Duration::from_secs(2);
+/// Deadline for one `describe` probe. Generous next to the 10 ms it measures
+/// at, because the only thing that could make it slow is
+/// `decode-logical-name` scanning a very large world -- and short enough that
+/// a pathological one cannot stall the driver's loop.
+const DESCRIBE: Duration = Duration::from_secs(2);
 
 enum Flow {
     Continue,
     Exit,
+}
+
+fn to_value(r: impl serde::Serialize) -> Value {
+    serde_json::to_value(r).expect("serialize")
 }
 
 pub struct Driver {
@@ -89,6 +102,18 @@ pub struct Driver {
     /// The eval whose form is in flight, so the resume loop knows whom to
     /// answer when it finishes.
     eval_in_flight: Option<Value>,
+    /// Answers to `describe`, including the negative ones -- hovering a
+    /// variable or a word in a comment is the commonest case there is, and
+    /// asking ACL2 about it twice is pure waste.
+    ///
+    /// Emptied by `emit_state`, i.e. whenever the world moves. That is
+    /// deliberately blunt: admitting a unit can turn a cached "unknown" into
+    /// a name, and a rollback can do the reverse, so anything subtler would
+    /// be a correctness argument to maintain forever for a 10 ms saving. It
+    /// costs nothing where it matters, because a driver with nothing to do
+    /// emits no state -- and an idle session is exactly when someone is
+    /// reading code and hovering.
+    details: HashMap<String, Option<NameDetail>>,
 }
 
 impl Driver {
@@ -109,6 +134,7 @@ impl Driver {
             reconciled: false,
             eval_queue: VecDeque::new(),
             eval_in_flight: None,
+            details: HashMap::new(),
         }
     }
 
@@ -250,6 +276,10 @@ impl Driver {
                 self.eval_queue.push_back((id, form));
                 Flow::Continue
             }
+            Cmd::Describe { id, name } => {
+                self.describe(&id, &name);
+                Flow::Continue
+            }
             Cmd::Pause => {
                 // The protocol loop already sent request_abort, so a blocked
                 // call has yielded; the escalation itself runs here, where
@@ -271,6 +301,48 @@ impl Driver {
                 self.abandon_all_evals("the session is closing");
                 Flow::Exit
             }
+        }
+    }
+
+    /// Answer a hover, without ever making it wait.
+    ///
+    /// The opposite policy to `eval`, and for the opposite reason. An eval is
+    /// something the user typed and meant, so it queues: refusing it would ask
+    /// them to watch the status bar and retype. A describe is something the
+    /// editor asked because a cursor moved, hundreds of times a session, and
+    /// the user is not waiting for it -- so it answers now or declines. The
+    /// alternative was watched for: a hover queued behind a four-minute proof
+    /// would arrive long after the mouse had moved on, and VSCode would render
+    /// a tooltip for a symbol nobody is looking at any more.
+    ///
+    /// This runs in `drain`, which `follow_running` calls at the top of every
+    /// resume slice -- so a cached answer comes back inside ~500 ms even while
+    /// a proof is grinding, and a miss is declined just as promptly, because
+    /// `Book::describe` reports `Busy` without blocking.
+    ///
+    /// `available: false` is not an error and not "no such name": the client
+    /// shows nothing and asks again on the next hover.
+    fn describe(&mut self, id: &Value, name: &str) {
+        if let Some(d) = self.details.get(name) {
+            self.out.reply(id, to_value(wire::described(name, d.as_ref())));
+            return;
+        }
+        let r = {
+            let mut book = self.book.lock().expect("book lock");
+            book.describe(name, DESCRIBE)
+        };
+        match r {
+            Ok(d) => {
+                self.out.reply(id, to_value(wire::described(name, d.as_ref())));
+                self.details.insert(name.to_string(), d);
+            }
+            Err(SyncError::Busy { .. }) => {
+                self.out.reply(id, to_value(wire::describe_busy(name)))
+            }
+            // Anything else is the session being unwell, which the client
+            // learns about through `status`; a hover is not the place to
+            // surface it, so it degrades to "ask again" like a busy one.
+            Err(_) => self.out.reply(id, to_value(wire::describe_busy(name))),
         }
     }
 
@@ -559,7 +631,11 @@ impl Driver {
         self.book.lock().expect("book lock").admitted_lines().len()
     }
 
-    fn emit_state(&self, running: Option<usize>) {
+    fn emit_state(&mut self, running: Option<usize>) {
+        // The world just moved, so every cached answer about a name is a
+        // claim about a world that no longer exists. See `Driver::details`
+        // on why this is blunt rather than incremental.
+        self.details.clear();
         let (admitted, skipped) = {
             let book = self.book.lock().expect("book lock");
             (book.admitted_lines().len(), book.skipped_units())

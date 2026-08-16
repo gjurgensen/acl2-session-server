@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use acl2_session::sync::{Checkpoints, EvalResult, FailureReport, UnitReport};
-use acl2_session::{Outcome, Slice, Status, WorldChange};
+use acl2_session::{NameDetail, NameKind, Outcome, Slice, Status, WorldChange};
 
 #[derive(Debug, Deserialize)]
 pub struct OpenParams {
@@ -55,6 +55,100 @@ pub struct EvalParams {
     /// One or more top-level forms, as the user typed them. Not part of the
     /// file, so nothing here is admitted: see the core's `eval`.
     pub form: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DescribeParams {
+    pub book: String,
+    /// The token under the cursor, as the client read it out of the buffer.
+    /// Not a position: coordinates never cross this
+    /// wire. A token that is not a plain symbol simply answers "not found".
+    pub name: String,
+}
+
+/// What the world knows about one name -- the hover answer.
+///
+/// Shaped as its LSP counterpart's payload so the eventual facade is a
+/// serializer rather than a redesign: everything here is a field
+/// `MarkupContent` can be built from without asking a second question.
+#[derive(Debug, Serialize)]
+pub struct DescribeReply {
+    /// False when the session was busy proving and the answer was not already
+    /// cached. Distinct from `found: false`, and the distinction is the whole
+    /// point: "ask me again" must not render as "no such name". A hover never
+    /// waits on the prover.
+    pub available: bool,
+    pub found: bool,
+    pub name: String,
+    /// `function`, `macro`, `theorem`, `constant`, `other`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub formals: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guard: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub statement: Option<String>,
+    /// The book whose text defines it, as ACL2 names it. Absent means the
+    /// name came from this file or from ACL2 itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub book: Option<String>,
+    /// `book` resolved to a path that can be opened.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+pub fn kind_str(k: NameKind) -> &'static str {
+    match k {
+        NameKind::Function => "function",
+        NameKind::Macro => "macro",
+        NameKind::Theorem => "theorem",
+        NameKind::Constant => "constant",
+        NameKind::Other => "other",
+    }
+}
+
+pub fn described(name: &str, d: Option<&NameDetail>) -> DescribeReply {
+    match d {
+        None => DescribeReply {
+            available: true,
+            found: false,
+            name: name.to_string(),
+            kind: None,
+            formals: None,
+            guard: None,
+            statement: None,
+            book: None,
+            path: None,
+        },
+        Some(d) => DescribeReply {
+            available: true,
+            found: true,
+            name: d.name.clone(),
+            kind: Some(kind_str(d.kind)),
+            formals: d.formals.clone(),
+            guard: d.guard.clone(),
+            statement: d.statement.clone(),
+            book: d.book.clone(),
+            path: d.book_path.as_ref().map(|p| p.display().to_string()),
+        },
+    }
+}
+
+/// The session is proving and this name was not cached. Not an error: the
+/// client shows nothing and asks again on the next hover.
+pub fn describe_busy(name: &str) -> DescribeReply {
+    DescribeReply {
+        available: false,
+        found: false,
+        name: name.to_string(),
+        kind: None,
+        formals: None,
+        guard: None,
+        statement: None,
+        book: None,
+        path: None,
+    }
 }
 
 #[derive(Debug, Deserialize)]

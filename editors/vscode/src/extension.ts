@@ -31,6 +31,7 @@ import { EVAL_SCHEME, OutputView, SCHEME } from './outputView';
 import { Highlighter } from './highlight';
 import { Panel, PanelEnvelope, PanelModel } from './panel';
 import { Console, ConsoleResult, HISTORY } from './console';
+import { DescribeReply, hoverMarkdown } from './names';
 
 const UPDATE_DEBOUNCE_MS = 300;
 
@@ -166,6 +167,7 @@ export function activate(context: vscode.ExtensionContext): void {
     channel,
     vscode.workspace.registerTextDocumentContentProvider(SCHEME, outputView),
     vscode.workspace.registerTextDocumentContentProvider(EVAL_SCHEME, evalView),
+    vscode.languages.registerHoverProvider({ language: 'acl2' }, hoverProvider),
     vscode.commands.registerCommand('acl2-session.start', startCommand),
     vscode.commands.registerCommand('acl2-session.evalSelection', () => forBook(evalCommand)),
     vscode.commands.registerCommand('acl2-session.showConsole', () =>
@@ -273,6 +275,46 @@ function report(e: unknown): void {
   channel.appendLine(`error: ${msg}`);
   void vscode.window.showErrorMessage(`acl2-session: ${msg}`);
 }
+
+/**
+ * Hover: what does the world know about the name under the cursor?
+ *
+ * Only for documents with a live session -- the answer comes from an ACL2
+ * that has actually admitted this file, which is the whole difference between
+ * this and a static index. Without a session there is nothing honest to say,
+ * so nothing is said.
+ *
+ * The token comes from VSCode's own word range, which uses the ACL2
+ * `wordPattern` in language-configuration.json; positions never cross the
+ * wire. A cancelled hover -- the cursor moved on -- resolves
+ * to nothing rather than racing the reply into a tooltip nobody is reading.
+ */
+const hoverProvider: vscode.HoverProvider = {
+  async provideHover(doc, position, token) {
+    const s = books.get(doc.uri.toString());
+    if (!s || !client?.alive) {
+      return undefined;
+    }
+    const range = doc.getWordRangeAtPosition(position);
+    if (!range) {
+      return undefined;
+    }
+    const name = doc.getText(range);
+    let reply: DescribeReply;
+    try {
+      reply = await client.request('describe', { book: s.id, name });
+    } catch {
+      // A daemon that went away is reported by the session machinery; a
+      // tooltip is not the place to say so a second time.
+      return undefined;
+    }
+    if (token.isCancellationRequested) {
+      return undefined;
+    }
+    const md = hoverMarkdown(reply);
+    return md ? new vscode.Hover(new vscode.MarkdownString(md), range) : undefined;
+  },
+};
 
 function forBook(f: (s: BookSession) => unknown): void {
   const editor = vscode.window.activeTextEditor;

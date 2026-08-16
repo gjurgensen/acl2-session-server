@@ -127,6 +127,18 @@ impl Daemon {
                 .map_err(fail)?;
                 Ok(Answer::ByDriver)
             }
+            // Answered by the driver like `eval`, because it needs the
+            // session -- but never queued behind one: see `Driver::describe`.
+            "describe" => {
+                let p: wire::DescribeParams = args(params)?;
+                let id = id.clone();
+                self.handle_of(&p.book, |h| {
+                    h.tx.send(Cmd::Describe { id, name: p.name }).map_err(|e| e.to_string())
+                })
+                .map_err(fail)?
+                .map_err(fail)?;
+                Ok(Answer::ByDriver)
+            }
             "interrupt" => {
                 let p: wire::BookParams = args(params)?;
                 self.handle_of(&p.book, |h| {
