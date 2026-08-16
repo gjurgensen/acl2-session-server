@@ -18,7 +18,9 @@
   "categories": [
     "Programming Languages"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onLanguage:acl2"
+  ],
   "contributes": {
     "languages": [
       {
@@ -45,57 +47,104 @@
       {
         "id": "acl2Session.token.name",
         "description": "Panel terms: defined names. Used only when the active theme's token colors could not be read; otherwise the panel takes its colors from the theme itself.",
-        "defaults": { "light": "terminal.ansiYellow", "dark": "terminal.ansiBrightYellow", "highContrast": "foreground", "highContrastLight": "foreground" }
+        "defaults": {
+          "light": "terminal.ansiYellow",
+          "dark": "terminal.ansiBrightYellow",
+          "highContrast": "foreground",
+          "highContrastLight": "foreground"
+        }
       },
       {
         "id": "acl2Session.token.keyword",
         "description": "Panel terms: :keywords and rune classes, when the theme's token colors could not be read.",
-        "defaults": { "light": "terminal.ansiMagenta", "dark": "terminal.ansiBrightMagenta", "highContrast": "foreground", "highContrastLight": "foreground" }
+        "defaults": {
+          "light": "terminal.ansiMagenta",
+          "dark": "terminal.ansiBrightMagenta",
+          "highContrast": "foreground",
+          "highContrastLight": "foreground"
+        }
       },
       {
         "id": "acl2Session.token.constant",
         "description": "Panel terms: t, nil and *constants*, when the theme's token colors could not be read.",
-        "defaults": { "light": "terminal.ansiBlue", "dark": "terminal.ansiBrightBlue", "highContrast": "foreground", "highContrastLight": "foreground" }
+        "defaults": {
+          "light": "terminal.ansiBlue",
+          "dark": "terminal.ansiBrightBlue",
+          "highContrast": "foreground",
+          "highContrastLight": "foreground"
+        }
       },
       {
         "id": "acl2Session.token.number",
         "description": "Panel terms: numbers, when the theme's token colors could not be read.",
-        "defaults": { "light": "terminal.ansiMagenta", "dark": "terminal.ansiBrightMagenta", "highContrast": "foreground", "highContrastLight": "foreground" }
+        "defaults": {
+          "light": "terminal.ansiMagenta",
+          "dark": "terminal.ansiBrightMagenta",
+          "highContrast": "foreground",
+          "highContrastLight": "foreground"
+        }
       },
       {
         "id": "acl2Session.token.string",
         "description": "Panel terms: strings and character literals, when the theme's token colors could not be read.",
-        "defaults": { "light": "terminal.ansiGreen", "dark": "terminal.ansiBrightGreen", "highContrast": "foreground", "highContrastLight": "foreground" }
+        "defaults": {
+          "light": "terminal.ansiGreen",
+          "dark": "terminal.ansiBrightGreen",
+          "highContrast": "foreground",
+          "highContrastLight": "foreground"
+        }
       },
       {
         "id": "acl2Session.token.comment",
         "description": "Panel terms: comments, when the theme's token colors could not be read.",
-        "defaults": { "light": "terminal.ansiBrightBlack", "dark": "terminal.ansiBrightBlack", "highContrast": "foreground", "highContrastLight": "foreground" }
+        "defaults": {
+          "light": "terminal.ansiBrightBlack",
+          "dark": "terminal.ansiBrightBlack",
+          "highContrast": "foreground",
+          "highContrastLight": "foreground"
+        }
       },
       {
         "id": "acl2Session.token.storage",
         "description": "Panel terms: definer heads such as defthm, when the theme's token colors could not be read.",
-        "defaults": { "light": "terminal.ansiYellow", "dark": "terminal.ansiYellow", "highContrast": "foreground", "highContrastLight": "foreground" }
+        "defaults": {
+          "light": "terminal.ansiYellow",
+          "dark": "terminal.ansiYellow",
+          "highContrast": "foreground",
+          "highContrastLight": "foreground"
+        }
       },
       {
         "id": "acl2Session.token.control",
         "description": "Panel terms: binding and event forms, when the theme's token colors could not be read.",
-        "defaults": { "light": "terminal.ansiRed", "dark": "terminal.ansiBrightRed", "highContrast": "foreground", "highContrastLight": "foreground" }
+        "defaults": {
+          "light": "terminal.ansiRed",
+          "dark": "terminal.ansiBrightRed",
+          "highContrast": "foreground",
+          "highContrastLight": "foreground"
+        }
       },
       {
         "id": "acl2Session.token.punctuation",
         "description": "Panel terms: parentheses, when the theme's token colors could not be read.",
-        "defaults": { "light": "terminal.ansiWhite", "dark": "terminal.ansiWhite", "highContrast": "foreground", "highContrastLight": "foreground" }
+        "defaults": {
+          "light": "terminal.ansiWhite",
+          "dark": "terminal.ansiWhite",
+          "highContrast": "foreground",
+          "highContrastLight": "foreground"
+        }
       }
     ],
     "commands": [
       {
         "command": "acl2-session.start",
-        "title": "ACL2: Start Live Checking"
+        "title": "ACL2: Start Live Checking",
+        "icon": "$(play)"
       },
       {
         "command": "acl2-session.stop",
-        "title": "ACL2: Stop Live Checking"
+        "title": "ACL2: Stop Live Checking",
+        "icon": "$(debug-stop)"
       },
       {
         "command": "acl2-session.interrupt",
@@ -174,7 +223,29 @@
           "description": "In minimal mode, mark admitted forms with a green gutter bar (olive for conditional). Off, absence means admitted."
         }
       }
-    }
+    },
+    "menus": {
+      "editor/title": [
+        {
+          "command": "acl2-session.start",
+          "when": "editorLangId == acl2 && !acl2Session.active",
+          "group": "navigation@1"
+        },
+        {
+          "command": "acl2-session.stop",
+          "when": "editorLangId == acl2 && acl2Session.active",
+          "group": "navigation@1"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "acl2-session.start",
+        "key": "ctrl+alt+a",
+        "mac": "cmd+alt+a",
+        "when": "editorLangId == acl2"
+      }
+    ]
   },
   "scripts": {
     "compile": "tsc -p ./",

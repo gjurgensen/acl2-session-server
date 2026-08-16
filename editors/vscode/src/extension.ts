@@ -103,6 +103,10 @@ export function activate(context: vscode.ExtensionContext): void {
   panel = new Panel();
   panel.iconPath = windowIcon;
   status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 10);
+  // The progress readout is also the way back to the panel, for when it has
+  // been closed and the gutter says something needs looking at.
+  status.command = 'acl2-session.showPanel';
+  status.tooltip = 'ACL2: show the panel';
   channel = vscode.window.createOutputChannel('ACL2');
 
   panel.onGoal = (m, goal, slot) => void fetchGoal(m, goal, slot);
@@ -237,6 +241,7 @@ export function activate(context: vscode.ExtensionContext): void {
         paint(s);
       }
     }),
+    vscode.window.onDidChangeActiveTextEditor(refreshContext),
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('acl2-session')) {
         for (const s of books.values()) {
@@ -245,6 +250,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     })
   );
+  refreshContext();
 }
 
 export async function deactivate(): Promise<void> {
@@ -360,9 +366,29 @@ async function startCommand(): Promise<void> {
     status.text = '$(sync~spin) ACL2: starting';
     channel.appendLine(`opened ${doc.fileName} as ${s.id} under ${r.image}`);
     sendUpdate(s);
+    refreshContext();
+    // Starting and opening the panel are one action, because there is no
+    // moment where you want the session but not the place its failures
+    // explain themselves. It opens with preserveFocus, so it costs the
+    // cursor nothing.
+    panel.open();
+    void followPanel(s);
   } catch (e) {
     report(e);
   }
+}
+
+/**
+ * Whether the active editor's file has a live session.
+ *
+ * Drives the editor title-bar button, which is start or stop depending. The
+ * key is camelCase: a when-clause parser can read the hyphen in
+ * `acl2-session.active` as a minus.
+ */
+function refreshContext(): void {
+  const editor = vscode.window.activeTextEditor;
+  const live = !!editor && books.has(editor.document.uri.toString());
+  void vscode.commands.executeCommand('setContext', 'acl2Session.active', live);
 }
 
 function stopBook(s: BookSession): void {
@@ -380,6 +406,7 @@ function stopBook(s: BookSession): void {
   if (books.size === 0) {
     status.hide();
   }
+  refreshContext();
 }
 
 function sendUpdate(s: BookSession): void {
@@ -606,6 +633,13 @@ function onState(p: StateEvent): void {
   const shown = panel.shown();
   if (shown && shown.book === s.id) {
     void followPanel(s, shown.index);
+  } else if (!shown && panel.visible) {
+    // Open but showing nothing yet -- which is exactly where `start` leaves
+    // it, since the panel opens before any state has arrived. Adopt the
+    // cursor's form as soon as there is something to render, or the one
+    // button would open an empty panel and leave it that way until the
+    // cursor happened to move.
+    void followPanel(s);
   }
 }
 

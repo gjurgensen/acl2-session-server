@@ -192,7 +192,14 @@ and restart VSCode (recompile with `npm run compile` after pulling changes).
 
 ## Commands
 
-Start / Stop Live Checking, Interrupt, Show Panel, Show Console, Evaluate
+**Starting is one action**: `ctrl+alt+a` (`cmd+alt+a` on a Mac), or the
+&#9654; button in the editor's title bar, which becomes a stop button once
+the session is live. Both run **ACL2: Start Live Checking**, which opens the
+panel too -- there is no moment where you want the session but not the place
+its failures explain themselves. The panel opens without taking the cursor.
+Clicking the status bar brings it back if you close it.
+
+The rest: Stop Live Checking, Interrupt, Show Panel, Show Console, Evaluate
 Selection, Retract to Cursor, Target at Cursor, Clear Target, Show Output for
 Form at Cursor, Go to Frontier.
 
