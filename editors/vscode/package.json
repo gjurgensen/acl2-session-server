@@ -19,16 +19,64 @@
   ],
   "activationEvents": [],
   "contributes": {
+    "languages": [
+      {
+        "id": "acl2",
+        "aliases": [
+          "ACL2",
+          "acl2"
+        ],
+        "extensions": [
+          ".lisp",
+          ".acl2"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "acl2",
+        "scopeName": "source.acl2",
+        "path": "./syntaxes/acl2.tmLanguage.json"
+      }
+    ],
     "commands": [
-      { "command": "acl2-session.start", "title": "ACL2: Start Live Checking" },
-      { "command": "acl2-session.stop", "title": "ACL2: Stop Live Checking" },
-      { "command": "acl2-session.interrupt", "title": "ACL2: Interrupt" },
-      { "command": "acl2-session.retractToCursor", "title": "ACL2: Retract to Cursor" },
-      { "command": "acl2-session.targetAtCursor", "title": "ACL2: Target at Cursor" },
-      { "command": "acl2-session.clearTarget", "title": "ACL2: Clear Target" },
-      { "command": "acl2-session.showOutput", "title": "ACL2: Show Output for Form at Cursor" },
-      { "command": "acl2-session.showPanel", "title": "ACL2: Show Panel" },
-      { "command": "acl2-session.gotoFrontier", "title": "ACL2: Go to Frontier" }
+      {
+        "command": "acl2-session.start",
+        "title": "ACL2: Start Live Checking"
+      },
+      {
+        "command": "acl2-session.stop",
+        "title": "ACL2: Stop Live Checking"
+      },
+      {
+        "command": "acl2-session.interrupt",
+        "title": "ACL2: Interrupt"
+      },
+      {
+        "command": "acl2-session.retractToCursor",
+        "title": "ACL2: Retract to Cursor"
+      },
+      {
+        "command": "acl2-session.targetAtCursor",
+        "title": "ACL2: Target at Cursor"
+      },
+      {
+        "command": "acl2-session.clearTarget",
+        "title": "ACL2: Clear Target"
+      },
+      {
+        "command": "acl2-session.showOutput",
+        "title": "ACL2: Show Output for Form at Cursor"
+      },
+      {
+        "command": "acl2-session.showPanel",
+        "title": "ACL2: Show Panel"
+      },
+      {
+        "command": "acl2-session.gotoFrontier",
+        "title": "ACL2: Go to Frontier"
+      }
     ],
     "configuration": {
       "title": "ACL2 Session",
@@ -45,13 +93,18 @@
         },
         "acl2-session.trusted": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "Directories whose ACL2 checkouts are trusted (--trusted, repeatable). ACL2_TRUSTED in the environment works too."
         },
         "acl2-session.decorations": {
           "type": "string",
-          "enum": ["minimal", "wash"],
+          "enum": [
+            "minimal",
+            "wash"
+          ],
           "default": "minimal",
           "enumDescriptions": [
             "Gutter status column: bars over unprocessed lines, a checkmark per admitted form, reds as diagnostics, and only the conditional wash.",

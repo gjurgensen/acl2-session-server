@@ -1,0 +1,357 @@
+{
+  "name": "ACL2",
+  "scopeName": "source.acl2",
+  "patterns": [
+    {
+      "include": "#comment-block"
+    },
+    {
+      "include": "#comment-line"
+    },
+    {
+      "include": "#string"
+    },
+    {
+      "include": "#character"
+    },
+    {
+      "include": "#definer-theorem-wrapped"
+    },
+    {
+      "include": "#definer-function-wrapped"
+    },
+    {
+      "include": "#definer-theorem"
+    },
+    {
+      "include": "#definer-constant"
+    },
+    {
+      "include": "#definer-type"
+    },
+    {
+      "include": "#definer-macro"
+    },
+    {
+      "include": "#definer-doc"
+    },
+    {
+      "include": "#definer-function"
+    },
+    {
+      "include": "#definer-generic"
+    },
+    {
+      "include": "#event"
+    },
+    {
+      "include": "#control"
+    },
+    {
+      "include": "#modifier"
+    },
+    {
+      "include": "#keyword"
+    },
+    {
+      "include": "#number"
+    },
+    {
+      "include": "#boolean"
+    },
+    {
+      "include": "#earmuff"
+    },
+    {
+      "include": "#namespace"
+    },
+    {
+      "include": "#bar-symbol"
+    },
+    {
+      "include": "#quote"
+    },
+    {
+      "include": "#paren"
+    }
+  ],
+  "repository": {
+    "comment-line": {
+      "name": "comment.line.semicolon.acl2",
+      "begin": ";",
+      "end": "$",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.comment.acl2"
+        }
+      }
+    },
+    "comment-block": {
+      "name": "comment.block.acl2",
+      "begin": "#\\|",
+      "end": "\\|#",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.comment.begin.acl2"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.comment.end.acl2"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#comment-block"
+        }
+      ]
+    },
+    "string": {
+      "name": "string.quoted.double.acl2",
+      "begin": "\"",
+      "end": "\"",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.string.begin.acl2"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.string.end.acl2"
+        }
+      },
+      "patterns": [
+        {
+          "name": "constant.character.escape.acl2",
+          "match": "\\\\."
+        }
+      ]
+    },
+    "character": {
+      "name": "constant.character.acl2",
+      "match": "#\\\\(?:[Nn]ewline|[Ss]pace|[Tt]ab|[Pp]age|[Rr]ubout|[Ll]inefeed|[Rr]eturn|[Nn]ull|[Bb]ackspace|.)"
+    },
+    "definer-theorem-wrapped": {
+      "comment": "A head alone on its line, with the name wrapped to the next -- (defthm\\n  long-name ...) -- which is common enough in real books to be worth a multi-line rule. Only the theorem and function families are covered; the other definers are not written this way. The end alternation pops on the first token found, or without consuming on any delimiter, so an unnamed head cannot swallow the form.",
+      "begin": "(?i)(\\()\\s*((?:[^\\s()'\"`,;:]+::)?(?:local-)?def(?:thm|thms|rule|axiom|cong|equiv|refinement|theorem|ret)[^\\s()'\"`,;]*)\\s*$",
+      "beginCaptures": {
+        "1": {
+          "name": "punctuation.section.parens.begin.acl2"
+        },
+        "2": {
+          "name": "storage.type.theorem.acl2"
+        }
+      },
+      "end": "(?=[()'\"`,])|((?:\\|[^|]*\\|)|[^\\s()'\"`,;]+)",
+      "endCaptures": {
+        "1": {
+          "name": "entity.name.type.theorem.acl2"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#comment-line"
+        },
+        {
+          "include": "#comment-block"
+        }
+      ]
+    },
+    "definer-function-wrapped": {
+      "begin": "(?i)(\\()\\s*((?:[^\\s()'\"`,;:]+::)?(?:local-)?def(?:un|n|in|iso|loop|stub|attach|choose|evaluator|symbolic|parser|method|generic|deriv)[^\\s()'\"`,;]*)\\s*$",
+      "beginCaptures": {
+        "1": {
+          "name": "punctuation.section.parens.begin.acl2"
+        },
+        "2": {
+          "name": "storage.type.function.acl2"
+        }
+      },
+      "end": "(?=[()'\"`,])|((?:\\|[^|]*\\|)|[^\\s()'\"`,;]+)",
+      "endCaptures": {
+        "1": {
+          "name": "entity.name.function.acl2"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#comment-line"
+        },
+        {
+          "include": "#comment-block"
+        }
+      ]
+    },
+    "definer-theorem": {
+      "match": "(?i)(\\()\\s*((?:[^\\s()'\"`,;:]+::)?(?:local-)?def(?:thm|thms|rule|axiom|cong|equiv|refinement|theorem|ret)[^\\s()'\"`,;]*)(?:\\s+((?:\\|[^|]*\\|)|[^\\s()'\"`,;]+))?",
+      "captures": {
+        "1": {
+          "name": "punctuation.section.parens.begin.acl2"
+        },
+        "2": {
+          "name": "storage.type.theorem.acl2"
+        },
+        "3": {
+          "name": "entity.name.type.theorem.acl2"
+        }
+      }
+    },
+    "definer-constant": {
+      "match": "(?i)(\\()\\s*((?:[^\\s()'\"`,;:]+::)?(?:local-)?def(?:const|val|var|parameter)[^\\s()'\"`,;]*)(?:\\s+((?:\\|[^|]*\\|)|[^\\s()'\"`,;]+))?",
+      "captures": {
+        "1": {
+          "name": "punctuation.section.parens.begin.acl2"
+        },
+        "2": {
+          "name": "storage.type.constant.acl2"
+        },
+        "3": {
+          "name": "variable.other.constant.acl2"
+        }
+      }
+    },
+    "definer-type": {
+      "match": "(?i)(\\()\\s*((?:[^\\s()'\"`,;:]+::)?(?:local-)?def(?:stobj|prod|sum|tagsum|list|alist|aggregate|enum|types|type|data|bitstruct|rec|struct|option|class|package|flexsum)[^\\s()'\"`,;]*)(?:\\s+((?:\\|[^|]*\\|)|[^\\s()'\"`,;]+))?",
+      "captures": {
+        "1": {
+          "name": "punctuation.section.parens.begin.acl2"
+        },
+        "2": {
+          "name": "storage.type.datatype.acl2"
+        },
+        "3": {
+          "name": "entity.name.type.acl2"
+        }
+      }
+    },
+    "definer-macro": {
+      "match": "(?i)(\\()\\s*((?:[^\\s()'\"`,;:]+::)?(?:local-)?def(?:macro|abbrev)[^\\s()'\"`,;]*)(?:\\s+((?:\\|[^|]*\\|)|[^\\s()'\"`,;]+))?",
+      "captures": {
+        "1": {
+          "name": "punctuation.section.parens.begin.acl2"
+        },
+        "2": {
+          "name": "storage.type.macro.acl2"
+        },
+        "3": {
+          "name": "entity.name.function.macro.acl2"
+        }
+      }
+    },
+    "definer-doc": {
+      "match": "(?i)(\\()\\s*((?:[^\\s()'\"`,;:]+::)?(?:local-)?def(?:xdoc|section|label|doc|pointer)[^\\s()'\"`,;]*)(?:\\s+((?:\\|[^|]*\\|)|[^\\s()'\"`,;]+))?",
+      "captures": {
+        "1": {
+          "name": "punctuation.section.parens.begin.acl2"
+        },
+        "2": {
+          "name": "storage.type.doc.acl2"
+        },
+        "3": {
+          "name": "entity.name.section.acl2"
+        }
+      }
+    },
+    "definer-function": {
+      "match": "(?i)(\\()\\s*((?:[^\\s()'\"`,;:]+::)?(?:local-)?def(?:un|n|in|iso|loop|stub|attach|choose|evaluator|symbolic|parser|method|generic|deriv)[^\\s()'\"`,;]*)(?:\\s+((?:\\|[^|]*\\|)|[^\\s()'\"`,;]+))?",
+      "captures": {
+        "1": {
+          "name": "punctuation.section.parens.begin.acl2"
+        },
+        "2": {
+          "name": "storage.type.function.acl2"
+        },
+        "3": {
+          "name": "entity.name.function.acl2"
+        }
+      }
+    },
+    "definer-generic": {
+      "match": "(?i)(\\()\\s*((?:[^\\s()'\"`,;:]+::)?(?:local-)?def[^\\s()'\"`,;]*)(?:\\s+((?:\\|[^|]*\\|)|[^\\s()'\"`,;]+))?",
+      "captures": {
+        "1": {
+          "name": "punctuation.section.parens.begin.acl2"
+        },
+        "2": {
+          "name": "storage.type.acl2"
+        },
+        "3": {
+          "name": "entity.name.function.acl2"
+        }
+      }
+    },
+    "event": {
+      "match": "(?i)(\\()\\s*((?:[^\\s()'\"`,;:]+::)?(?:local|encapsulate|include-book|in-package|mutual-recursion|make-event|progn!?|verify-guards\\??|verify-termination|in-theory|theory-invariant|table|skip-proofs|with-output|thm|assert-event|assert!|value-triple|must-fail|must-succeed\\*?|logic|program|memoize|unmemoize|deflabel|set-[^\\s()'\"`,;]+))(?=[\\s()])",
+      "captures": {
+        "1": {
+          "name": "punctuation.section.parens.begin.acl2"
+        },
+        "2": {
+          "name": "keyword.other.event.acl2"
+        }
+      }
+    },
+    "control": {
+      "match": "(?i)(\\()\\s*((?:[^\\s()'\"`,;:]+::)?(?:let\\*?|mv\\??-let|b\\*|if|cond|case|case-match|when|unless|lambda|loop\\$|prog2\\$|er-progn|with-local-stobj|stobj-let|flet|labels|dolist|dotimes))(?=[\\s()])",
+      "captures": {
+        "1": {
+          "name": "punctuation.section.parens.begin.acl2"
+        },
+        "2": {
+          "name": "keyword.control.acl2"
+        }
+      }
+    },
+    "modifier": {
+      "match": "(?i)(\\()\\s*(declare|xargs|ignore|ignorable|optimize|type)(?=[\\s()])",
+      "captures": {
+        "1": {
+          "name": "punctuation.section.parens.begin.acl2"
+        },
+        "2": {
+          "name": "storage.modifier.acl2"
+        }
+      }
+    },
+    "keyword": {
+      "match": "(?:^|(?<=[\\s()\\[\\]'`,]))(:[^\\s()\\[\\]'\"`,;]+)",
+      "captures": {
+        "1": {
+          "name": "constant.other.keyword.acl2"
+        }
+      }
+    },
+    "number": {
+      "match": "(?:^|(?<=[\\s()\\[\\]'`,]))(?:#[bBoOxX][+-]?[0-9a-fA-F]+(?:/[0-9a-fA-F]+)?|[+-]?[0-9]+(?:/[0-9]+)?|[+-]?[0-9]*\\.[0-9]+)(?![^\\s()\\[\\]'\"`,;])",
+      "name": "constant.numeric.acl2"
+    },
+    "boolean": {
+      "match": "(?i)(?:^|(?<=[\\s()\\[\\]'`,]))(?:nil|t)(?![^\\s()\\[\\]'\"`,;])",
+      "name": "constant.language.acl2"
+    },
+    "earmuff": {
+      "match": "(?:^|(?<=[\\s()\\[\\]'`,]))\\*[^\\s()\\[\\]'\"`,;]*\\*(?![^\\s()\\[\\]'\"`,;])",
+      "name": "variable.other.constant.earmuff.acl2"
+    },
+    "namespace": {
+      "match": "(?:^|(?<=[\\s()\\[\\]'`,]))([^\\s()\\[\\]'\"`,;:]+::)",
+      "captures": {
+        "1": {
+          "name": "entity.name.namespace.acl2"
+        }
+      }
+    },
+    "bar-symbol": {
+      "match": "\\|[^|]*\\|",
+      "name": "variable.other.symbol.acl2"
+    },
+    "quote": {
+      "match": "#'|['`]|,@?",
+      "name": "punctuation.definition.quote.acl2"
+    },
+    "paren": {
+      "match": "[()\\[\\]]",
+      "name": "punctuation.section.parens.acl2"
+    }
+  }
+}

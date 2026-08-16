@@ -26,6 +26,40 @@ Zero runtime dependencies: the JSON-RPC framing is ~150 lines in
 [src/protocol.ts](src/protocol.ts), deliberately vscode-free so it can be
 exercised under plain node (see below).
 
+## Syntax highlighting
+
+The extension contributes an `acl2` language for `.lisp` and `.acl2` with its
+own grammar, rather than injecting into a third-party Lisp grammar: VSCode
+ships no Lisp support at all, so an injection would silently do nothing for
+anyone who has not installed one.
+
+Definer heads are scoped by *family* -- `defthm` and `defrule` as theorems,
+`defun`/`defund`/`define` alike as functions, then constants, datatypes,
+macros and doc forms -- and the defined name takes the matching scope, so a
+theorem name and a function name are distinguishable by any theme that cares
+to distinguish them. A head the list does not know (`def-rp-rule`,
+`std::deflist`, `def::un`) still reads as a definer and still names what it
+defines, which matters because the long tail of book-local definers is real.
+Beyond that: events (`local`, `encapsulate`, `include-book`, `in-theory`),
+binding forms, `declare`/`xargs`, keywords, package prefixes, `*earmuffed*`
+constants, rationals, character literals, and nested `#|` block comments.
+
+The grammar is lexical, so it cannot know that a project's own macro defines
+a theorem, or that a name refers to something admitted. That is the semantic
+token layer's job, and the daemon already knows the answers; it is not built
+yet.
+
+Verified by tokenizing the 10,712 books of a full ACL2 checkout (5.0M lines)
+under the real TextMate engine: no file ends with an unterminated string or
+comment, and of 244,608 definer heads none went unrecognized outside of the
+4,024 that sit inside comments or strings, where silence is correct.
+
+To keep another Lisp extension on `.lisp` instead, override the association:
+
+```json
+"files.associations": { "*.lisp": "lisp" }
+```
+
 ## Build
 
 ```sh
