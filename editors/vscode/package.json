@@ -59,10 +59,10 @@
           ],
           "description": "How unit statuses are rendered."
         },
-        "acl2-session.gutterChecks": {
+        "acl2-session.gutterAdmitted": {
           "type": "boolean",
           "default": true,
-          "description": "In minimal mode, mark each admitted form's first line with a checkmark."
+          "description": "In minimal mode, mark admitted forms with a green gutter bar (olive for conditional). Off, absence means admitted."
         }
       }
     }

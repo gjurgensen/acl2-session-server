@@ -55,8 +55,8 @@ function mode(): DecorationMode {
   return vscode.workspace.getConfiguration('acl2-session').get<DecorationMode>('decorations', 'minimal');
 }
 
-function gutterChecks(): boolean {
-  return vscode.workspace.getConfiguration('acl2-session').get<boolean>('gutterChecks', true);
+function gutterAdmitted(): boolean {
+  return vscode.workspace.getConfiguration('acl2-session').get<boolean>('gutterAdmitted', true);
 }
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -405,7 +405,7 @@ function paint(s: BookSession): void {
   if (!s.lastState) {
     return;
   }
-  const opts = { mode: mode(), gutterChecks: gutterChecks() };
+  const opts = { mode: mode(), gutterAdmitted: gutterAdmitted() };
   for (const editor of vscode.window.visibleTextEditors) {
     if (editor.document === s.doc) {
       decorations.apply(editor, s.lastState.units, opts);
@@ -454,7 +454,8 @@ function refreshDiagnostics(s: BookSession): void {
       parts.push(e.error_line);
     }
     if (e.abort_cause) {
-      parts.push(`abort cause: ${e.abort_cause}`);
+      // Display-only strip; the wire keeps ACL2's own printing.
+      parts.push(`abort cause: ${e.abort_cause.replace(/^acl2::/i, '')}`);
     }
     for (const c of e.checkpoints ?? []) {
       parts.push(`${c.kind} ${c.goal ?? ''}: ${c.term}`);
@@ -567,6 +568,20 @@ function buildPanelModel(s: BookSession, index: number): PanelModel | undefined 
     model.abortCause = e.abort_cause;
     model.checkpoints = e.checkpoints ?? [];
     model.rules = e.rules ?? [];
+    model.warnings = e.warnings;
+    model.time = e.time;
+    model.hintEvents = e.hint_events ?? [];
+    model.splitterRules = e.splitter_rules ?? [];
+    model.preRevert = e.pre_revert ?? false;
+    model.forced = e.forced ?? false;
+    model.inner = (e.inner ?? []).map((i) => ({
+      name: i.name,
+      kind: i.kind,
+      time: i.time,
+      proverSteps: i.prover_steps,
+      abortCauses: i.abort_causes,
+    }));
+    model.innerTotal = e.inner_total ?? model.inner.length;
   }
   return model;
 }

@@ -79,6 +79,11 @@ assert(
 
 const red = events.find(([m, p]) => m === 'unit' && p.outcome === 'skipped')[1];
 assert(red.status === 'proof_failure', 'the red unit carries its envelope');
+const below = events.find(([m, p]) => m === 'unit' && p.index === 3)[1];
+assert(
+  (below.rules || []).join(' ').includes('vs-bad'),
+  'the conditional proof reports the rules it leaned on'
+);
 const out = await c.request('output', {
   book: opened.book,
   output_ref: red.output_ref,

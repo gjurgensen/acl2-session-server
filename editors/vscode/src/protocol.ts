@@ -31,6 +31,14 @@ export interface CheckpointEvent {
   term: string;
 }
 
+export interface InnerEventWire {
+  name: string;
+  kind?: string;
+  time?: string;
+  prover_steps?: number;
+  abort_causes?: string;
+}
+
 export interface UnitEvent {
   book: string;
   revision: number;
@@ -46,8 +54,16 @@ export interface UnitEvent {
   error_line?: string;
   abort_cause?: string;
   prover_steps?: number;
+  warnings?: string;
+  time?: string;
+  hint_events?: string[];
+  splitter_rules?: string[];
   rules?: string[];
   checkpoints?: CheckpointEvent[];
+  pre_revert?: boolean;
+  forced?: boolean;
+  inner?: InnerEventWire[];
+  inner_total?: number;
 }
 
 export interface TailEvent {
