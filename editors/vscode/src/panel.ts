@@ -365,7 +365,10 @@ function render() {
     }
   }
   if (m.warnings) {
-    h += '<h3>Warnings</h3><pre>' + esc(m.warnings) + '</pre>';
+    // The daemon joins the kinds with ", ", so splitting counts them exactly.
+    const kinds = String(m.warnings).split(', ');
+    h += '<details open><summary><h3>Warnings (' + kinds.length + ')</h3></summary>' +
+      '<pre>' + esc(m.warnings) + '</pre></details>';
   }
   if ((m.hintEvents || []).length) {
     h += '<h3>Hints that fired</h3>' + codes(m.hintEvents);
@@ -388,13 +391,26 @@ function render() {
     h += '<details open><summary><h3>Inside this form (' + total + ')</h3></summary>' +
       '<table class="inner">' +
       inner.map((e) => {
+        // An empty steps cell has meant two different things: this event
+        // never entered the prover, and this event's detail was never read.
+        // A probed event has *something* -- kind, time, rules -- so a dash
+        // can say "no steps" where blank keeps meaning "not looked at".
+        const probed = !!(e.kind || e.time || (e.rules || []).length || e.proverSteps != null);
+        const steps = e.proverSteps != null
+          ? e.proverSteps + ' steps'
+          : (probed ? '<span title="the prover was not entered">&mdash;</span>' : '');
         let row = '<tr><td>' + esc(e.kind || '') + '</td>' +
           '<td><code>' + esc(e.name) + '</code></td>' +
           '<td class="meta">' + proveSecs(e.time) + '</td>' +
-          '<td class="meta">' + (e.proverSteps != null ? e.proverSteps + ' steps' : '') + '</td>' +
+          '<td class="meta">' + steps + '</td>' +
           '<td>' + (e.abortCauses ? '<span class="failtag">' + esc(strip(e.abortCauses)) + '</span>' : '') + '</td></tr>';
         if ((e.rules || []).length) {
-          row += '<tr><td></td><td colspan="4" class="innerrules">' + codes(e.rules) + '</td></tr>';
+          // Second-level detail, folded: the count keeps it visible that the
+          // rules are there without a wall of chips between one event's row
+          // and the next.
+          row += '<tr><td></td><td colspan="4" class="innerrules">' +
+            '<details><summary class="meta">rules (' + e.rules.length + ')</summary>' +
+            codes(e.rules) + '</details></td></tr>';
         }
         return row;
       }).join('') + '</table>';
