@@ -1,15 +1,13 @@
 // The status column and the washes: two renderers over the same paint map.
 //
 // `minimal` (the default) is a continuous gutter status column of bars, the
-// Dafny shape: gray over lines queued but not yet processed -- the
-// load-bearing signal on a book that takes minutes -- amber over the form
-// being proved, green over admitted forms ("actually good" is a positive
-// mark, not an absence), olive over conditional ones, red over
-// skipped/failed ones. Exactly one background survives: the conditional
-// wash, because "admitted assuming an unproved claim" is a region-shaped
-// soundness caveat, not a per-form status. Reds additionally carry the
-// diagnostic -- gutter presence plus a tight head-line squiggle is exactly
-// vscode-lean4's error treatment, not a double-marking.
+// Dafny shape, and nothing else -- the buffer text stays entirely unmarked.
+// Gray over lines queued but not yet processed (the load-bearing signal on
+// a book that takes minutes), blue over the form being proved, green over
+// admitted forms ("actually good" is a positive mark, not an absence),
+// yellow over conditional ones, red over skipped/failed ones. Every status
+// echoes in the overview ruler. The failure envelope's home is the panel;
+// there are no diagnostics and no washes here, one mark per fact.
 //
 // `wash` draws whole-form background washes, reds included, and no
 // diagnostics (the extension suppresses them in this mode).
@@ -88,16 +86,12 @@ export class Decorations {
       );
     }
     // The bars: pending neutral gray, running BLUE (true blue, hue 262),
-    // admitted green,
-    // conditional YELLOW (the bar only; the conditional wash keeps its
-    // olive family), red for the reds.
+    // admitted green, conditional YELLOW, red for the reds.
     this.pendingBar = gutterType(context, 'pending', 'rgba(136, 136, 136, 0.35)');
     this.runningBar = gutterType(context, 'running', 'rgba(90, 140, 210, 0.6)');
     this.admittedBar = gutterType(context, 'admitted', 'rgba(80, 160, 90, 0.35)');
-    // The conditional wash already marks the ruler; the red diagnostic marks
-    // its own lane. Neither bar doubles it.
-    this.condBar = gutterType(context, 'cond');
-    this.redBar = gutterType(context, 'red');
+    this.condBar = gutterType(context, 'cond', 'rgba(212, 172, 13, 0.5)');
+    this.redBar = gutterType(context, 'red', 'rgba(220, 60, 60, 0.6)');
     // The held-target indicator: a Q.E.D.-style box.
     this.target = vscode.window.createTextEditorDecorationType({
       after: { contentText: ' □', color: '#fabd2f', fontWeight: 'bold' },
@@ -130,11 +124,6 @@ export class Decorations {
         cond = of('conditional').map(span);
       }
       red = [...of('skipped'), ...of('failed')].map(span);
-      // The one surviving background; reds are the diagnostic plus the bar.
-      washRanges.set(
-        'conditional',
-        of('conditional').map(span)
-      );
     }
 
     // Every type is always set, so switching modes cleans up after itself.

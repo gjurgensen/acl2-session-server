@@ -47,7 +47,6 @@ const byId = new Map<string, BookSession>(); // key: daemon book id
 let decorations: Decorations;
 let outputView: OutputView;
 let panel: Panel;
-let diagnostics: vscode.DiagnosticCollection;
 let status: vscode.StatusBarItem;
 let channel: vscode.OutputChannel;
 
@@ -63,7 +62,6 @@ export function activate(context: vscode.ExtensionContext): void {
   decorations = new Decorations(context);
   outputView = new OutputView();
   panel = new Panel();
-  diagnostics = vscode.languages.createDiagnosticCollection('acl2-session');
   status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 10);
   channel = vscode.window.createOutputChannel('ACL2 Session');
 
@@ -91,7 +89,6 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     decorations,
     panel,
-    diagnostics,
     status,
     channel,
     vscode.workspace.registerTextDocumentContentProvider(SCHEME, outputView),
@@ -170,7 +167,6 @@ export function activate(context: vscode.ExtensionContext): void {
       if (e.affectsConfiguration('acl2-session')) {
         for (const s of books.values()) {
           paint(s);
-          refreshDiagnostics(s);
         }
       }
     })
@@ -291,7 +287,6 @@ function stopBook(s: BookSession): void {
   void client?.request('close', { book: s.id }).catch(() => undefined);
   books.delete(s.doc.uri.toString());
   byId.delete(s.id);
-  diagnostics.delete(s.doc.uri);
   for (const editor of vscode.window.visibleTextEditors) {
     if (editor.document === s.doc) {
       decorations.clear(editor);
@@ -344,7 +339,6 @@ function onState(p: StateEvent): void {
     return;
   }
   s.lastState = p;
-  refreshDiagnostics(s);
   paint(s);
   updateStatusBar(s);
   const shown = panel.shown();
@@ -359,7 +353,6 @@ function onUnit(p: UnitEvent): void {
     return;
   }
   s.unitEvents.set(p.index, p);
-  refreshDiagnostics(s);
   if (outputView.shownBook === s.id && outputView.shownUnit === p.index) {
     void showUnitOutput(s, p.index);
   }
@@ -427,53 +420,6 @@ function updateStatusBar(s: BookSession): void {
   } else {
     status.text = `$(check) ACL2: ${green}/${total} admitted`;
   }
-}
-
-/**
- * Reds are diagnostics in minimal mode -- squiggle confined to the form's
- * first line, envelope in the message -- and washes in wash mode, where no
- * diagnostics are emitted at all. One treatment per fact.
- */
-function refreshDiagnostics(s: BookSession): void {
-  if (mode() === 'wash') {
-    diagnostics.set(s.doc.uri, []);
-    return;
-  }
-  const units = s.lastState?.units ?? [];
-  const redNow = new Set(
-    units.filter((u) => u.status === 'skipped' || u.status === 'failed').map((u) => u.index)
-  );
-  const diags: vscode.Diagnostic[] = [];
-  for (const [index, e] of s.unitEvents) {
-    if (!redNow.has(index) || (e.outcome !== 'skipped' && e.outcome !== 'failed')) {
-      continue;
-    }
-    const range = new vscode.Range(e.line_start - 1, 0, e.line_start - 1, Number.MAX_SAFE_INTEGER);
-    const parts: string[] = [];
-    if (e.error_line) {
-      parts.push(e.error_line);
-    }
-    if (e.abort_cause) {
-      // Display-only strip; the wire keeps ACL2's own printing.
-      parts.push(`abort cause: ${e.abort_cause.replace(/^acl2::/i, '')}`);
-    }
-    for (const c of e.checkpoints ?? []) {
-      parts.push(`${c.kind} ${c.goal ?? ''}: ${c.term}`);
-    }
-    if (e.outcome === 'skipped') {
-      parts.push(
-        'admitted with proofs skipped; checking continued -- green below here is conditional on this claim'
-      );
-    }
-    const d = new vscode.Diagnostic(
-      range,
-      parts.join('\n') || 'ACL2: form failed',
-      vscode.DiagnosticSeverity.Error
-    );
-    d.source = 'acl2-session';
-    diags.push(d);
-  }
-  diagnostics.set(s.doc.uri, diags);
 }
 
 // ---- Output view and panel --------------------------------------------------

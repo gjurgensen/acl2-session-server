@@ -4,15 +4,15 @@ Live form-by-form checking of ACL2 books, as a thin client of the
 `acl2-session-editor` daemon (this repository's third crate). The daemon owns
 the session; this extension renders its event stream.
 
-The default rendering is a Lean-style **gutter status column**: a faint bar
-over every line still queued for processing (turning bright over the form
-being proved), a checkmark on each admitted form, and reds as Problems
-entries with the failure envelope -- error line, abort cause, checkpoints --
-squiggled on the form's first line. Forms admitted below a red one keep a
-background wash in the *other* green: they are conditional on an unproved
-claim, and that must be impossible to miss. All statuses also mark the
-scrollbar. Set `acl2-session.decorations` to `wash` for whole-form
-washes instead, with no diagnostics.
+The default rendering is a **gutter status column** of bars, and the buffer
+text stays entirely unmarked: gray over every line still queued for
+processing, blue over the form being proved, green over admitted forms,
+yellow over forms admitted below a red one (conditional on its unproved
+claim), red over a form admitted only under `skip-proofs` or failed
+outright. Every status also marks the scrollbar, and the failure envelope
+-- error line, abort cause, checkpoints -- lives in the panel. Set
+`acl2-session.decorations` to `wash` for whole-form background washes
+instead.
 
 **ACL2: Show Panel** opens a structured view beside the editor that follows
 the cursor: the form's status and timings, a failure's checkpoints as terms
