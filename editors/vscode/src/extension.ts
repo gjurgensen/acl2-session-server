@@ -373,12 +373,7 @@ function onTail(p: TailEvent): void {
     return;
   }
   if (outputView.shownBook === s.id && outputView.shownUnit === p.unit && p.unit !== null) {
-    outputView.set(
-      s.id,
-      p.unit,
-      `unit ${p.unit + 1} -- proving, ${Math.round(p.elapsed_ms / 1000)}s`,
-      p.text
-    );
+    outputView.set(s.id, p.unit, p.text);
   }
   panel.tail(p.book, p.unit, p.elapsed_ms, p.text);
   const secs = Math.round(p.elapsed_ms / 1000);
@@ -449,10 +444,9 @@ async function followOutputView(s: BookSession, force: boolean): Promise<void> {
 }
 
 async function showUnitOutput(s: BookSession, index: number): Promise<void> {
-  const total = s.lastState?.units.length ?? 0;
   const e = s.unitEvents.get(index);
   if (!e) {
-    outputView.set(s.id, index, `unit ${index + 1}/${total} -- not checked yet`, '');
+    outputView.set(s.id, index, '(not checked yet)');
     return;
   }
   try {
@@ -462,10 +456,9 @@ async function showUnitOutput(s: BookSession, index: number): Promise<void> {
       mode: 'tail',
       lines: 400,
     });
-    const label = `unit ${index + 1}/${total} -- ${e.outcome}${e.status ? ` (${e.status})` : ''}, ${r.total_lines} lines`;
-    outputView.set(s.id, index, label, r.text as string);
+    outputView.set(s.id, index, r.text as string);
   } catch (err) {
-    outputView.set(s.id, index, `unit ${index + 1}/${total}`, `(output unavailable: ${err})`);
+    outputView.set(s.id, index, `(output unavailable: ${err})`);
   }
 }
 
