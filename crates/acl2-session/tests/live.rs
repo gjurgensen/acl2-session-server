@@ -18,8 +18,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use acl2_session::{SyncOptions, 
-    Book, Budget, Health, Resumed, Session, SessionControl, Slice, Status, SyncMode,
+use acl2_session::{SyncOptions,
+    Book, Budget, Health, NameKind, Resumed, Session, SessionControl, Slice, Status, SyncMode,
     WorldChange,
 };
 
@@ -537,6 +537,67 @@ fn eval_leaves_the_world_alone_but_settings_stick() {
 
     let o = b.sync(None, D).expect("resync");
     assert_eq!((o.reused, o.admitted.len()), (2, 0), "the prefix is intact");
+    assert_eq!(b.health(D), Health::Ready);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `describe` answers the hover question, and answers it about the right file.
+///
+/// The three shapes a name comes in are all here, because they read different
+/// world properties: a function (`formals` + `guard`), a macro (`macro-args`,
+/// and no formals at all), and a theorem (`theorem`). So is the case that
+/// makes the feature worth having -- a name defined in an *included* book,
+/// which must come back attributed to that book's file rather than to this
+/// one. Names from this file report no book, which is how the caller tells
+/// "defined here" from "defined elsewhere".
+///
+/// The unknown-token case is the one that runs constantly in practice: every
+/// hover over a variable, a keyword, or a word in a comment lands here, and it
+/// has to be an ordinary `None` rather than a failed submission.
+#[test]
+#[ignore = "needs ACL2"]
+fn describe_answers_about_names_and_says_where_they_came_from() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("describe");
+    let book = dir.join("d.lisp");
+    write(&book, &[
+        "(in-package \"ACL2\")",
+        "(include-book \"std/util/bstar\" :dir :system)",
+        ALPHA,
+        "(defthm alpha-of-nil (equal (alpha nil) nil))",
+    ]);
+    let mut b = Book::open(&acl2, &book).expect("open");
+    assert!(b.sync(None, D).expect("sync").failed.is_none(), "the book goes in");
+
+    let f = b.describe("alpha", D).expect("query").expect("alpha is known");
+    assert_eq!(f.kind, NameKind::Function);
+    assert_eq!(f.formals.as_deref(), Some("(x)"), "formals come back as written");
+    assert!(f.book.is_none(), "defined in this file, so no book: {:?}", f.book);
+
+    let t = b.describe("alpha-of-nil", D).expect("query").expect("known");
+    assert_eq!(t.kind, NameKind::Theorem);
+    assert!(t.statement.is_some_and(|s| s.contains("alpha")), "with its statement");
+
+    // From an included book: a macro, whose formals live under `macro-args`,
+    // and whose attribution is the whole point -- `pe`'s include-book-path
+    // read back as a path we can open.
+    let m = b.describe("b*", D).expect("query").expect("b* is known");
+    assert_eq!(m.kind, NameKind::Macro);
+    assert!(m.formals.is_some_and(|a| a.contains("bindlist")), "macro args");
+    let bk = m.book.expect("a name from an included book reports one");
+    assert!(bk.contains("bstar.lisp"), "attributed to bstar, got {bk}");
+    let p = m.book_path.expect("and it resolves to a file");
+    assert!(p.is_file(), "which exists on disk: {}", p.display());
+
+    // Every hover over a variable or a comment word lands here.
+    assert!(b.describe("no-such-name-at-all", D).expect("query").is_none());
+    assert!(b.describe("(", D).expect("query").is_none(), "and unsafe tokens too");
+
+    // A query must be invisible: it neither disturbs the prefix nor, unlike
+    // `eval`, clears the prover state the failure machinery reads.
+    let o = b.sync(None, D).expect("resync");
+    assert_eq!((o.reused, o.admitted.len()), (4, 0), "the prefix is untouched");
     assert_eq!(b.health(D), Health::Ready);
 
     let _ = std::fs::remove_dir_all(&dir);

@@ -457,6 +457,71 @@ pub struct EvalResult {
     pub elapsed: Duration,
 }
 
+/// What a server-generated read-only probe reported. See [`Book::query`].
+///
+/// There is deliberately no `output_ref` and no failure envelope: a query's
+/// log is not worth an `OutputStore` slot, and a query that fails is a broken
+/// probe rather than something a user is debugging -- so what a caller needs
+/// is the raw text, to see what the probe actually printed.
+#[derive(Debug)]
+pub struct QueryResult {
+    pub outcome: Outcome,
+    /// One-line `<<<ASS-DATA key value>>>` pairs the probe printed.
+    pub data: Vec<(String, String)>,
+    /// `<<<ASS-BEGIN key>>>`/`<<<ASS-END key>>>` blocks -- where anything that
+    /// can wrap at ACL2's right margin has to go.
+    pub blocks: Vec<(String, String)>,
+    /// Everything ACL2 printed, for diagnosing a probe. Not a parsing surface.
+    pub output: String,
+    pub elapsed: Duration,
+    /// The form moved the command number, so it was not the read-only probe
+    /// its caller promised. Undone regardless; surfaced because it is a bug.
+    pub world_changed: bool,
+}
+
+impl QueryResult {
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.data.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+
+    pub fn block(&self, key: &str) -> Option<&str> {
+        self.blocks.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+}
+
+/// What kind of thing a name is, as the world records it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NameKind {
+    Function,
+    Macro,
+    Theorem,
+    Constant,
+    /// Known to the world, but none of the above -- a label, a stobj, a
+    /// package. Reported rather than hidden: "it exists" is already the
+    /// answer to "did my form go in".
+    Other,
+}
+
+/// What the world knows about one name. See [`Book::describe`].
+#[derive(Debug, Clone)]
+pub struct NameDetail {
+    pub name: String,
+    pub kind: NameKind,
+    /// Formals for a function, the argument list for a macro.
+    pub formals: Option<String>,
+    /// The guard term, when it is not trivially `t`.
+    pub guard: Option<String>,
+    /// The statement, for a theorem.
+    pub statement: Option<String>,
+    /// The book whose *text* defines it, as ACL2 names it. `None` means the
+    /// name came from this file or from ACL2 itself -- the two are told apart
+    /// by whether the file's own units introduced it, which the caller knows
+    /// and the world does not.
+    pub book: Option<String>,
+    /// `book` resolved to a path, when it could be.
+    pub book_path: Option<PathBuf>,
+}
+
 /// The failure envelope of an eval'd form.
 #[derive(Debug)]
 pub struct EvalFailure {
@@ -1120,6 +1185,71 @@ fn is_nil(v: &str) -> bool {
     t.is_empty() || t.eq_ignore_ascii_case("nil")
 }
 
+/// Rejoin a value ACL2 wrapped across lines.
+///
+/// Safe because `fmt` breaks at whitespace and never inside an atom: a long
+/// book path moves to the next line whole rather than being split, and a term
+/// rejoined with single spaces is the same term. Which is also why this must
+/// not be used on prover *prose*, where the layout is the content.
+fn flatten(v: &str) -> String {
+    v.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Whether a token can be spliced into a probe as a symbol.
+///
+/// This is the guard on the one place user text reaches generated Lisp. A
+/// token holding a paren would unbalance the probe, and an unbalanced probe
+/// does not fail politely -- ACL2 reads past the end of its own temp file and
+/// every later admission dies with "end of file" until the session is rebuilt.
+/// Quotes, `;` and `|` are the same class
+/// of hazard: they change how the rest of the form reads. Whitespace would
+/// splice two atoms where one was meant.
+///
+/// The permitted set is deliberately the ACL2 symbol constituents rather than
+/// an escaping scheme: a word under a cursor that is not a plain symbol is not
+/// a name this can answer about anyway.
+fn is_safe_symbol(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 256
+        && !name.chars().any(|c| {
+            c.is_whitespace()
+                || c.is_control()
+                || matches!(c, '(' | ')' | '"' | ';' | '|' | '\'' | '`' | ',' | '#' | '\\')
+        })
+}
+
+/// Ask the world about one name.
+///
+/// `decode-logical-name` is `pe`'s own path to the event, and
+/// `include-book-path` at that event's world tail is how `pe` prints the book
+/// chain (history-management.lisp:7106) -- event tuples themselves record no
+/// source location at all. `car` of the chain is the innermost book, i.e. the
+/// file whose text holds the form.
+///
+/// Total by construction: an unrecognised name gives `nil` from
+/// `decode-logical-name` and `:none` from every `getpropc`, measured, so a
+/// word under a cursor never turns into a failed submission.
+fn detail_probe(name: &str) -> String {
+    format!(
+        "(acl2::let* ((acl2::wrld (acl2::w acl2::state))\n\
+         (acl2::nm '{name})\n\
+         (acl2::ev (acl2::decode-logical-name acl2::nm acl2::wrld))\n\
+         (acl2::bk (acl2::and acl2::ev\n\
+         (acl2::global-val 'acl2::include-book-path acl2::ev))))\n\
+         (acl2::prog2$\n\
+         (acl2::cw \"~%<<<ASS-BEGIN detail>>>~%found ~x0~%formals ~x1~%guard ~x2~%\
+         margs ~x3~%thm ~x4~%const ~x5~%book ~x6~%<<<ASS-END detail>>>~%\"\n\
+         (acl2::if acl2::ev acl2::t acl2::nil)\n\
+         (acl2::getpropc acl2::nm 'acl2::formals :none acl2::wrld)\n\
+         (acl2::getpropc acl2::nm 'acl2::guard :none acl2::wrld)\n\
+         (acl2::getpropc acl2::nm 'acl2::macro-args :none acl2::wrld)\n\
+         (acl2::getpropc acl2::nm 'acl2::theorem :none acl2::wrld)\n\
+         (acl2::getpropc acl2::nm 'acl2::const :none acl2::wrld)\n\
+         (acl2::car acl2::bk))\n\
+         (acl2::value :invisible)))"
+    )
+}
+
 fn parse_checkpoints(sub: &crate::session::Submission) -> Checkpoints {
     let mut c = Checkpoints::default();
     let Some(body) = sub.block("ckpt") else { return c };
@@ -1574,6 +1704,146 @@ impl Book {
         let body = format!("{CLEAR_STALE}\n{form}\n{CMD_PROBE}");
         let sub = self.session.submit(&body, deadline)?;
         self.finish_eval(sub, deadline)
+    }
+
+    /// Ask the session a read-only question, on behalf of the server.
+    ///
+    /// This is `eval`'s infrastructure sibling, and the two differ in exactly
+    /// the ways an editor feature needs them to:
+    ///
+    /// - **No `CLEAR_STALE`.** An eval blanks `gag-state-saved`,
+    ///   `last-event-data` and `event-data-fal` so that its own failure cannot
+    ///   inherit a previous form's checkpoints. A query must do the opposite:
+    ///   it runs *between* units, on behalf of a hover the user did not think
+    ///   of as an action, and the machinery that reads those globals -- the
+    ///   post-failure probe, and continue-past-failure's probe-before-retry,
+    ///   which exists precisely because `gag-state-saved` survives a
+    ///   skip-proofs admission -- must see the world exactly as it would have
+    ///   without the query. A query that cleared them would make moving the
+    ///   cursor change what the next retry reports.
+    /// - **Nothing reaches the `OutputStore`.** Hovering a file walks hundreds
+    ///   of names; storing a log apiece would evict the unit logs the panel
+    ///   exists to show. The markers come back inline instead.
+    /// - **The answer is structured, not prose.** Callers get the `ASS-DATA`
+    ///   pairs and `ASS-BEGIN`/`ASS-END` blocks their probe printed, which is
+    ///   the same wrapping-tolerant protocol every other probe uses. Nobody
+    ///   parses printed Lisp out of `output`; it is carried only so a
+    ///   misbehaving probe can be diagnosed, which is the failure mode probes
+    ///   actually have (they are strings, so `cargo` never checks them).
+    ///
+    /// **The contract is on the caller: `form` must be server-generated and
+    /// world-neutral** -- `getpropc`, `global-val`, `table-alist`,
+    /// `decode-logical-name`. This is not a user surface; user text goes to
+    /// `eval`, which is built to survive it. The world is still checked
+    /// afterwards, and a change is still undone, because a probe that defines
+    /// something is a bug that should surface loudly rather than quietly leave
+    /// the world describing something the file does not.
+    pub fn query(&mut self, form: &str, deadline: Duration) -> Result<QueryResult, SyncError> {
+        if self.session.is_running() {
+            return Err(SyncError::Busy { index: self.running_unit() });
+        }
+        let body = format!("{form}\n{CMD_PROBE}");
+        let sub = self.session.submit(&body, deadline)?;
+        // Same reasoning as `finish_eval`: a form that failed aborted its `ld`
+        // before the trailing probe could run, so the number has to be asked
+        // for again rather than assumed unchanged.
+        let after: Option<i64> = match sub.get("cmd") {
+            Some(v) => v.parse().ok(),
+            None if sub.outcome == Outcome::Failed => self
+                .session
+                .submit(CMD_PROBE, deadline.max(PROBE_FLOOR))
+                .ok()
+                .and_then(|s| s.get("cmd").and_then(|v| v.parse().ok())),
+            None => None,
+        };
+        let mut world_changed = false;
+        if let (Some(a), Some(e)) = (after, self.expected_command_number())
+            && a != e
+        {
+            world_changed = true;
+            let keep = self.admitted.len();
+            match self.rollback_to(keep, deadline.max(PROBE_FLOOR)) {
+                Ok(()) => {}
+                Err(SyncError::RollbackFailed { .. })
+                | Err(SyncError::RollbackUnverified { .. }) => self.dirty = true,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(QueryResult {
+            outcome: sub.outcome,
+            data: sub.data,
+            blocks: sub.blocks,
+            output: sub.output,
+            elapsed: sub.elapsed,
+            world_changed,
+        })
+    }
+
+    /// What the world knows about one name -- the hover answer.
+    ///
+    /// Deliberately one round trip rather than a table lookup: measured at
+    /// 10 ms including `decode-logical-name`'s world scan, which is fast
+    /// enough that hover and go-to-definition never wait on the census walk.
+    /// The census exists for completion, which is the
+    /// one feature that has to enumerate.
+    ///
+    /// `Ok(None)` means the token is not a name this world knows -- an
+    /// ordinary answer for a word under a cursor, not an error.
+    pub fn describe(
+        &mut self,
+        name: &str,
+        deadline: Duration,
+    ) -> Result<Option<NameDetail>, SyncError> {
+        if !is_safe_symbol(name) {
+            return Ok(None);
+        }
+        let r = self.query(&detail_probe(name), deadline.max(PROBE_FLOOR))?;
+        let Some(body) = r.block("detail") else { return Ok(None) };
+        let pairs = keyed_block(
+            body,
+            &["found", "formals", "guard", "margs", "thm", "const", "book"],
+        );
+        let get = |k: &str| {
+            pairs
+                .iter()
+                .find(|(pk, _)| pk == k)
+                .map(|(_, v)| flatten(v))
+                .filter(|v| !v.is_empty() && v != ":none")
+        };
+        let found = get("found").is_some_and(|v| !is_nil(&v));
+        let formals = get("formals");
+        let margs = get("margs");
+        let theorem = get("thm");
+        let constant = get("const");
+        if !found && formals.is_none() && margs.is_none() && theorem.is_none()
+            && constant.is_none()
+        {
+            return Ok(None);
+        }
+        // Formals first: a name carrying both is a function with a macro
+        // wrapper, and the function is the richer answer -- it has a guard.
+        let kind = if formals.is_some() {
+            NameKind::Function
+        } else if margs.is_some() {
+            NameKind::Macro
+        } else if theorem.is_some() {
+            NameKind::Theorem
+        } else if constant.is_some() {
+            NameKind::Constant
+        } else {
+            NameKind::Other
+        };
+        let book = get("book").filter(|b| !is_nil(b));
+        let book_path = book.as_deref().and_then(|b| self.resolve_dep(b));
+        Ok(Some(NameDetail {
+            name: name.to_string(),
+            kind,
+            formals: formals.or(margs),
+            guard: get("guard").filter(|g| !is_nil(g)),
+            statement: theorem,
+            book,
+            book_path,
+        }))
     }
 
     /// Turn a completed (or timed-out) eval submission into a result, undoing
@@ -3035,6 +3305,58 @@ fn resolve_target(units: &[Form], through_line: Option<usize>) -> Option<usize> 
 
 #[cfg(test)]
 mod tests {
+    /// Count parens outside string literals. Generated probes are checked
+    /// mechanically because the failure mode of getting this wrong is
+    /// spectacular and remote: an unbalanced probe makes ACL2 read past the
+    /// end of its own temp file, and *every later admission* dies with "end
+    /// of file" -- and `cargo` cannot see it, because a probe is a string.
+    fn paren_balance(s: &str) -> i32 {
+        let (mut depth, mut in_str, mut esc) = (0i32, false, false);
+        for c in s.chars() {
+            match () {
+                _ if esc => esc = false,
+                _ if c == '\\' && in_str => esc = true,
+                _ if c == '"' => in_str = !in_str,
+                _ if in_str => {}
+                _ if c == '(' => depth += 1,
+                _ if c == ')' => depth -= 1,
+                _ => {}
+            }
+        }
+        depth
+    }
+
+    #[test]
+    fn the_detail_probe_is_balanced() {
+        for name in ["append", "b*", "fty::deffixequiv", "foo->bar", "*const*"] {
+            let p = super::detail_probe(name);
+            assert_eq!(paren_balance(&p), 0, "unbalanced probe for {name}: {p}");
+        }
+    }
+
+    /// The one place user text reaches generated Lisp. Everything that could
+    /// change how the rest of the probe reads has to be refused here.
+    #[test]
+    fn unsafe_tokens_never_reach_a_probe() {
+        for good in ["append", "b*", "fty::deffixequiv", "foo->bar", "*c*", "<=", "1+"] {
+            assert!(super::is_safe_symbol(good), "{good} should be spliceable");
+        }
+        for bad in ["(", ")", "foo(", "a b", "\"s\"", "a;b", "|sym|", "a'b", "", "a\nb",
+                    "a#b", "a\\b", "a`b", "a,b"] {
+            assert!(!super::is_safe_symbol(bad), "{bad:?} must be refused");
+        }
+    }
+
+    /// ACL2 wraps at whitespace, never inside an atom, so rejoining a wrapped
+    /// value with single spaces reconstructs it exactly.
+    #[test]
+    fn a_wrapped_value_rejoins() {
+        assert_eq!(super::flatten("\n(:system . \"std/util/bstar.lisp\")"),
+                   "(:system . \"std/util/bstar.lisp\")");
+        assert_eq!(super::flatten("(if (symbolp recname)\n   (access-binder-listp pairs)\n 'nil)"),
+                   "(if (symbolp recname) (access-binder-listp pairs) 'nil)");
+    }
+
     /// A rune too long for ACL2's margin wraps, and must still come back as
     /// one item. This is the exact layout ACL2 produced for these three.
     #[test]
