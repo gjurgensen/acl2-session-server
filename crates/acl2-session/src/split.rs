@@ -72,6 +72,63 @@ pub fn split_str(text: &str) -> Result<Vec<Form>, SplitError> {
     split(text.as_bytes())
 }
 
+/// One `(<definer> <name> ...)` found in a book's text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefinerSite {
+    /// The definer, as written: `defun`, `std::define`, `fty::defprod`.
+    pub head: String,
+    /// The name it introduces, as written, package prefix and all.
+    pub name: String,
+    /// Byte offset of the opening paren.
+    pub offset: usize,
+    /// 1-based line of that paren.
+    pub line: usize,
+}
+
+/// Whether a head symbol looks like something that introduces a name.
+///
+/// Package-stripped and case-folded, then "starts with `def`" -- which covers
+/// `defun`, `defthm`, `define`, `defines`, `defrule`, `deflist`, `defprod`
+/// and the rest of the open-ended set books invent, without this having to
+/// know any of them. That openness is the point: a fixed list would go stale
+/// against the next macro someone writes.
+///
+/// It over-matches slightly -- `default-…` starts with `def` too -- and that
+/// is the right direction to err. The cost is an unused entry in an index;
+/// the cost of under-matching is a name that cannot be jumped to at all.
+fn is_definer(head: &str) -> bool {
+    let bare = head.rsplit("::").next().unwrap_or(head);
+    bare.len() >= 3 && bare[..3].eq_ignore_ascii_case("def")
+}
+
+/// Every `(<definer> <name> …)` in `text`, at any depth.
+///
+/// Lexical like the rest of this module, and structural rather than a regex
+/// over lines: `mutual-recursion`, `defines`, `encapsulate` and `defsection`
+/// hold their definers *inside* them, so a scan that only looked at top-level
+/// forms would miss most of what a real book defines. Strings, `;` comments,
+/// `#| |#` blocks and `#\(` character literals are handled because the
+/// splitter's own reader is doing the walking -- this is the reason it lives
+/// here rather than in a caller.
+///
+/// Text that will not lex yields what was found before the trouble, rather
+/// than an error: an index is a convenience, and half of one still answers
+/// most questions. `split` remains the strict reader.
+pub fn definer_sites(text: &[u8]) -> Vec<DefinerSite> {
+    let sp = Splitter { s: text };
+    let mut out = Vec::new();
+    let mut i = 0;
+    loop {
+        let Ok(j) = sp.skip_ws(i) else { return out };
+        if j >= text.len() {
+            return out;
+        }
+        let Ok(end) = sp.datum(j) else { return out };
+        sp.definers_in(j, end, &mut out);
+        i = end;
+    }
+}
+
 /// Find `needle` in `hay`, returning its offset.
 fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || hay.len() < needle.len() {
@@ -152,6 +209,54 @@ impl<'a> Splitter<'a> {
 
     fn at(&self, i: usize, c: u8) -> bool {
         i < self.s.len() && self.s[i] == c
+    }
+
+    /// Record the definer sites in the datum spanning `[start, end)`, then
+    /// recurse into every sublist. See [`definer_sites`].
+    fn definers_in(&self, start: usize, end: usize, out: &mut Vec<DefinerSite>) {
+        if !self.at(start, b'(') {
+            return;
+        }
+        // The head and the datum after it, if both are plain atoms. A head
+        // that is itself a list -- `((lambda …) x)` -- introduces nothing.
+        let Ok(h0) = self.skip_ws(start + 1) else { return };
+        if h0 >= end || self.s[h0] == b'(' {
+            return;
+        }
+        if let Ok(h1) = self.datum(h0)
+            && h1 <= end
+            && let Ok(n0) = self.skip_ws(h1)
+            && n0 < end
+            && self.s[n0] != b'('
+            && let Ok(n1) = self.datum(n0)
+            && n1 <= end
+        {
+            let head = String::from_utf8_lossy(&self.s[h0..h1]).into_owned();
+            let name = String::from_utf8_lossy(&self.s[n0..n1]).into_owned();
+            if is_definer(&head) && !name.is_empty() {
+                out.push(DefinerSite {
+                    head,
+                    name,
+                    offset: start,
+                    line: line_of(self.s, start),
+                });
+            }
+        }
+        // Every element, so a definer nested inside `encapsulate`, `defines`
+        // or `mutual-recursion` is found too.
+        let mut i = start + 1;
+        loop {
+            let Ok(j) = self.skip_ws(i) else { return };
+            if j >= end || self.s[j] == b')' {
+                return;
+            }
+            let Ok(k) = self.datum(j) else { return };
+            if k > end {
+                return;
+            }
+            self.definers_in(j, k, out);
+            i = k;
+        }
     }
 
     /// Return the offset just past the datum starting at or after `i`.
@@ -608,5 +713,62 @@ mod tests {
         let e = split_str("(a \"oops)").unwrap_err();
         assert!(e.message.contains("string"));
         assert!(split_str(")").is_err());
+    }
+
+    fn sites(src: &str) -> Vec<(String, usize)> {
+        super::definer_sites(src.as_bytes())
+            .into_iter()
+            .map(|d| (d.name, d.line))
+            .collect()
+    }
+
+    /// Most of a real book's definitions are *inside* something, so a scan of
+    /// top-level heads would find almost none of them.
+    #[test]
+    fn definers_are_found_at_every_depth() {
+        let src = "(defun alpha (x) x)\n\
+                   (mutual-recursion\n\
+                     (defun beta (x) x)\n\
+                     (defun gamma (x) x))\n\
+                   (encapsulate ()\n\
+                     (local (defthm delta (equal 1 1))))\n\
+                   (std::define epsilon (x) x)\n";
+        assert_eq!(
+            sites(src),
+            vec![
+                ("alpha".into(), 1),
+                ("beta".into(), 3),
+                ("gamma".into(), 4),
+                ("delta".into(), 6),
+                ("epsilon".into(), 7),
+            ]
+        );
+    }
+
+    /// A definer name inside a string, a comment or a character literal is
+    /// not a definition. This is exactly why the scan reuses the reader
+    /// rather than matching lines.
+    #[test]
+    fn definers_respect_strings_comments_and_char_literals() {
+        let src = "; (defun commented (x) x)\n\
+                   (defconst *doc* \"(defun instring (x) x)\")\n\
+                   #|\n(defun blocked (x) x)\n|#\n\
+                   (defun real-one (c) (equal c #\\())\n";
+        let found: Vec<String> = sites(src).into_iter().map(|(n, _)| n).collect();
+        assert_eq!(found, vec!["*doc*".to_string(), "real-one".to_string()],
+                   "only the two genuine definers, got {found:?}");
+    }
+
+    /// The head may be a list, and the name may be absent entirely; neither
+    /// should be mistaken for a definition or panic the walk.
+    #[test]
+    fn odd_forms_introduce_nothing() {
+        assert!(sites("((lambda (x) x) 1)").is_empty());
+        assert!(sites("(defun)").is_empty(), "a definer with no name");
+        assert!(sites("(defun (x) x)").is_empty(), "nor a list where a name goes");
+        assert!(sites("(not-a-definer foo)").is_empty());
+        // Unlexable text yields what was found before the trouble.
+        assert_eq!(sites("(defun good (x) x)\n(defun bad (x"),
+                   vec![("good".to_string(), 1)]);
     }
 }

@@ -24,7 +24,7 @@ pub mod split;
 pub mod sync;
 
 pub use session::{Outcome, Session, SessionControl, StatusSnapshot, Submission};
-pub use split::{split, split_str, Form, SplitError};
+pub use split::{definer_sites, split, split_str, DefinerSite, Form, SplitError};
 pub use registry::{Registry, RegistryError, SessionId};
 pub use cert::{Build, CertError};
 pub use image::{find_checkout, ImageError, ImagePolicy};

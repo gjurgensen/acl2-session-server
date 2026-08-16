@@ -104,3 +104,61 @@ fn splits_every_book_in_the_corpus() {
     }
     assert!(failures.is_empty(), "{} book(s) failed to split", failures.len());
 }
+
+/// The definer scan, at corpus scale.
+///
+/// It is a convenience index rather than a strict reader, so there is no
+/// "correct" answer to assert against. What can be asserted is that it never
+/// panics on real source, that it finds a plausible amount (a book tree
+/// defines a great many names), and -- the property that actually matters --
+/// that every site it reports really is a `(<definer> <name> ...)` in the
+/// text, so a jump never lands somewhere arbitrary.
+#[test]
+#[ignore = "needs ACL2_BOOKS pointing at a book tree"]
+fn definer_sites_hold_up_across_the_corpus() {
+    let root = match std::env::var("ACL2_BOOKS") {
+        Ok(r) => PathBuf::from(r),
+        Err(_) => {
+            eprintln!("ACL2_BOOKS not set; skipping");
+            return;
+        }
+    };
+    let mut files = Vec::new();
+    lisp_files(&root, &mut files);
+    let (mut sites, mut with_none, mut bad) = (0usize, 0usize, Vec::new());
+    for f in &files {
+        let Ok(bytes) = std::fs::read(f) else { continue };
+        let found = acl2_session::definer_sites(&bytes);
+        if found.is_empty() {
+            with_none += 1;
+        }
+        sites += found.len();
+        for d in &found {
+            // The offset must point at the paren of a form whose head is the
+            // definer we reported. Checked on every site, since an index that
+            // pointed one form off would be worse than no index.
+            let at = bytes.get(d.offset).copied();
+            if at != Some(b'(') {
+                bad.push(format!("{}:{}: offset is not a form start", f.display(), d.line));
+                continue;
+            }
+            let rest = &bytes[d.offset + 1..];
+            let head_start = rest.iter().position(|c| !c.is_ascii_whitespace()).unwrap_or(0);
+            if !rest[head_start..].starts_with(d.head.as_bytes()) {
+                bad.push(format!("{}:{}: head is not {:?}", f.display(), d.line, d.head));
+            }
+            if d.line == 0 {
+                bad.push(format!("{}: line 0 is not a line", f.display()));
+            }
+        }
+    }
+    println!(
+        "books: {}  definer sites: {}  books defining nothing: {}",
+        files.len(), sites, with_none
+    );
+    for b in bad.iter().take(20) {
+        println!("  FAIL {b}");
+    }
+    assert!(bad.is_empty(), "{} bad site(s)", bad.len());
+    assert!(sites > files.len(), "a book tree defines more names than it has files");
+}
