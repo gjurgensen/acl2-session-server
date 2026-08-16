@@ -52,11 +52,38 @@ export class OutputView implements vscode.TextDocumentContentProvider {
   }
 
   async open(): Promise<void> {
-    const doc = await vscode.workspace.openTextDocument(this.uri);
+    const doc = await this.applyLanguage(await vscode.workspace.openTextDocument(this.uri));
     await vscode.window.showTextDocument(doc, {
       viewColumn: vscode.ViewColumn.Beside,
       preserveFocus: true,
       preview: true,
     });
   }
+
+  /** Re-read the setting for a document that is already open. */
+  async refreshLanguage(): Promise<void> {
+    for (const e of vscode.window.visibleTextEditors) {
+      if (e.document.uri.scheme === this.scheme) {
+        await this.applyLanguage(e.document);
+      }
+    }
+  }
+
+  /**
+   * These are the one surface where highlighting cannot be done by shipping
+   * spans -- a TextDocument is colored by a grammar chosen from its language,
+   * and nothing else. So the log's language is `acl2-output` when the setting
+   * is on and plain text when it is off.
+   *
+   * `setTextDocumentLanguage` returns the document under its new language;
+   * the old handle is stale, so the result is what gets shown.
+   */
+  private async applyLanguage(doc: vscode.TextDocument): Promise<vscode.TextDocument> {
+    const want = highlightOutput() ? 'acl2-output' : 'plaintext';
+    return doc.languageId === want ? doc : vscode.languages.setTextDocumentLanguage(doc, want);
+  }
+}
+
+function highlightOutput(): boolean {
+  return vscode.workspace.getConfiguration('acl2-session').get<boolean>('highlightOutput', true);
 }

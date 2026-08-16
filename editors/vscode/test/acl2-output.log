@@ -1,0 +1,109 @@
+;;;; ===== unit 1 (admitted) =====
+The admission of alpha is trivial, using the relation o< (which is
+known to be well-founded on the domain recognized by o-p) and the measure
+(acl2-count x).  We observe that the type of alpha is described by
+the theorem (equal (alpha x) nil).  
+
+Summary
+Form:  ( defun alpha ...)
+Rules: nil
+Time:  0.00 seconds (prove: 0.00, print: 0.00, other: 0.00)
+ alpha
+
+
+
+
+
+;;;; ===== unit 2 (skipped) =====
+*1 (the initial Goal, a key checkpoint) is pushed for proof by induction.
+
+Perhaps we can prove *1 by induction.  Two induction schemes are suggested
+by this conjecture.  We will choose arbitrarily among these.  
+
+We will induct according to a scheme suggested by (append x y).
+
+This suggestion was produced using the :induction rule binary-append.
+If we let (:p x y) denote *1 above then the induction scheme we'll
+use is
+(and (implies (and (not (endp x)) (:p (cdr x) y))
+              (:p x y))
+     (implies (endp x) (:p x y))).
+This induction is justified by the same argument used to admit binary-append.
+When applied to the goal at hand the above induction scheme produces
+two nontautological subgoals.
+Subgoal *1/2
+Subgoal *1/2'
+Subgoal *1/2''
+Subgoal *1/2'''
+Subgoal *1/2'4'
+Subgoal *1/2'5'
+
+([ A key checkpoint while proving *1 (descended from Goal):
+
+Subgoal *1/2''
+(implies (and (consp x)
+              (equal (append (cdr x) y)
+                     (append y (cdr x))))
+         (equal (cons (car x) (append y (cdr x)))
+                (append y x)))
+
+Normally we would attempt to prove Subgoal *1/2'5' by induction.  However,
+that would cause the induction-depth-limit of 1 to be exceeded.  See
+:DOC induction-depth-limit.
+
+])
+
+Summary
+Form:  ( defthm hard-one ...)
+Rules: ((:definition binary-append)
+        (:definition endp)
+        (:definition not)
+        (:elim car-cdr-elim)
+        (:fake-rune-for-type-set nil)
+        (:induction binary-append))
+Time:  0.00 seconds (prove: 0.00, print: 0.00, other: 0.00)
+Prover steps counted:  745
+
+---
+The key checkpoint goals, below, may help you to debug this failure.
+See :DOC failure and see :DOC set-checkpoint-summary-limit.
+---
+
+*** Key checkpoint at the top level: ***
+
+Goal
+(equal (append x y) (append y x))
+
+*** Key checkpoint under a top-level induction
+    before the induction-depth-limit stopped the proof attempt: ***
+
+Subgoal *1/2''
+(implies (and (consp x)
+              (equal (append (cdr x) y)
+                     (append y (cdr x))))
+         (equal (cons (car x) (append y (cdr x)))
+                (append y x)))
+
+ACL2 Error [Failure] in ( defthm hard-one ...):  See :DOC failure.
+
+******** FAILED ********
+
+;;;; ===== unit 3 (admitted) =====
+Q.E.D.
+
+Summary
+Form:  ( defthm fine-one ...)
+Rules: ((:fake-rune-for-type-set nil)
+        (:type-prescription alpha))
+Time:  0.00 seconds (prove: 0.00, print: 0.00, other: 0.00)
+ fine-one
+
+
+
+
+
+;;;; ===== eval (pe 'alpha) =====
+ L         4  (defun alpha (x)
+                (if (consp x) (alpha (cdr x)) nil))
+
+

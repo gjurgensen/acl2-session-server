@@ -157,6 +157,38 @@ machine the extension is installed on, and DejaVu Sans may not be there.
 Regenerate with `python3 tools/mkicon.py media` (needs `fonttools`) rather
 than editing the path data; the PNG is that SVG rasterised at 256px.
 
+## Highlighting the output log
+
+The log is not a Lisp file. It is prose with Lisp embedded in it, and prose
+is hostile to a Lisp grammar: `Subgoal *1/2''` and `we'll` are apostrophes
+that open a quote, and one stray `"` opens a string. TextMate carries a rule
+stack across lines, so an escape does not end at the line -- it ends at the
+end of the file.
+
+So `syntaxes/acl2-output.tmLanguage.json` never runs the ACL2 grammar over
+the log. It marks what is unambiguous from the line alone -- goal headers,
+`Summary`/`Form:`/`Rules:`/`Time:` labels, `ACL2 Error`, `FAILED`, `Q.E.D.`
+-- and enters the real grammar only inside *islands*: the term under a goal
+header, the rune list after `Rules:`, the form printed by `pe`.
+
+Each island is a `begin`/`while` block. `while` is re-tested at the start of
+every line and pops the block **regardless of what is open inside it**, so an
+unterminated string in a truncated term costs one block rather than the rest
+of the log. That is the whole containment argument, and `output-grammar.mjs`
+proves it: five adversarial inputs open a string, a block comment, an
+unbalanced paren and a bar-quoted symbol inside islands, and assert the prose
+after each comes out clean.
+
+Two known limits, both deliberate. A term whose first line ends in a bare
+symbol is not highlighted -- the opening line must close a paren, which is
+what keeps a wrapped sentence like `(acl2-count x).  We observe that ...`
+from opening a block. And nothing highlights inside prose, including terms
+mentioned inline. Under-highlighting is the right way to be wrong here.
+
+`acl2-session.highlightOutput` turns it off; the log is then plain text.
+The panel and console still colour *terms* the daemon sends as structure,
+which is exact rather than best-effort, and is unaffected by this setting.
+
 To keep another Lisp extension on `.lisp` instead, override the association:
 
 ```json
@@ -221,14 +253,21 @@ its turn, close. The editor UI is the only layer this does not cover.
 
 ```sh
 node webview.mjs
+node output-grammar.mjs
 ```
 
-Needs neither daemon nor ACL2. Both webviews are strings, so nothing in them
-is reachable from `tsc` or from the smoke test, and a syntax error in one
-shows up only as a window that silently does nothing. This builds each page
-and compiles its script, then lifts out the function deciding whether Enter
-submits a form and exercises it against strings, character literals,
-bar-quoted symbols and both comment syntaxes. That one is tested because
-getting it wrong is not cosmetic: an unbalanced form sent to the session
-swallows the marker that ends it, and ACL2 waits for the rest of the input
-until something interrupts.
+Neither needs a daemon or ACL2.
+
+`webview.mjs`: both webviews are strings, so nothing in them is reachable
+from `tsc` or from the smoke test, and a syntax error in one shows up only as
+a window that silently does nothing. This builds each page and compiles its
+script, then lifts out the function deciding whether Enter submits a form and
+exercises it against strings, character literals, bar-quoted symbols and both
+comment syntaxes. That one is tested because getting it wrong is not
+cosmetic: an unbalanced form sent to the session swallows the marker that
+ends it, and ACL2 waits for the rest of the input until something interrupts.
+
+`output-grammar.mjs`: runs the output grammar under the real TextMate engine
+over a captured ACL2 transcript (`test/acl2-output.log`) and over adversarial
+inputs, asserting both that the right things are marked and -- the load-bearing
+property -- that no island can outlive the first unindented line after it.

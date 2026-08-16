@@ -1,0 +1,72 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "ACL2 Output",
+  "scopeName": "source.acl2-output",
+  "patterns": [
+    { "include": "#error" },
+    { "include": "#warning" },
+    { "include": "#qed" },
+    { "include": "#banner" },
+    { "include": "#summary-label" },
+    { "include": "#rules-list" },
+    { "include": "#goal-header" },
+    { "include": "#pe-form" },
+    { "include": "#term-block" }
+  ],
+  "repository": {
+    "error": {
+      "match": "^(?:ACL2 Error.*|HARD ACL2 ERROR.*|\\*+ FAILED \\*+.*)$",
+      "name": "invalid.illegal.error.acl2-output"
+    },
+    "warning": {
+      "match": "^ACL2 Warning.*$",
+      "name": "invalid.deprecated.warning.acl2-output"
+    },
+    "qed": {
+      "match": "^\\s*Q\\.E\\.D\\.\\s*$",
+      "name": "markup.inserted.qed.acl2-output"
+    },
+    "banner": {
+      "comment": "*** Key checkpoint at the top level: *** and its continuations.",
+      "match": "^\\*\\*\\*.*$|^\\s+before the .*\\*\\*\\*$",
+      "name": "entity.name.section.banner.acl2-output"
+    },
+    "summary-label": {
+      "comment": "Only the label. What follows is prose or a form, and Rules: has its own rule.",
+      "match": "^(?:Summary|Form:|Time:|Prover steps counted:)",
+      "name": "keyword.control.summary.acl2-output"
+    },
+    "goal-header": {
+      "comment": "A goal name alone on its line: Goal, Goal', Subgoal *1/2'', *1. Anchored to end-of-line, because `*1 (the initial Goal...) is pushed` is prose that opens the same way.",
+      "match": "^(?:Goal'*|Subgoal \\S+|\\*[0-9]+(?:\\.[0-9]+)*)\\s*$",
+      "name": "entity.name.section.goal.acl2-output"
+    },
+
+    "rules-list": {
+      "comment": "`Rules: nil`, or a rune list running over several indented lines.",
+      "begin": "^(Rules:)",
+      "beginCaptures": {
+        "1": { "name": "keyword.control.summary.acl2-output" }
+      },
+      "while": "^(?=\\s+\\S)",
+      "patterns": [{ "include": "#island" }]
+    },
+    "pe-form": {
+      "comment": "`pe` and friends print a form after a label column: ` L         4  (defun ...`.",
+      "begin": "^\\s{0,2}[A-Z]?\\s+[0-9]+\\s+(?=\\()",
+      "while": "^(?=\\s+\\S)",
+      "patterns": [{ "include": "#island" }]
+    },
+    "term-block": {
+      "comment": "A term printed at column zero, continuing while its lines stay indented -- which is how ACL2 prints goals and induction schemes. Two guards on the opening line. `([` is excluded: it opens a checkpoint bracket whose line is prose. And the line must END in a close paren, because ACL2 wraps prose to about seventy columns and a sentence that happens to begin with a term (`(acl2-count x).  We observe that ...`) otherwise opens a block. ACL2's printer breaks after complete subterms, so a real term's first line almost always closes one; the cost is missing a term whose first line ends in a bare symbol, and under-highlighting is the right way to be wrong here.",
+      "begin": "^(?=\\((?!\\[))(?=.*\\)\\s*$)",
+      "while": "^(?=\\s+\\S)",
+      "patterns": [{ "include": "#island" }]
+    },
+
+    "island": {
+      "comment": "The real ACL2 grammar, but only ever inside a block whose extent is decided by indentation. `while` is re-tested at the start of every line and pops the block regardless of what is open inside it, so an unterminated string in a truncated term costs one block rather than the rest of the log. That containment is the whole design.",
+      "patterns": [{ "include": "source.acl2" }]
+    }
+  }
+}

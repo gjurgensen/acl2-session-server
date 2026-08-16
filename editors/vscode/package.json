@@ -34,6 +34,12 @@
           ".acl2"
         ],
         "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "acl2-output",
+        "aliases": [
+          "ACL2 Output"
+        ]
       }
     ],
     "grammars": [
@@ -41,6 +47,11 @@
         "language": "acl2",
         "scopeName": "source.acl2",
         "path": "./syntaxes/acl2.tmLanguage.json"
+      },
+      {
+        "language": "acl2-output",
+        "scopeName": "source.acl2-output",
+        "path": "./syntaxes/acl2-output.tmLanguage.json"
       }
     ],
     "colors": [
@@ -221,6 +232,11 @@
           "type": "boolean",
           "default": true,
           "description": "In minimal mode, mark admitted forms with a green gutter bar (olive for conditional). Off, absence means admitted."
+        },
+        "acl2-session.highlightOutput": {
+          "type": "boolean",
+          "default": true,
+          "description": "Highlight ACL2's output log: goal headers, errors and Q.E.D. as markers, and the terms inside goals, rune lists and `pe` forms as Lisp. Best effort -- the log is prose with Lisp embedded in it, so a misread is possible; off, the log is plain text."
         }
       }
     },

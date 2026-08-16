@@ -250,6 +250,10 @@ export function activate(context: vscode.ExtensionContext): void {
           paint(s);
         }
       }
+      if (e.affectsConfiguration('acl2-session.highlightOutput')) {
+        void outputView.refreshLanguage();
+        void evalView.refreshLanguage();
+      }
     })
   );
   refreshContext();
