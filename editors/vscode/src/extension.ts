@@ -3,10 +3,16 @@
 // One daemon per window, one book per document. The extension is a thin
 // renderer of the daemon's event stream: edits become `update` notifications
 // (debounced, stamped with the document's own version as the revision), and
-// `state` events become decorations, `unit` envelopes become diagnostics and
-// output-view content, `settled` and `tail` drive the status bar. The
-// target -- how far auto-admission goes -- is client state, sent with every
-// update, so retraction holds exactly as prescribed.
+// `state` events become the status column, `unit` envelopes become
+// diagnostics, panel content and output-view content, `settled` and `tail`
+// drive the status bar. The target -- how far auto-admission goes -- is
+// client state, sent with every update, so retraction holds exactly as
+// prescribed.
+//
+// Rendering modes: `minimal` marks pending/running work in the
+// gutter, admitted forms with a checkmark, reds as head-line diagnostics,
+// and keeps only the conditional wash; `wash` draws whole-form washes,
+// reds included, and no diagnostics. One treatment per fact, never two.
 
 import * as vscode from 'vscode';
 import {
@@ -17,8 +23,9 @@ import {
   UnitEvent,
   UnitState,
 } from './protocol';
-import { Decorations } from './decorations';
+import { DecorationMode, Decorations } from './decorations';
 import { OutputView, SCHEME } from './outputView';
+import { Panel, PanelModel } from './panel';
 
 const UPDATE_DEBOUNCE_MS = 300;
 
@@ -28,7 +35,7 @@ interface BookSession {
   /** Held target line (1-based); null checks the whole book; 0 holds all. */
   target: number | null;
   lastState?: StateEvent;
-  /** Latest envelope per unit index, for diagnostics and the output view. */
+  /** Latest envelope per unit index, for diagnostics, panel and output view. */
   unitEvents: Map<number, UnitEvent>;
   debounce?: ReturnType<typeof setTimeout>;
 }
@@ -39,19 +46,51 @@ const byId = new Map<string, BookSession>(); // key: daemon book id
 
 let decorations: Decorations;
 let outputView: OutputView;
+let panel: Panel;
 let diagnostics: vscode.DiagnosticCollection;
 let status: vscode.StatusBarItem;
 let channel: vscode.OutputChannel;
 
+function mode(): DecorationMode {
+  return vscode.workspace.getConfiguration('acl2-session').get<DecorationMode>('decorations', 'minimal');
+}
+
+function gutterChecks(): boolean {
+  return vscode.workspace.getConfiguration('acl2-session').get<boolean>('gutterChecks', true);
+}
+
 export function activate(context: vscode.ExtensionContext): void {
-  decorations = new Decorations();
+  decorations = new Decorations(context);
   outputView = new OutputView();
+  panel = new Panel();
   diagnostics = vscode.languages.createDiagnosticCollection('acl2-session');
   status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 10);
   channel = vscode.window.createOutputChannel('ACL2 Session');
 
+  panel.onGoal = (m, goal, slot) => void fetchGoal(m, goal, slot);
+  panel.onFullLog = (m) => {
+    const s = byId.get(m.book);
+    if (s) {
+      void showUnitOutput(s, m.index).then(() => outputView.open());
+    }
+  };
+  panel.onRetract = (m) => {
+    const s = byId.get(m.book);
+    if (s) {
+      retractTo(s, m.index);
+    }
+  };
+  panel.onTarget = (m) => {
+    const s = byId.get(m.book);
+    if (s) {
+      s.target = m.lineEnd;
+      sendUpdate(s);
+    }
+  };
+
   context.subscriptions.push(
     decorations,
+    panel,
     diagnostics,
     status,
     channel,
@@ -62,7 +101,18 @@ export function activate(context: vscode.ExtensionContext): void {
       forBook((s) => void client?.request('interrupt', { book: s.id }).catch(report))
     ),
     vscode.commands.registerCommand('acl2-session.retractToCursor', () =>
-      forBook(retractToCursor)
+      forBook((s) => {
+        const units = s.lastState?.units ?? [];
+        const line = cursorLine();
+        // Mid-form snaps forward to that form's end.
+        let keep = 0;
+        for (const u of units) {
+          if (u.line_start <= line) {
+            keep = u.index + 1;
+          }
+        }
+        retractTo(s, keep);
+      })
     ),
     vscode.commands.registerCommand('acl2-session.targetAtCursor', () =>
       forBook((s) => {
@@ -78,8 +128,14 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
     vscode.commands.registerCommand('acl2-session.showOutput', () =>
       forBook(async (s) => {
-        await followCursor(s, true);
+        await followOutputView(s, true);
         await outputView.open();
+      })
+    ),
+    vscode.commands.registerCommand('acl2-session.showPanel', () =>
+      forBook((s) => {
+        panel.open();
+        void followPanel(s);
       })
     ),
     vscode.commands.registerCommand('acl2-session.gotoFrontier', () => forBook(gotoFrontier)),
@@ -95,13 +151,27 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.window.onDidChangeTextEditorSelection((e) => {
       const s = books.get(e.textEditor.document.uri.toString());
-      if (s && outputView.visible) {
-        void followCursor(s, false);
+      if (!s) {
+        return;
+      }
+      if (outputView.visible) {
+        void followOutputView(s, false);
+      }
+      if (panel.visible) {
+        void followPanel(s);
       }
     }),
     vscode.window.onDidChangeVisibleTextEditors(() => {
       for (const s of books.values()) {
         paint(s);
+      }
+    }),
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration('acl2-session')) {
+        for (const s of books.values()) {
+          paint(s);
+          refreshDiagnostics(s);
+        }
       }
     })
   );
@@ -243,16 +313,9 @@ function sendUpdate(s: BookSession): void {
   });
 }
 
-function retractToCursor(s: BookSession): void {
+/** Retract so that `keep` units remain, and hold the target there. */
+function retractTo(s: BookSession, keep: number): void {
   const units = s.lastState?.units ?? [];
-  const line = cursorLine();
-  // Mid-form snaps forward to that form's end.
-  let keep = 0;
-  for (const u of units) {
-    if (u.line_start <= line) {
-      keep = u.index + 1;
-    }
-  }
   const kept = keep > 0 ? units[keep - 1] : undefined;
   s.target = kept ? kept.line_end : 0;
   client?.notify('retract', { book: s.id, keep });
@@ -281,11 +344,13 @@ function onState(p: StateEvent): void {
     return;
   }
   s.lastState = p;
-  // Envelopes for units no longer red are stale for diagnostics but still
-  // fine for the output view, so only the diagnostics are pruned.
   refreshDiagnostics(s);
   paint(s);
   updateStatusBar(s);
+  const shown = panel.shown();
+  if (shown && shown.book === s.id) {
+    void followPanel(s, shown.index);
+  }
 }
 
 function onUnit(p: UnitEvent): void {
@@ -297,6 +362,10 @@ function onUnit(p: UnitEvent): void {
   refreshDiagnostics(s);
   if (outputView.shownBook === s.id && outputView.shownUnit === p.index) {
     void showUnitOutput(s, p.index);
+  }
+  const shown = panel.shown();
+  if (shown && shown.book === s.id && shown.index === p.index) {
+    void followPanel(s, p.index);
   }
 }
 
@@ -313,6 +382,7 @@ function onTail(p: TailEvent): void {
       p.text
     );
   }
+  panel.tail(p.book, p.unit, p.elapsed_ms, p.text);
   const secs = Math.round(p.elapsed_ms / 1000);
   status.text = `$(sync~spin) ACL2: proving ${p.unit === null ? '' : `${p.unit + 1}/${s.lastState?.units.length ?? '?'} `}(${secs}s)`;
 }
@@ -335,9 +405,11 @@ function paint(s: BookSession): void {
   if (!s.lastState) {
     return;
   }
+  const opts = { mode: mode(), gutterChecks: gutterChecks() };
   for (const editor of vscode.window.visibleTextEditors) {
     if (editor.document === s.doc) {
-      decorations.apply(editor, s.lastState.units);
+      decorations.apply(editor, s.lastState.units, opts);
+      decorations.applyTarget(editor, s.target);
     }
   }
 }
@@ -357,7 +429,16 @@ function updateStatusBar(s: BookSession): void {
   }
 }
 
+/**
+ * Reds are diagnostics in minimal mode -- squiggle confined to the form's
+ * first line, envelope in the message -- and washes in wash mode, where no
+ * diagnostics are emitted at all. One treatment per fact.
+ */
 function refreshDiagnostics(s: BookSession): void {
+  if (mode() === 'wash') {
+    diagnostics.set(s.doc.uri, []);
+    return;
+  }
   const units = s.lastState?.units ?? [];
   const redNow = new Set(
     units.filter((u) => u.status === 'skipped' || u.status === 'failed').map((u) => u.index)
@@ -367,7 +448,7 @@ function refreshDiagnostics(s: BookSession): void {
     if (!redNow.has(index) || (e.outcome !== 'skipped' && e.outcome !== 'failed')) {
       continue;
     }
-    const range = new vscode.Range(e.line_start - 1, 0, e.line_end - 1, Number.MAX_SAFE_INTEGER);
+    const range = new vscode.Range(e.line_start - 1, 0, e.line_start - 1, Number.MAX_SAFE_INTEGER);
     const parts: string[] = [];
     if (e.error_line) {
       parts.push(e.error_line);
@@ -394,13 +475,13 @@ function refreshDiagnostics(s: BookSession): void {
   diagnostics.set(s.doc.uri, diags);
 }
 
-// ---- Output view ------------------------------------------------------------
+// ---- Output view and panel --------------------------------------------------
 
 function unitAt(s: BookSession, line: number): UnitState | undefined {
   return s.lastState?.units.find((u) => u.line_start <= line && line <= u.line_end);
 }
 
-async function followCursor(s: BookSession, force: boolean): Promise<void> {
+async function followOutputView(s: BookSession, force: boolean): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor || editor.document !== s.doc) {
     return;
@@ -433,5 +514,79 @@ async function showUnitOutput(s: BookSession, index: number): Promise<void> {
     outputView.set(s.id, index, label, r.text as string);
   } catch (err) {
     outputView.set(s.id, index, `unit ${index + 1}/${total}`, `(output unavailable: ${err})`);
+  }
+}
+
+/** Update the panel for the form at the cursor (or a pinned INDEX). */
+async function followPanel(s: BookSession, index?: number): Promise<void> {
+  let at = index;
+  if (at === undefined) {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.document !== s.doc) {
+      return;
+    }
+    at = unitAt(s, editor.selection.active.line + 1)?.index;
+  }
+  if (at === undefined) {
+    return;
+  }
+  const model = buildPanelModel(s, at);
+  if (model) {
+    panel.render(model);
+  }
+}
+
+function buildPanelModel(s: BookSession, index: number): PanelModel | undefined {
+  const st = s.lastState;
+  const u = st?.units[index];
+  if (!st || !u) {
+    return undefined;
+  }
+  const model: PanelModel = {
+    book: s.id,
+    index,
+    total: st.units.length,
+    lineStart: u.line_start,
+    lineEnd: u.line_end,
+    status: u.status,
+    checkpoints: [],
+    rules: [],
+    skipped: u.status === 'skipped',
+  };
+  // A pending or running unit's cached envelope describes an earlier life
+  // (before a rollback re-queued it), so it is not shown.
+  if (u.status === 'pending' || u.status === 'running') {
+    return model;
+  }
+  const e = s.unitEvents.get(index);
+  if (e) {
+    model.elapsedMs = e.elapsed_ms;
+    model.proverSteps = e.prover_steps;
+    model.outputLines = e.output_lines;
+    model.errorLine = e.error_line;
+    model.abortCause = e.abort_cause;
+    model.checkpoints = e.checkpoints ?? [];
+    model.rules = e.rules ?? [];
+  }
+  return model;
+}
+
+async function fetchGoal(m: PanelModel, goal: string, slot: number): Promise<void> {
+  const s = byId.get(m.book);
+  const e = s?.unitEvents.get(m.index);
+  if (!s || !e) {
+    panel.goalResult(slot, '(no captured output for this form)');
+    return;
+  }
+  try {
+    const r = await client?.request('output', {
+      book: s.id,
+      output_ref: e.output_ref,
+      mode: 'goal',
+      text: goal,
+    });
+    panel.goalResult(slot, (r.text as string) || '(nothing captured under this goal)');
+  } catch (err) {
+    panel.goalResult(slot, `(output unavailable: ${err})`);
   }
 }

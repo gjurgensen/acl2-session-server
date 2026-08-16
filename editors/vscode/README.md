@@ -2,12 +2,25 @@
 
 Live form-by-form checking of ACL2 books, as a thin client of the
 `acl2-session-editor` daemon (this repository's third crate). The daemon owns
-the session; this extension renders its event stream: admitted forms get a
-green wash, a form admitted only under `skip-proofs` is red with a Problems
-entry, forms admitted below it are the *other* green (conditional on the
-unproved claim), and the form being proved is highlighted while its output
-streams. Edits resync automatically -- the daemon reuses the untouched
-prefix, rolls back to the first real change, and re-checks from there.
+the session; this extension renders its event stream.
+
+The default rendering is a Lean-style **gutter status column**: a faint bar
+over every line still queued for processing (turning bright over the form
+being proved), a checkmark on each admitted form, and reds as Problems
+entries with the failure envelope -- error line, abort cause, checkpoints --
+squiggled on the form's first line. Forms admitted below a red one keep a
+background wash in the *other* green: they are conditional on an unproved
+claim, and that must be impossible to miss. All statuses also mark the
+scrollbar. Set `acl2-session.decorations` to `wash` for whole-form
+washes instead, with no diagnostics.
+
+**ACL2: Show Panel** opens a structured view beside the editor that follows
+the cursor: the form's status and timings, a failure's checkpoints as terms
+with the prover's per-goal output one click away, the rules an admitted
+proof used, and a live tail while the form proves.
+
+Edits resync automatically -- the daemon reuses the untouched prefix, rolls
+back to the first real change, and re-checks from there.
 
 Zero runtime dependencies: the JSON-RPC framing is ~150 lines in
 [src/protocol.ts](src/protocol.ts), deliberately vscode-free so it can be

@@ -27,6 +27,7 @@
       { "command": "acl2-session.targetAtCursor", "title": "ACL2: Target at Cursor" },
       { "command": "acl2-session.clearTarget", "title": "ACL2: Clear Target" },
       { "command": "acl2-session.showOutput", "title": "ACL2: Show Output for Form at Cursor" },
+      { "command": "acl2-session.showPanel", "title": "ACL2: Show Panel" },
       { "command": "acl2-session.gotoFrontier", "title": "ACL2: Go to Frontier" }
     ],
     "configuration": {
@@ -47,6 +48,21 @@
           "items": { "type": "string" },
           "default": [],
           "description": "Directories whose ACL2 checkouts are trusted (--trusted, repeatable). ACL2_TRUSTED in the environment works too."
+        },
+        "acl2-session.decorations": {
+          "type": "string",
+          "enum": ["minimal", "wash"],
+          "default": "minimal",
+          "enumDescriptions": [
+            "Gutter status column: bars over unprocessed lines, a checkmark per admitted form, reds as diagnostics, and only the conditional wash.",
+            "Whole-form background washes, reds included, and no diagnostics."
+          ],
+          "description": "How unit statuses are rendered."
+        },
+        "acl2-session.gutterChecks": {
+          "type": "boolean",
+          "default": true,
+          "description": "In minimal mode, mark each admitted form's first line with a checkmark."
         }
       }
     }
