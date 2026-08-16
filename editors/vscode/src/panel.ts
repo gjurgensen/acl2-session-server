@@ -234,7 +234,20 @@ const vscode = acquireVsCodeApi();
 let model;
 const esc = (s) => String(s).replace(/[&<>"]/g,
   (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const strip = (s) => String(s).replace(/^acl2::/i, '');
+// Not anchored: the outer abort cause is a bare symbol, but an inner event's
+// causes arrive as a printed list -- \`(ACL2::INDUCTION-DEPTH-LIMIT-EXCEEDED)\`
+// -- where a leading-only strip never fires. Only \`acl2::\` goes, and only
+// where it is a whole package prefix, so \`my-acl2::\` is left alone.
+const strip = (s) => String(s).replace(/(?<![\\w-])acl2::/gi, '');
+
+// ACL2 hands us one cause or a list of them, printed as it prints lists. The
+// parentheses are a Lisp-ism the reader did not ask for and the plural is
+// the point, so peel the list and report the causes as causes.
+function causes(s) {
+  const t = String(s).trim();
+  const body = t.startsWith('(') && t.endsWith(')') ? t.slice(1, -1) : t;
+  return body.split(/\\s+/).filter(Boolean).map(strip);
+}
 
 // Terms arrive tokenized and colored by the extension, which ran them
 // through the same grammar and the same theme rules the editor uses. Here
@@ -340,7 +353,9 @@ function render() {
     h += '<h3>Failure</h3>';
     if (m.errorLine) { h += '<pre>' + esc(m.errorLine) + '</pre>'; }
     if (m.abortCause) {
-      h += '<p class="meta">abort cause: <code>' + esc(strip(m.abortCause)) + '</code></p>';
+      const cs = causes(m.abortCause);
+      h += '<p class="meta">abort cause' + (cs.length > 1 ? 's' : '') + ': ' +
+        cs.map((c) => '<code>' + esc(c) + '</code>').join(' ') + '</p>';
     }
     if (m.forced) {
       h += '<p class="meta">forced assumptions are present.</p>';
@@ -403,7 +418,8 @@ function render() {
           '<td><code>' + esc(e.name) + '</code></td>' +
           '<td class="meta">' + proveSecs(e.time) + '</td>' +
           '<td class="meta">' + steps + '</td>' +
-          '<td>' + (e.abortCauses ? '<span class="failtag">' + esc(strip(e.abortCauses)) + '</span>' : '') + '</td></tr>';
+          '<td>' + causes(e.abortCauses || '')
+            .map((c) => '<span class="failtag">' + esc(c) + '</span>').join(', ') + '</td></tr>';
         if ((e.rules || []).length) {
           // Second-level detail, folded: the count keeps it visible that the
           // rules are there without a wall of chips between one event's row
