@@ -130,16 +130,32 @@ comment, and of 244,608 definer heads none went unrecognized outside of the
 
 ## The mark
 
-`media/icon.svg` is a turnstile inside parentheses: the extension proves
-things, and what it proves them about is Lisp. Original work, deliberately.
-ACL2's own logo is BSD-licensed and could be copied, but that licence
-forbids using the project's name to promote derived works without written
-permission, and no permissive licence grants trademark rights in a logo.
-This borrows neither, so there is nothing to ask.
+`Q.E.D.` -- what ACL2 prints when a proof closes. Original work,
+deliberately. ACL2's own logo is BSD-licensed and could be copied, but that
+licence forbids using the project's name to promote derived works without
+written permission, and no permissive licence grants trademark rights in a
+logo. This borrows neither, so there is nothing to ask.
 
-The webview windows -- panel and console -- carry it as their tab icon.
-The output views cannot: they are text documents, and VSCode takes an editor
-tab's icon from the file icon theme with no per-document override.
+The marketplace icon brings its own near-black plate, because
+`package.json`'s `icon` is a single PNG with no light/dark variants: it is
+shown on white in the marketplace and on the user's own theme in the
+Extensions sidebar, and no one green reads well on both. The current green
+on white is 2.1:1. A plate makes the background ours rather than the
+viewer's, and the mark then reads everywhere.
+
+The tab icons are transparent instead, because they sit directly on the
+themed tab bar where a plate would look like a sticker -- and `iconPath`
+does take light and dark variants, so each green is tuned to its own
+background rather than splitting the difference. Panel and console carry
+them; the output views cannot, since they are text documents and VSCode
+takes an editor tab's icon from the file icon theme with no per-document
+override. At 16px on a 1x display three letters are a smudge; on the 2x
+display most people have, the tab renders at 32px, which holds.
+
+The letters are outlines, not `<text>`. These SVGs are rendered on whatever
+machine the extension is installed on, and DejaVu Sans may not be there.
+Regenerate with `python3 tools/mkicon.py media` (needs `fonttools`) rather
+than editing the path data; the PNG is that SVG rasterised at 256px.
 
 To keep another Lisp extension on `.lisp` instead, override the association:
 

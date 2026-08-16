@@ -1,11 +1,18 @@
-<!-- Tab icon for the ACL2 windows, dark themes. The plate is dropped: a tab
-     icon sits on the tab bar, not on a badge, and the strokes are heavier
-     than icon.svg's because this renders at 16px. -->
+<!-- The extension's mark: Q.E.D., which is what ACL2 prints when a proof
+     closes.
+
+     Original work, deliberately. ACL2's own logo is BSD-licensed and could be
+     copied, but that licence forbids using the project's name to promote
+     derived works without written permission, and no permissive licence
+     grants trademark rights in a logo. This borrows neither.
+
+     The letters are outlines, not <text>: these are rendered on whatever
+     machine the extension is installed on, and DejaVu Sans may not be there.
+     Regenerate with tools/mkicon.py, do not hand-edit the path data. -->
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
-  <g fill="none" stroke-linecap="round">
-    <path d="M80 58 C 50 94, 50 162, 80 198" stroke="#9aa7b4" stroke-width="18"/>
-    <path d="M176 58 C 206 94, 206 162, 176 198" stroke="#9aa7b4" stroke-width="18"/>
-    <path d="M102 76 L 102 180" stroke="#8ec07c" stroke-width="22"/>
-    <path d="M102 128 L 150 128" stroke="#8ec07c" stroke-width="22"/>
+  <g fill="#8ec07c">
+    <path transform="translate(22.000 162.0) scale(0.043802 -0.048828)" d="M911 -27H881Q512 -27 307.0 177.0Q102 381 102 745Q102 1108 306.5 1314.0Q511 1520 870 1520Q1233 1520 1435.5 1316.0Q1638 1112 1638 745Q1638 493 1530.5 311.0Q1423 129 1221 37L1522 -299H1155ZM870 1241Q694 1241 597.0 1111.0Q500 981 500 745Q500 505 595.0 377.5Q690 250 870 250Q1047 250 1144.0 380.0Q1241 510 1241 745Q1241 981 1144.0 1111.0Q1047 1241 870 1241Z"/>
+    <path transform="translate(98.259 162.0) scale(0.043802 -0.048828)" d="M188 1493H1227V1202H573V924H1188V633H573V291H1249V0H188Z"/>
+    <path transform="translate(159.537 162.0) scale(0.043802 -0.048828)" d="M573 1202V291H711Q947 291 1071.5 408.0Q1196 525 1196 748Q1196 970 1072.0 1086.0Q948 1202 711 1202ZM188 1493H594Q934 1493 1100.5 1444.5Q1267 1396 1386 1280Q1491 1179 1542.0 1047.0Q1593 915 1593 748Q1593 579 1542.0 446.5Q1491 314 1386 213Q1266 97 1098.0 48.5Q930 0 594 0H188Z"/>
   </g>
 </svg>
