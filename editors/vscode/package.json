@@ -40,6 +40,53 @@
         "path": "./syntaxes/acl2.tmLanguage.json"
       }
     ],
+    "colors": [
+      {
+        "id": "acl2Session.token.name",
+        "description": "Panel terms: defined names. Used only when the active theme's token colors could not be read; otherwise the panel takes its colors from the theme itself.",
+        "defaults": { "light": "terminal.ansiYellow", "dark": "terminal.ansiBrightYellow", "highContrast": "foreground", "highContrastLight": "foreground" }
+      },
+      {
+        "id": "acl2Session.token.keyword",
+        "description": "Panel terms: :keywords and rune classes, when the theme's token colors could not be read.",
+        "defaults": { "light": "terminal.ansiMagenta", "dark": "terminal.ansiBrightMagenta", "highContrast": "foreground", "highContrastLight": "foreground" }
+      },
+      {
+        "id": "acl2Session.token.constant",
+        "description": "Panel terms: t, nil and *constants*, when the theme's token colors could not be read.",
+        "defaults": { "light": "terminal.ansiBlue", "dark": "terminal.ansiBrightBlue", "highContrast": "foreground", "highContrastLight": "foreground" }
+      },
+      {
+        "id": "acl2Session.token.number",
+        "description": "Panel terms: numbers, when the theme's token colors could not be read.",
+        "defaults": { "light": "terminal.ansiMagenta", "dark": "terminal.ansiBrightMagenta", "highContrast": "foreground", "highContrastLight": "foreground" }
+      },
+      {
+        "id": "acl2Session.token.string",
+        "description": "Panel terms: strings and character literals, when the theme's token colors could not be read.",
+        "defaults": { "light": "terminal.ansiGreen", "dark": "terminal.ansiBrightGreen", "highContrast": "foreground", "highContrastLight": "foreground" }
+      },
+      {
+        "id": "acl2Session.token.comment",
+        "description": "Panel terms: comments, when the theme's token colors could not be read.",
+        "defaults": { "light": "terminal.ansiBrightBlack", "dark": "terminal.ansiBrightBlack", "highContrast": "foreground", "highContrastLight": "foreground" }
+      },
+      {
+        "id": "acl2Session.token.storage",
+        "description": "Panel terms: definer heads such as defthm, when the theme's token colors could not be read.",
+        "defaults": { "light": "terminal.ansiYellow", "dark": "terminal.ansiYellow", "highContrast": "foreground", "highContrastLight": "foreground" }
+      },
+      {
+        "id": "acl2Session.token.control",
+        "description": "Panel terms: binding and event forms, when the theme's token colors could not be read.",
+        "defaults": { "light": "terminal.ansiRed", "dark": "terminal.ansiBrightRed", "highContrast": "foreground", "highContrastLight": "foreground" }
+      },
+      {
+        "id": "acl2Session.token.punctuation",
+        "description": "Panel terms: parentheses, when the theme's token colors could not be read.",
+        "defaults": { "light": "terminal.ansiWhite", "dark": "terminal.ansiWhite", "highContrast": "foreground", "highContrastLight": "foreground" }
+      }
+    ],
     "commands": [
       {
         "command": "acl2-session.start",
@@ -128,5 +175,9 @@
     "@types/node": "^16.11.7",
     "@types/vscode": "^1.77.0",
     "typescript": "^5.0.2"
+  },
+  "dependencies": {
+    "vscode-oniguruma": "^2.0.1",
+    "vscode-textmate": "^9.3.2"
   }
 }

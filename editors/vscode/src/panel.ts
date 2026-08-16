@@ -5,13 +5,14 @@
 // a compound form, rules -- and streaming the live tail while that form
 // proves. Plain HTML on the editor's theme variables, zero dependencies.
 //
-// Terms are highlighted by a small Lisp tokenizer using the theme's
-// *terminal* palette: webviews do not receive the editor's token colors, but
-// the ANSI variables track the same theme family, so a gruvbox editor gets
-// gruvbox terms. The `acl2::` prefix on abort causes is stripped for display
-// only; the wire keeps ACL2's own printing.
+// Terms arrive already tokenized and already colored -- see highlight.ts,
+// which runs them through the book grammar and the active theme's own rules,
+// so a term here and the same term in the buffer look alike. The `acl2::`
+// prefix on abort causes is stripped for display only; the wire keeps ACL2's
+// own printing.
 
 import * as vscode from 'vscode';
+import { TokLines } from './highlight';
 
 export interface PanelCheckpoint {
   kind: string;
@@ -64,6 +65,13 @@ export class Panel {
   onRetract?: (model: PanelModel) => void;
   onTarget?: (model: PanelModel) => void;
 
+  /**
+   * Set by the extension once the grammar and theme are loaded. Terms travel
+   * to the webview already tokenized and already colored, because a webview
+   * can do neither for itself.
+   */
+  tokenizer?: (text: string) => TokLines | undefined;
+
   get visible(): boolean {
     return this.panel !== undefined;
   }
@@ -111,13 +119,40 @@ export class Panel {
       this.panel = undefined;
     });
     if (this.model) {
-      void this.panel.webview.postMessage({ kind: 'model', model: this.model });
+      this.post(this.model);
     }
   }
 
   render(model: PanelModel): void {
     this.model = model;
-    void this.panel?.webview.postMessage({ kind: 'model', model });
+    this.post(model);
+  }
+
+  /** Re-send the current model, for when the theme changed under us. */
+  refresh(): void {
+    if (this.model) {
+      this.post(this.model);
+    }
+  }
+
+  /**
+   * Every term and rune in the model, tokenized once and keyed by its own
+   * text: the webview looks a string up rather than carrying a tokenizer,
+   * and a rune repeated across a dozen events is tokenized once.
+   */
+  private post(model: PanelModel): void {
+    const toks: Record<string, TokLines> = {};
+    if (this.tokenizer) {
+      for (const s of highlightable(model)) {
+        if (!(s in toks)) {
+          const t = this.tokenizer(s);
+          if (t) {
+            toks[s] = t;
+          }
+        }
+      }
+    }
+    void this.panel?.webview.postMessage({ kind: 'model', model, toks });
   }
 
   tail(book: string, unit: number | null, elapsedMs: number, text: string): void {
@@ -135,6 +170,17 @@ export class Panel {
     this.panel?.dispose();
     this.panel = undefined;
   }
+}
+
+/** The strings in a model that are ACL2 code rather than prose. */
+function highlightable(m: PanelModel): string[] {
+  return [
+    ...m.checkpoints.map((c) => c.term),
+    ...(m.rules ?? []),
+    ...(m.hintEvents ?? []),
+    ...(m.splitterRules ?? []),
+    ...(m.inner ?? []).flatMap((e) => e.rules ?? []),
+  ];
 }
 
 const HTML = `<!DOCTYPE html>
@@ -179,14 +225,6 @@ details > summary h3 { display: inline; }
 table.inner { border-collapse: collapse; font-size: 12px; }
 table.inner td { padding: 1px 10px 1px 0; vertical-align: baseline; }
 .failtag { color: var(--vscode-terminal-ansiRed, #cc6666); font-weight: 600; }
-/* Lisp token colors ride the theme's terminal palette. */
-.p { color: var(--vscode-terminal-ansiBrightBlack, #888888); }
-.hd { color: var(--vscode-terminal-ansiBlue, #6a9fb5); }
-.kw { color: var(--vscode-terminal-ansiMagenta, #b48ead); }
-.st { color: var(--vscode-terminal-ansiGreen, #a3be8c); }
-.nu { color: var(--vscode-terminal-ansiCyan, #7fbfb4); }
-.qu { color: var(--vscode-terminal-ansiYellow, #d8b26a); }
-.cm { color: var(--vscode-terminal-ansiBrightBlack, #888888); font-style: italic; }
 </style>
 </head>
 <body>
@@ -198,45 +236,26 @@ const esc = (s) => String(s).replace(/[&<>"]/g,
   (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const strip = (s) => String(s).replace(/^acl2::/i, '');
 
-// A small Lisp tokenizer for term display. The head symbol of each list,
-// keywords, strings, numbers and quotes get theme-terminal colors.
+// Terms arrive tokenized and colored by the extension, which ran them
+// through the same grammar and the same theme rules the editor uses. Here
+// they are only spans; a string with no entry is code we were not asked to
+// highlight, or a tokenizer that has not finished loading.
+let toks = {};
 function hl(src) {
-  const s = String(src);
-  let out = '';
-  let expectHead = false;
-  const re = /([()])|("(?:[^"\\\\]|\\\\.)*"?)|(;[^\\n]*)|('+)|([^\\s()'";]+)|(\\s+)/g;
-  let m;
-  while ((m = re.exec(s))) {
-    if (m[1]) {
-      out += '<span class="p">' + m[1] + '</span>';
-      expectHead = m[1] === '(';
-    } else if (m[2]) {
-      out += '<span class="st">' + esc(m[2]) + '</span>';
-      expectHead = false;
-    } else if (m[3]) {
-      out += '<span class="cm">' + esc(m[3]) + '</span>';
-    } else if (m[4]) {
-      out += '<span class="qu">' + esc(m[4]) + '</span>';
-    } else if (m[5]) {
-      const t = m[5];
-      let cls = '';
-      if (expectHead) { cls = 'hd'; }
-      else if (t.startsWith(':')) { cls = 'kw'; }
-      else if (/^[+-]?[0-9]/.test(t)) { cls = 'nu'; }
-      else if (/^(nil|t)$/i.test(t)) { cls = 'kw'; }
-      out += cls ? '<span class="' + cls + '">' + esc(t) + '</span>' : esc(t);
-      expectHead = false;
-    } else if (m[6]) {
-      out += esc(m[6]); // whitespace keeps a pending head position
-    }
-  }
-  return out;
+  const lines = toks[String(src)];
+  if (!lines) { return esc(src); }
+  return lines.map((line) => line.map((t) =>
+    t.c
+      ? '<span style="color:' + t.c + (t.i ? ';font-style:italic' : '') + '">' + esc(t.t) + '</span>'
+      : esc(t.t)
+  ).join('')).join('\\n');
 }
 
 window.addEventListener('message', (ev) => {
   const m = ev.data;
   if (m.kind === 'model') {
     model = m.model;
+    toks = m.toks || {};
     render();
   } else if (m.kind === 'tail') {
     const t = document.getElementById('tailtext');

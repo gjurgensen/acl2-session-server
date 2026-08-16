@@ -25,6 +25,7 @@ import {
 } from './protocol';
 import { DecorationMode, Decorations } from './decorations';
 import { OutputView, SCHEME } from './outputView';
+import { Highlighter } from './highlight';
 import { Panel, PanelModel } from './panel';
 
 const UPDATE_DEBOUNCE_MS = 300;
@@ -47,6 +48,7 @@ const byId = new Map<string, BookSession>(); // key: daemon book id
 let decorations: Decorations;
 let outputView: OutputView;
 let panel: Panel;
+let highlighter: Highlighter;
 let status: vscode.StatusBarItem;
 let channel: vscode.OutputChannel;
 
@@ -85,6 +87,28 @@ export function activate(context: vscode.ExtensionContext): void {
       sendUpdate(s);
     }
   };
+
+  // The grammar and theme load off disk, so the first panel may render
+  // before they arrive; refresh once they have, and again whenever the
+  // colors the editor paints with change under us.
+  highlighter = new Highlighter(context.extensionPath);
+  const reload = () =>
+    void highlighter.load().then(() => {
+      panel.tokenizer = highlighter.ready ? (t) => highlighter.tokenize(t) : undefined;
+      panel.refresh();
+    });
+  reload();
+  context.subscriptions.push(
+    vscode.window.onDidChangeActiveColorTheme(reload),
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (
+        e.affectsConfiguration('workbench.colorTheme') ||
+        e.affectsConfiguration('editor.tokenColorCustomizations')
+      ) {
+        reload();
+      }
+    })
+  );
 
   context.subscriptions.push(
     decorations,

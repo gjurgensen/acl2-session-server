@@ -22,9 +22,10 @@ proof used, and a live tail while the form proves.
 Edits resync automatically -- the daemon reuses the untouched prefix, rolls
 back to the first real change, and re-checks from there.
 
-Zero runtime dependencies: the JSON-RPC framing is ~150 lines in
-[src/protocol.ts](src/protocol.ts), deliberately vscode-free so it can be
-exercised under plain node (see below).
+The JSON-RPC framing is ~150 lines in [src/protocol.ts](src/protocol.ts),
+dependency-free and deliberately vscode-free so it can be exercised under
+plain node (see below). The two runtime dependencies are `vscode-textmate`
+and `vscode-oniguruma`, and they exist for the panel alone -- see below.
 
 ## Syntax highlighting
 
@@ -59,6 +60,25 @@ The grammar is lexical, so it cannot know that a project's own macro defines
 a theorem, or that a name refers to something admitted. That is the semantic
 token layer's job, and the daemon already knows the answers; it is not built
 yet.
+
+The panel's terms and runes go through *the same grammar*, so a term in the
+panel and the same term in the buffer are tokenized identically rather than
+by a second, approximate tokenizer. Coloring them is the harder half: a
+webview receives workbench colors but never the editor's token colors, and
+there is no API for the active theme's palette. So
+[src/highlight.ts](src/highlight.ts) finds the extension contributing the
+`workbench.colorTheme` label, reads its JSON off disk, and hands the rules
+to `vscode-textmate`, which resolves scopes to colors with VSCode's own
+algorithm -- user `editor.tokenColorCustomizations` included. That is what
+the two runtime dependencies buy, and why the tokenizing is done in the
+extension host rather than the webview.
+
+When the theme cannot be read -- an unparseable file, a tmTheme plist -- the
+panel falls back to the `acl2Session.token.*` colors this extension
+contributes, which default to the terminal palette and which a theme or a
+user can set directly. Lean's infoview solves the same problem the same way,
+minus the theme reading: it contributes its handful of colors and does not
+attempt to match the editor's syntax palette at all.
 
 Verified by tokenizing the 10,712 books of a full ACL2 checkout (5.0M lines)
 under the real TextMate engine: no file ends with an unterminated string or
