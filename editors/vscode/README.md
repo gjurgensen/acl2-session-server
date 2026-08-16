@@ -44,6 +44,17 @@ Beyond that: events (`local`, `encapsulate`, `include-book`, `in-theory`),
 binding forms, `declare`/`xargs`, keywords, package prefixes, `*earmuffed*`
 constants, rationals, character literals, and nested `#|` block comments.
 
+ACL2's own functions -- `equal`, `car`, `len`, `implies`, `+`, `<` -- are
+marked in call position. The list is deliberately the stable core, 97 names
+that ACL2 itself defines and that the community books call thousands of times
+apiece, not the 1,700 names ACL2 defines in total, most of which are prover
+machinery no book writes and which move between releases. Omitting one costs
+nothing: it simply renders as an ordinary symbol. Call position only, because
+a macro can put anything at all in an argument slot, but a head is a head.
+Ordinary calls are left unmarked for the same reason -- `(let ((x 1)) ...)`
+puts a *variable* in head position, and in real books single letters are
+among the most frequent things sitting there.
+
 The grammar is lexical, so it cannot know that a project's own macro defines
 a theorem, or that a name refers to something admitted. That is the semantic
 token layer's job, and the daemon already knows the answers; it is not built

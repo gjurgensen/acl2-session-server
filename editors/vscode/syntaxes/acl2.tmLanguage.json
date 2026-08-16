@@ -51,6 +51,9 @@
       "include": "#modifier"
     },
     {
+      "include": "#builtin"
+    },
+    {
       "include": "#keyword"
     },
     {
@@ -352,6 +355,18 @@
     "paren": {
       "match": "[()\\[\\]]",
       "name": "punctuation.section.parens.acl2"
+    },
+    "builtin": {
+      "comment": "ACL2's own functions, in call position only. The list is the stable core -- every name here is defined by ACL2 itself and called thousands of times across the community books -- rather than everything ACL2 defines, most of which is prover machinery no book writes. Omitting a builtin costs nothing: it renders as an ordinary symbol. Call position only, because a macro can put anything in an argument slot, but a head is a head.",
+      "match": "(?i)(\\()\\s*(pseudo\\-term\\-listp|unsigned\\-byte\\-p|double\\-rewrite|real/rationalp|subsetp\\-equal|acl2\\-numberp|member\\-equal|pseudo\\-termp|symbol\\-listp|assoc\\-equal|symbol\\-name|acl2\\-count|case\\-split|strip\\-cars|true\\-listp|update\\-nth|rationalp|booleanp|integerp|implies|stringp|subsetp|symbolp|syntaxp|access|alistp|append|length|logand|logior|lognot|logxor|member|mv\\-nth|nthcdr|quotep|second|assoc|caddr|consp|equal|first|floor|force|list\\*|realp|value|atom|bitp|caar|cadr|cdar|cddr|cons|endp|expt|ifix|last|list|natp|nfix|null|posp|rest|take|abs|and|ash|car|cdr|e/d|eql|iff|len|mbe|mod|not|nth|the|/=|1\\+|1\\-|<=|>=|cw|eq|er|mv|or|zp|\\*|\\+|\\-|/|<|=|>)(?=[\\s()])",
+      "captures": {
+        "1": {
+          "name": "punctuation.section.parens.begin.acl2"
+        },
+        "2": {
+          "name": "support.function.builtin.acl2"
+        }
+      }
     }
   }
 }
