@@ -46,11 +46,11 @@ impl Out {
         }));
     }
 
-    fn reply(&self, id: &Value, result: Value) {
+    pub fn reply(&self, id: &Value, result: Value) {
         self.send(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
     }
 
-    fn error(&self, id: &Value, code: i64, message: String) {
+    pub fn error(&self, id: &Value, code: i64, message: String) {
         self.send(&json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -77,6 +77,17 @@ enum RequestError {
     Failed(String),
 }
 
+/// What a request produced.
+///
+/// Most methods are answered from the registry's lock-free handles and reply
+/// here. `eval` cannot: the driver thread owns the session, so the request's
+/// id travels with the command and the driver sends the reply whenever the
+/// form finishes -- which may be after a proof it queued behind.
+enum Answer {
+    Now(Value),
+    ByDriver,
+}
+
 struct Daemon {
     registry: Mutex<Registry>,
     books: Mutex<HashMap<String, BookHandle>>,
@@ -89,21 +100,32 @@ impl Daemon {
         books.get(book).map(f).ok_or_else(|| format!("unknown book {book:?}"))
     }
 
-    fn request(&self, method: &str, params: Value) -> Result<Value, RequestError> {
+    fn request(&self, id: &Value, method: &str, params: Value) -> Result<Answer, RequestError> {
         fn args<T: serde::de::DeserializeOwned>(params: Value) -> Result<T, RequestError> {
             serde_json::from_value(params).map_err(|e| RequestError::Failed(e.to_string()))
         }
         let fail = RequestError::Failed;
+        let now = |r: Result<Value, String>| r.map(Answer::Now).map_err(RequestError::Failed);
         match method {
-            "open" => self.open(args(params)?).map_err(fail),
+            "open" => now(self.open(args(params)?)),
             "close" => {
                 let p: wire::BookParams = args(params)?;
-                self.close(&p.book).map_err(fail)
+                now(self.close(&p.book))
             }
-            "output" => self.output(args(params)?).map_err(fail),
+            "output" => now(self.output(args(params)?)),
             "status" => {
                 let p: wire::BookParams = args(params)?;
-                self.status(&p.book).map_err(fail)
+                now(self.status(&p.book))
+            }
+            "eval" => {
+                let p: wire::EvalParams = args(params)?;
+                let id = id.clone();
+                self.handle_of(&p.book, |h| {
+                    h.tx.send(Cmd::Eval { id, form: p.form }).map_err(|e| e.to_string())
+                })
+                .map_err(fail)?
+                .map_err(fail)?;
+                Ok(Answer::ByDriver)
             }
             "interrupt" => {
                 let p: wire::BookParams = args(params)?;
@@ -114,16 +136,18 @@ impl Daemon {
                     let _ = h.tx.send(Cmd::Pause);
                 })
                 .map_err(fail)?;
-                Ok(json!({}))
+                Ok(Answer::Now(json!({})))
             }
             "images" => {
                 let reg = self.registry.lock().expect("registry lock");
                 let p = reg.policy();
-                Ok(serde_json::to_value(wire::ImagesReply {
-                    images: p.available().iter().map(|x| x.display().to_string()).collect(),
-                    default: p.default_path().map(|x| x.display().to_string()),
-                })
-                .expect("serialize"))
+                Ok(Answer::Now(
+                    serde_json::to_value(wire::ImagesReply {
+                        images: p.available().iter().map(|x| x.display().to_string()).collect(),
+                        default: p.default_path().map(|x| x.display().to_string()),
+                    })
+                    .expect("serialize"),
+                ))
             }
             _ => Err(RequestError::UnknownMethod),
         }
@@ -343,8 +367,10 @@ fn main() {
         let method = v.get("method").and_then(|m| m.as_str()).unwrap_or("").to_string();
         let params = v.get("params").cloned().unwrap_or(Value::Null);
         match id {
-            Some(id) => match daemon.request(&method, params) {
-                Ok(result) => daemon.out.reply(&id, result),
+            Some(id) => match daemon.request(&id, &method, params) {
+                Ok(Answer::Now(result)) => daemon.out.reply(&id, result),
+                // The driver has the id and will reply when the form is done.
+                Ok(Answer::ByDriver) => {}
                 Err(RequestError::UnknownMethod) => {
                     daemon.out.error(&id, -32601, format!("unknown method {method:?}"));
                 }

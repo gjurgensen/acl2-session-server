@@ -19,6 +19,49 @@ the cursor: the form's status and timings, a failure's checkpoints as terms
 with the prover's per-goal output one click away, the rules an admitted
 proof used, and a live tail while the form proves.
 
+## The console
+
+**ACL2: Show Console** opens a window for forms the file does not contain.
+There is **one per session**, titled after its book, because that is what an
+eval belongs to: it ran against the world *that* book has built, and its
+answer means nothing against another book's world. The panel follows the
+cursor; the console does not follow anything.
+
+It is deliberately *not* a REPL: the session undoes every event an evaluated
+form introduces, so a `defun` typed here is gone by the next form. What it is
+for is everything that is not part of the book -- `pe`, `pl`, `pr`,
+`disabledp`, a throwaway `thm`, `set-gag-mode` -- where routing through the
+file would mean two edits per question and would make the question part of
+the prefix the daemon must admit. Settings stick where events do not, on
+purpose: a debugging session that turns on accumulated persistence and then
+asks for the results would break otherwise.
+
+A form runs against the world the file has built so far, and a query asked
+while a proof is running waits for that one form rather than being refused
+or jumping the queue. Enter sends a form whose parens are closed and adds a
+line to one that is not, the way a Lisp REPL does -- which is also the guard
+that keeps a half-typed form from wedging the session. Up and Down walk the
+history.
+
+What you type is colored as you type it, by the same grammar and the same
+theme the buffer uses -- the input is a transparent textarea over a colored
+copy of its own text, and each edit asks the extension host to tokenize,
+since a webview can do neither. A second, approximate highlighter local to
+the webview would have been cheaper and is exactly what the panel's terms
+avoid.
+
+A failed experiment comes back with the same envelope a failed `defthm`
+does, rendered by the same code: error line, abort cause, checkpoints as
+terms, the events inside a compound form. Output is bounded at three
+levels -- older entries fold to one line, the newest shows a scrolling
+excerpt of what ACL2 printed, and **full log** puts the whole thing in a
+document. A form that changed the world says so, and says whether the
+rollback held.
+
+**ACL2: Evaluate Selection** sends the selection to that book's console,
+opening it if it was closed; with nothing selected it just opens the console,
+since that is already the place to type.
+
 Edits resync automatically -- the daemon reuses the untouched prefix, rolls
 back to the first real change, and re-checks from there.
 
@@ -120,8 +163,9 @@ and restart VSCode (recompile with `npm run compile` after pulling changes).
 
 ## Commands
 
-Start / Stop Live Checking, Interrupt, Retract to Cursor, Target at Cursor,
-Clear Target, Show Output for Form at Cursor, Go to Frontier.
+Start / Stop Live Checking, Interrupt, Show Panel, Show Console, Evaluate
+Selection, Retract to Cursor, Target at Cursor, Clear Target, Show Output for
+Form at Cursor, Go to Frontier.
 
 The target is Proof-General-shaped: auto-admission goes only as far as the
 target, retraction moves the world back and *holds* it there, and clearing
@@ -135,5 +179,20 @@ node smoke.mjs ../../target/debug/acl2-session-editor /path/to/saved_acl2
 
 Drives the compiled protocol module against a real daemon and ACL2: open,
 a triage that skips a red form and proves its conditional dependent, an
-output slice off the red form's log, close. The editor UI is the only layer
-this does not cover.
+output slice off the red form's log, a query, a failed experiment's
+envelope, an evaluated event being undone, an eval sent mid-check waiting
+its turn, close. The editor UI is the only layer this does not cover.
+
+```sh
+node webview.mjs
+```
+
+Needs neither daemon nor ACL2. Both webviews are strings, so nothing in them
+is reachable from `tsc` or from the smoke test, and a syntax error in one
+shows up only as a window that silently does nothing. This builds each page
+and compiles its script, then lifts out the function deciding whether Enter
+submits a form and exercises it against strings, character literals,
+bar-quoted symbols and both comment syntaxes. That one is tested because
+getting it wrong is not cosmetic: an unbalanced form sent to the session
+swallows the marker that ends it, and ACL2 waits for the rest of the input
+until something interrupts.

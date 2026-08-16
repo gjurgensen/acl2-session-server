@@ -40,17 +40,15 @@ export interface InnerEventWire {
   abort_causes?: string;
 }
 
-export interface UnitEvent {
-  book: string;
-  revision: number;
-  index: number;
-  outcome: string;
-  line_start: number;
-  line_end: number;
-  elapsed_ms?: number;
+/**
+ * What ACL2 had to say about one form: the log handle, and -- when the form
+ * went red -- why. A file's form and an eval'd one carry the same envelope
+ * (the daemon flattens both the same way), so one renderer serves both; the
+ * fields either adds are its own.
+ */
+export interface Envelope {
   output_ref: string;
   output_lines: number;
-  retry_output_ref?: string;
   status?: string;
   error_line?: string;
   abort_cause?: string;
@@ -67,6 +65,38 @@ export interface UnitEvent {
   inner_total?: number;
   n_top?: number;
   n_sub?: number;
+}
+
+export interface UnitEvent extends Envelope {
+  book: string;
+  revision: number;
+  index: number;
+  /** `admitted`, `skipped`, or `failed`. */
+  outcome: string;
+  line_start: number;
+  line_end: number;
+  elapsed_ms?: number;
+  retry_output_ref?: string;
+}
+
+/** The reply to an `eval` request. */
+export interface EvalReply extends Envelope {
+  /** `ok` or `failed`. */
+  outcome: string;
+  /**
+   * `none`, `undone`, or `dirty`. `undone` is the contract working -- the
+   * form introduced events and they were rolled back. `dirty` means the
+   * rollback did not verify, so the next sync rebuilds by replay.
+   */
+  world_change: string;
+  elapsed_ms: number;
+}
+
+/** `queued` while the session is busy, then `running` when the form goes. */
+export interface EvalStateEvent {
+  book: string;
+  state: string;
+  ahead: number;
 }
 
 export interface TailEvent {
@@ -89,9 +119,10 @@ interface Pending {
 }
 
 /**
- * Events: 'state' | 'unit' | 'tail' | 'settled' (the daemon's stream),
- * 'daemon-error' (the daemon's own error notification -- renamed because a
- * bare 'error' event throws when unhandled), 'stderr', 'spawn-error', 'exit'.
+ * Events: 'state' | 'unit' | 'tail' | 'settled' | 'stale_deps' | 'eval_state'
+ * (the daemon's stream), 'daemon-error' (the daemon's own error notification
+ * -- renamed because a bare 'error' event throws when unhandled), 'stderr',
+ * 'spawn-error', 'exit'.
  */
 export class DaemonClient extends EventEmitter {
   private proc: ChildProcessWithoutNullStreams;

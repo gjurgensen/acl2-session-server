@@ -8,11 +8,13 @@
 //! edit lands within a slice of arriving -- and only an edit that touches the
 //! prefix through the running unit aborts its proof.
 
+use std::collections::VecDeque;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
 use std::time::Duration;
 
 use acl2_session::registry::SharedBook;
-use acl2_session::{split, Form, Resumed, SyncError};
+use acl2_session::{split, Form, Outcome, Resumed, SyncError, WorldChange};
+use serde_json::Value;
 
 use crate::wire;
 use crate::Out;
@@ -21,6 +23,9 @@ use crate::Out;
 pub enum Cmd {
     Update { bytes: Vec<u8>, target_line: Option<usize>, revision: u64 },
     Retract { keep: usize },
+    /// A form to run outside the file. `id` is the JSON-RPC request's, since
+    /// the driver owns the session and therefore sends the reply itself.
+    Eval { id: Value, form: String },
     Pause,
     Close,
 }
@@ -73,6 +78,17 @@ pub struct Driver {
     /// be read honestly after it: the world may still hold units the new
     /// text rolled out from under.
     reconciled: bool,
+    /// Evals waiting for the session to be free, oldest first.
+    ///
+    /// A queue rather than a rejection: the session is single-threaded, so an
+    /// eval typed while a proof runs can only wait or be refused, and refusing
+    /// asks the user to watch the status bar and retype. It waits exactly one
+    /// form -- the pump runs between units, where the world is a prefix and
+    /// nothing is in flight -- so a query never sits behind a whole file.
+    eval_queue: VecDeque<(Value, String)>,
+    /// The eval whose form is in flight, so the resume loop knows whom to
+    /// answer when it finishes.
+    eval_in_flight: Option<Value>,
 }
 
 impl Driver {
@@ -91,6 +107,8 @@ impl Driver {
             have_snapshot: false,
             failed_unit: None,
             reconciled: false,
+            eval_queue: VecDeque::new(),
+            eval_in_flight: None,
         }
     }
 
@@ -223,18 +241,114 @@ impl Driver {
                 self.emit_state(None);
                 Flow::Continue
             }
+            Cmd::Eval { id, form } => {
+                let ahead = self.eval_queue.len();
+                // Whether it waits is decided by the pump, not here; saying
+                // `queued` now and `running` when it goes means the client
+                // never has to guess which of the two the silence is.
+                self.eval_state("queued", ahead);
+                self.eval_queue.push_back((id, form));
+                Flow::Continue
+            }
             Cmd::Pause => {
                 // The protocol loop already sent request_abort, so a blocked
                 // call has yielded; the escalation itself runs here, where
                 // the book is ours. Pinging an idle session is harmless.
                 self.parked = true;
                 let _ = self.book.lock().expect("book lock").interrupt();
+                // An interrupt is aimed at whatever is in flight, and that may
+                // be an eval. Its caller is holding an unanswered request, so
+                // say so rather than leaving the promise open forever. Evals
+                // merely *queued* are untouched: the pump runs even on a
+                // parked driver, and a query is worth more, not less, once
+                // the proof it was waiting behind has been called off.
+                self.abandon_in_flight("interrupted");
                 self.emit_state(None);
                 self.settle("interrupted", None);
                 Flow::Continue
             }
-            Cmd::Close => Flow::Exit,
+            Cmd::Close => {
+                self.abandon_all_evals("the session is closing");
+                Flow::Exit
+            }
         }
+    }
+
+    /// Run queued evals until the queue is empty or the session is busy.
+    ///
+    /// Called only where nothing should be in flight; `Busy` is nevertheless
+    /// handled, because "should" is not "is" and a queue put back is a
+    /// one-tick delay where an unwrapped error would be a lost reply.
+    fn pump_evals(&mut self) -> Flow {
+        while let Some((id, form)) = self.eval_queue.pop_front() {
+            self.eval_state("running", self.eval_queue.len());
+            let r = {
+                let mut book = self.book.lock().expect("book lock");
+                book.eval(&form, STEP)
+            };
+            match r {
+                // The deadline is a slice, not a limit: a `thm` that grinds
+                // past it is followed like any other in-flight form, tails
+                // and all, and answers when it finishes.
+                Ok(r) if r.outcome == Outcome::StillRunning => {
+                    self.eval_in_flight = Some(id);
+                    if let Flow::Exit = self.follow_running() {
+                        return Flow::Exit;
+                    }
+                    // Whatever ended it -- completion, interrupt, exit --
+                    // answered or abandoned the request; nothing is owed here.
+                }
+                Ok(r) => self.finish_eval(&id, &r),
+                Err(SyncError::Busy { .. }) => {
+                    self.eval_queue.push_front((id, form));
+                    return Flow::Continue;
+                }
+                Err(e) => self.out.error(&id, -32603, e.to_string()),
+            }
+        }
+        Flow::Continue
+    }
+
+    /// Answer an eval's caller and act on what it did to the world.
+    fn finish_eval(&mut self, id: &Value, r: &acl2_session::EvalResult) {
+        self.out.reply(id, serde_json::to_value(wire::evaluated(r)).expect("serialize"));
+        if r.world_change == WorldChange::Dirty {
+            // The rollback did not verify, so the prefix invariant no longer
+            // holds and the frontier on screen is a claim we cannot support.
+            // Re-reconciling makes the next drive rebuild by replay, which is
+            // the core's own fallback -- reached here rather than silently.
+            self.reconciled = false;
+            self.emit_state(None);
+        }
+    }
+
+    /// Tell whoever is waiting on the in-flight eval that no result is coming.
+    ///
+    /// A JSON-RPC request has exactly one ending, and a client that never gets
+    /// it waits forever; every path that stops an eval short comes through
+    /// here or through [`Driver::abandon_all_evals`].
+    fn abandon_in_flight(&mut self, why: &str) {
+        if let Some(id) = self.eval_in_flight.take() {
+            self.out.error(&id, -32603, format!("eval abandoned: {why}"));
+        }
+    }
+
+    /// The same, plus every eval still waiting -- for a driver that is going
+    /// away, where "queued" would otherwise mean "queued forever".
+    fn abandon_all_evals(&mut self, why: &str) {
+        self.abandon_in_flight(why);
+        let waiting: Vec<Value> = self.eval_queue.drain(..).map(|(id, _)| id).collect();
+        for id in waiting {
+            self.out.error(&id, -32603, format!("eval abandoned: {why}"));
+        }
+    }
+
+    fn eval_state(&self, state: &'static str, ahead: usize) {
+        self.out.notify("eval_state", &wire::EvalStateEvent {
+            book: self.id.clone(),
+            state,
+            ahead,
+        });
     }
 
     /// Step toward the target until it is reached, something parks the run,
@@ -242,6 +356,14 @@ impl Driver {
     fn drive(&mut self) -> Flow {
         loop {
             if let Flow::Exit = self.drain() {
+                return Flow::Exit;
+            }
+            // Between units, which is the whole busy policy: the session is
+            // idle here and the world is a prefix, so a queued query goes as
+            // soon as the form in flight is done rather than after the file
+            // is. Ahead of the parked check on purpose -- a driver parked on
+            // a red form is exactly when a query is worth asking.
+            if let Flow::Exit = self.pump_evals() {
                 return Flow::Exit;
             }
             if self.parked || !self.have_snapshot {
@@ -360,7 +482,14 @@ impl Driver {
                 book.resume(SLICE)
             };
             match r {
-                Ok(None) => return Flow::Continue,
+                Ok(None) => {
+                    // Nothing is running after all. For a unit that is the
+                    // ordinary race with a sync step; for an eval it means the
+                    // form went away without a result, so its caller is owed
+                    // an answer it will otherwise never get.
+                    self.abandon_in_flight("the form is no longer running");
+                    return Flow::Continue;
+                }
                 Ok(Some(Resumed::StillRunning { .. })) => {
                     let p = {
                         let mut book = self.book.lock().expect("book lock");
@@ -397,10 +526,19 @@ impl Driver {
                     self.settle("failed", f.error_line.clone());
                     return Flow::Continue;
                 }
-                // No eval verb exists, so nothing eval-shaped can be pending.
-                Ok(Some(Resumed::Evaluated(_))) => return Flow::Continue,
+                // An eval outran its slice and has now finished. It is not
+                // part of the file, so it moves no frontier and paints
+                // nothing -- it just answers the caller who is holding the
+                // request open.
+                Ok(Some(Resumed::Evaluated(r))) => {
+                    if let Some(id) = self.eval_in_flight.take() {
+                        self.finish_eval(&id, &r);
+                    }
+                    return Flow::Continue;
+                }
                 Err(e) => {
                     self.parked = true;
+                    self.abandon_in_flight(&e.to_string());
                     self.settle("error", Some(e.to_string()));
                     return Flow::Continue;
                 }

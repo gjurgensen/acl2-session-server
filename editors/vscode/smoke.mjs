@@ -41,7 +41,7 @@ process.on('exit', () => {
   }
 });
 const events = [];
-for (const m of ['state', 'unit', 'tail', 'settled', 'daemon-error']) {
+for (const m of ['state', 'unit', 'tail', 'settled', 'eval_state', 'daemon-error']) {
   c.on(m, (p) => events.push([m, p]));
 }
 
@@ -102,6 +102,57 @@ const out = await c.request('output', {
 assert(
   out.total_lines > 0 && out.text.toLowerCase().includes('vs-bad'),
   'an output slice serves the red log'
+);
+
+// Eval: the three things the verb has to get right.
+//
+// A query answers from the world the file built. A failed experiment comes
+// back with the same envelope a red unit carries, so one renderer serves
+// both. And a `defun` evaluated here is undone -- which is the contract, and
+// the reason this is a query console rather than a REPL.
+const q = await c.request('eval', { book: opened.book, form: "(pe 'alpha)" });
+assert(q.outcome === 'ok' && q.world_change === 'none', 'a query evaluates without touching the world');
+const qout = await c.request('output', {
+  book: opened.book,
+  output_ref: q.output_ref,
+  mode: 'all',
+});
+assert(qout.text.toLowerCase().includes('alpha'), 'the query log holds the answer');
+
+// The claim deliberately says nothing about `alpha`. `vs-bad` was admitted
+// with its proofs skipped, so `(equal (alpha x) (cons 1 x))` is a rewrite
+// rule in this very world: every claim about `alpha` collapses through it to
+// the empty clause, and the prover pushes no term for a goal it refuted
+// outright -- which would fail this assertion on a perfectly good envelope.
+// Commutativity of `append` reverts to induction and leaves a checkpoint at
+// each level, which is the shape being tested.
+const bad = await c.request('eval', {
+  book: opened.book,
+  form: '(thm (equal (append x y) (append y x)))',
+});
+assert(bad.outcome === 'failed', 'a failed experiment reports failure');
+assert(bad.status === 'proof_failure', 'and reports it as a proof failure');
+assert(
+  (bad.checkpoints || []).some((k) => k.kind === 'top') &&
+    (bad.checkpoints || []).some((k) => k.kind === 'sub'),
+  'and carries its checkpoints as terms, as a red unit does'
+);
+
+const def = await c.request('eval', { book: opened.book, form: '(defun ephemeral (x) x)' });
+assert(def.outcome === 'ok' && def.world_change === 'undone', 'an event evaluated here is undone');
+const gone = await c.request('eval', { book: opened.book, form: '(ephemeral 1)' });
+assert(gone.outcome === 'failed', 'and is not there for the next eval');
+
+// The busy policy: an eval submitted while the file is being checked waits
+// for the form in flight rather than being refused. Sending the eval right
+// behind the update means it lands mid-check; it must still answer.
+events.length = 0;
+c.notify('update', { book: opened.book, text, target_line: null, revision: 2 });
+const queued = c.request('eval', { book: opened.book, form: '(+ 1 1)' });
+assert((await queued).outcome === 'ok', 'an eval sent mid-check still answers');
+assert(
+  events.some(([m, p]) => m === 'eval_state' && p.state === 'running'),
+  'and says when it went'
 );
 
 const closed = await c.request('close', { book: opened.book });

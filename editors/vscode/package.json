@@ -101,6 +101,14 @@
         "title": "ACL2: Interrupt"
       },
       {
+        "command": "acl2-session.evalSelection",
+        "title": "ACL2: Evaluate Selection"
+      },
+      {
+        "command": "acl2-session.showConsole",
+        "title": "ACL2: Show Console"
+      },
+      {
         "command": "acl2-session.retractToCursor",
         "title": "ACL2: Retract to Cursor"
       },

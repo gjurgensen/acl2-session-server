@@ -17,16 +17,20 @@
 import * as vscode from 'vscode';
 import {
   DaemonClient,
+  EvalReply,
+  EvalStateEvent,
   SettledEvent,
   StateEvent,
   TailEvent,
   UnitEvent,
   UnitState,
 } from './protocol';
+import { Envelope } from './protocol';
 import { DecorationMode, Decorations } from './decorations';
-import { OutputView, SCHEME } from './outputView';
+import { EVAL_SCHEME, OutputView, SCHEME } from './outputView';
 import { Highlighter } from './highlight';
-import { Panel, PanelModel } from './panel';
+import { Panel, PanelEnvelope, PanelModel } from './panel';
+import { Console, ConsoleResult, HISTORY } from './console';
 
 const UPDATE_DEBOUNCE_MS = 300;
 
@@ -39,6 +43,26 @@ interface BookSession {
   /** Latest envelope per unit index, for diagnostics, panel and output view. */
   unitEvents: Map<number, UnitEvent>;
   debounce?: ReturnType<typeof setTimeout>;
+  /**
+   * The progress notification of the eval in flight, so an `eval_state`
+   * event can say *why* it has not come back -- a form queued behind a long
+   * proof and one that is grinding look the same from here otherwise.
+   */
+  evalProgress?: vscode.Progress<{ message?: string }>;
+  /**
+   * Console seqs sent to this book and not yet answered, oldest first. The
+   * daemon runs evals in the order it received them and says only *that* one
+   * has started, not which; the order is what turns that into a seq.
+   */
+  evalQueue: number[];
+  /**
+   * This book's console window, once anything has needed one. Per session,
+   * not per window: an eval ran against the world *this* book built, and its
+   * answer means nothing against another book's world.
+   */
+  console?: Console;
+  /** Replies to this book's console evals, by seq, for the full-log button. */
+  evalReplies: Map<number, EvalReply>;
 }
 
 let client: DaemonClient | undefined;
@@ -47,6 +71,7 @@ const byId = new Map<string, BookSession>(); // key: daemon book id
 
 let decorations: Decorations;
 let outputView: OutputView;
+let evalView: OutputView;
 let panel: Panel;
 let highlighter: Highlighter;
 let status: vscode.StatusBarItem;
@@ -62,7 +87,12 @@ function gutterAdmitted(): boolean {
 
 export function activate(context: vscode.ExtensionContext): void {
   decorations = new Decorations(context);
-  outputView = new OutputView();
+  outputView = new OutputView(
+    SCHEME,
+    'ACL2 Output',
+    '(no form under the cursor has been checked yet)'
+  );
+  evalView = new OutputView(EVAL_SCHEME, 'ACL2 Eval', '(nothing evaluated yet)');
   panel = new Panel();
   status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 10);
   channel = vscode.window.createOutputChannel('ACL2 Session');
@@ -94,8 +124,15 @@ export function activate(context: vscode.ExtensionContext): void {
   highlighter = new Highlighter(context.extensionPath);
   const reload = () =>
     void highlighter.load().then(() => {
-      panel.tokenizer = highlighter.ready ? (t) => highlighter.tokenize(t) : undefined;
+      const tokenizer = highlighter.ready ? (t: string) => highlighter.tokenize(t) : undefined;
+      panel.tokenizer = tokenizer;
       panel.refresh();
+      for (const s of books.values()) {
+        if (s.console) {
+          s.console.tokenizer = tokenizer;
+          s.console.refresh();
+        }
+      }
     });
   reload();
   context.subscriptions.push(
@@ -116,7 +153,12 @@ export function activate(context: vscode.ExtensionContext): void {
     status,
     channel,
     vscode.workspace.registerTextDocumentContentProvider(SCHEME, outputView),
+    vscode.workspace.registerTextDocumentContentProvider(EVAL_SCHEME, evalView),
     vscode.commands.registerCommand('acl2-session.start', startCommand),
+    vscode.commands.registerCommand('acl2-session.evalSelection', () => forBook(evalCommand)),
+    vscode.commands.registerCommand('acl2-session.showConsole', () =>
+      forBook((s) => consoleFor(s).open())
+    ),
     vscode.commands.registerCommand('acl2-session.stop', () => forBook(stopBook)),
     vscode.commands.registerCommand('acl2-session.interrupt', () =>
       forBook((s) => void client?.request('interrupt', { book: s.id }).catch(report))
@@ -273,6 +315,7 @@ function ensureClient(): DaemonClient {
   c.on('unit', onUnit);
   c.on('tail', onTail);
   c.on('settled', onSettled);
+  c.on('eval_state', onEvalState);
   client = c;
   return c;
 }
@@ -300,6 +343,8 @@ async function startCommand(): Promise<void> {
       doc,
       target: null,
       unitEvents: new Map(),
+      evalQueue: [],
+      evalReplies: new Map(),
     };
     books.set(key, s);
     byId.set(s.id, s);
@@ -316,6 +361,9 @@ function stopBook(s: BookSession): void {
   void client?.request('close', { book: s.id }).catch(() => undefined);
   books.delete(s.doc.uri.toString());
   byId.delete(s.id);
+  // The transcript is answers from a world that no longer exists.
+  s.console?.dispose();
+  s.console = undefined;
   for (const editor of vscode.window.visibleTextEditors) {
     if (editor.document === s.doc) {
       decorations.clear(editor);
@@ -343,6 +391,182 @@ function retractTo(s: BookSession, keep: number): void {
   const kept = keep > 0 ? units[keep - 1] : undefined;
   s.target = kept ? kept.line_end : 0;
   client?.notify('retract', { book: s.id, keep });
+}
+
+// ---- Evaluating outside the file --------------------------------------------
+
+/**
+ * Run a form the file does not contain.
+ *
+ * This is not a REPL, and it is worth being precise about why: the session's
+ * `eval` undoes every event the form introduces, so a `defun` typed here is
+ * gone by the next form. What it is for is everything that is *not* part of
+ * the book -- `pe`, `pl`, `pr`, `disabledp`, a throwaway `thm`, a
+ * `set-gag-mode` -- where routing through the file would mean two edits per
+ * question and would make the question part of the prefix `sync` must admit.
+ * Settings stick where events do not, deliberately.
+ */
+function evalCommand(s: BookSession): void {
+  const editor = vscode.window.activeTextEditor;
+  const selected =
+    editor && !editor.selection.isEmpty ? editor.document.getText(editor.selection) : undefined;
+  const c = consoleFor(s);
+  if (selected && selected.trim()) {
+    // Straight into the console, rather than into a display of its own: the
+    // answer belongs in the same transcript as one typed by hand, and the
+    // console is where the envelope is rendered.
+    c.submit(selected.trim());
+    return;
+  }
+  // Nothing selected: the console *is* the input box, so open it and let the
+  // user type there rather than inventing a second place to type.
+  c.open();
+}
+
+/** How much of an eval's log to pull inline before deferring to the store. */
+const EVAL_LOG_LINES = 2000;
+
+async function showEvalResult(
+  s: BookSession,
+  r: EvalReply,
+  opts: { announce: boolean } = { announce: true }
+): Promise<void> {
+  // The view is otherwise verbatim; a truncation is about the text itself,
+  // not a banner over it, and silently showing the last 2000 lines of a
+  // 40000-line grind would read as the whole story.
+  const head =
+    r.output_lines > EVAL_LOG_LINES
+      ? `;; showing the last ${EVAL_LOG_LINES} of ${r.output_lines} lines\n\n`
+      : '';
+  evalView.set(s.id, null, head + (await evalLog(s, r, EVAL_LOG_LINES)));
+  await evalView.open();
+  if (!opts.announce) {
+    return;
+  }
+  const secs = (r.elapsed_ms / 1000).toFixed(r.elapsed_ms < 10000 ? 1 : 0);
+  const verdict = r.outcome === 'ok' ? 'ok' : (r.status ?? 'failed').replace(/_/g, ' ');
+  vscode.window.setStatusBarMessage(`ACL2 eval: ${verdict} (${secs}s)`, 5000);
+  if (r.world_change === 'dirty') {
+    // The eval introduced events and undoing them did not verify, so the
+    // prefix invariant is gone. The daemon already re-reconciles; saying so
+    // is what keeps the rebuild from looking like a spontaneous re-prove.
+    void vscode.window.showWarningMessage(
+      'acl2-session: that form changed the world and the rollback did not verify — ' +
+        'the session will rebuild by replay.'
+    );
+  }
+}
+
+function onEvalState(p: EvalStateEvent): void {
+  const s = byId.get(p.book);
+  if (!s) {
+    return;
+  }
+  if (s.evalProgress) {
+    const running = s.lastState?.units.find((u) => u.status === 'running');
+    s.evalProgress.report({
+      message:
+        p.state === 'queued'
+          ? running
+            ? `queued behind form ${running.index + 1}`
+            : 'queued'
+          : 'running',
+    });
+  }
+  // The console shows its own entry as queued the moment it is typed, so
+  // only the transition to running is news -- and it is always the oldest
+  // unanswered one, because the driver runs them in order.
+  if (p.state === 'running' && s.evalQueue.length > 0) {
+    s.console?.state(s.evalQueue[0], 'running', 0);
+  }
+}
+
+// ---- The panel's console ----------------------------------------------------
+
+/** How much of an eval's log to show inline, before the full-log button. */
+const CONSOLE_LOG_LINES = 200;
+
+/** This book's console, built on first use and wired to this book alone. */
+function consoleFor(s: BookSession): Console {
+  if (!s.console) {
+    const c = new Console(s.id, vscode.workspace.asRelativePath(s.doc.uri));
+    c.tokenizer = highlighter.ready ? (t) => highlighter.tokenize(t) : undefined;
+    c.onEval = (seq, form) => void consoleEval(s, seq, form);
+    c.onGoal = (seq, goal, slot) => void fetchEvalGoal(s, seq, goal, slot);
+    c.onFullLog = (seq) => void showEvalLog(s, seq);
+    s.console = c;
+  }
+  return s.console;
+}
+
+async function consoleEval(s: BookSession, seq: number, form: string): Promise<void> {
+  const c = consoleFor(s);
+  s.evalQueue.push(seq);
+  try {
+    const r: EvalReply = await client!.request('eval', { book: s.id, form });
+    s.evalReplies.set(seq, r);
+    for (const k of [...s.evalReplies.keys()].slice(0, -HISTORY)) {
+      s.evalReplies.delete(k);
+    }
+    // The tail, not the head: for a query the answer is what ACL2 printed
+    // last, and for a failure the error line is at the end too.
+    const log = await evalLog(s, r, CONSOLE_LOG_LINES);
+    c.done(seq, toConsoleResult(r), log);
+  } catch (e) {
+    c.failed(seq, e instanceof Error ? e.message : String(e));
+  } finally {
+    const at = s.evalQueue.indexOf(seq);
+    if (at >= 0) {
+      s.evalQueue.splice(at, 1);
+    }
+  }
+}
+
+async function evalLog(s: BookSession, r: EvalReply, lines: number): Promise<string> {
+  try {
+    const o = await client?.request('output', {
+      book: s.id,
+      output_ref: r.output_ref,
+      mode: 'tail',
+      lines,
+    });
+    return o.text as string;
+  } catch (err) {
+    return `(output unavailable: ${err})`;
+  }
+}
+
+async function fetchEvalGoal(
+  s: BookSession,
+  seq: number,
+  goal: string,
+  slot: number
+): Promise<void> {
+  const c = consoleFor(s);
+  const reply = s.evalReplies.get(seq);
+  if (!reply) {
+    c.goalResult(seq, slot, '(no captured output for this form)');
+    return;
+  }
+  try {
+    const r = await client?.request('output', {
+      book: s.id,
+      output_ref: reply.output_ref,
+      mode: 'goal',
+      text: goal,
+    });
+    c.goalResult(seq, slot, (r.text as string) || '(nothing captured under this goal)');
+  } catch (err) {
+    c.goalResult(seq, slot, `(output unavailable: ${err})`);
+  }
+}
+
+/** The console's "full log" button: the whole thing, in the eval document. */
+async function showEvalLog(s: BookSession, seq: number): Promise<void> {
+  const reply = s.evalReplies.get(seq);
+  if (reply) {
+    await showEvalResult(s, reply, { announce: false });
+  }
 }
 
 function gotoFrontier(s: BookSession): void {
@@ -396,10 +620,17 @@ function onTail(p: TailEvent): void {
   if (!s) {
     return;
   }
-  if (outputView.shownBook === s.id && outputView.shownUnit === p.unit && p.unit !== null) {
-    outputView.set(s.id, p.unit, p.text);
+  // A null unit is an eval's tail: it belongs to this book's console, not to
+  // any form of the file, and so to neither the panel nor a view that
+  // follows the cursor.
+  if (p.unit === null) {
+    s.console?.tail(p.elapsed_ms, p.text);
+  } else {
+    if (outputView.shownBook === s.id && outputView.shownUnit === p.unit) {
+      outputView.set(s.id, p.unit, p.text);
+    }
+    panel.tail(p.book, p.unit, p.elapsed_ms, p.text);
   }
-  panel.tail(p.book, p.unit, p.elapsed_ms, p.text);
   const secs = Math.round(p.elapsed_ms / 1000);
   status.text = `$(sync~spin) ACL2: proving ${p.unit === null ? '' : `${p.unit + 1}/${s.lastState?.units.length ?? '?'} `}(${secs}s)`;
 }
@@ -529,32 +760,54 @@ function buildPanelModel(s: BookSession, index: number): PanelModel | undefined 
   }
   const e = s.unitEvents.get(index);
   if (e) {
-    model.elapsedMs = e.elapsed_ms;
-    model.proverSteps = e.prover_steps;
-    model.outputLines = e.output_lines;
-    model.errorLine = e.error_line;
-    model.abortCause = e.abort_cause;
-    model.checkpoints = e.checkpoints ?? [];
-    model.rules = e.rules ?? [];
-    model.warnings = e.warnings;
-    model.time = e.time;
-    model.hintEvents = e.hint_events ?? [];
-    model.splitterRules = e.splitter_rules ?? [];
-    model.preRevert = e.pre_revert ?? false;
-    model.forced = e.forced ?? false;
-    model.inner = (e.inner ?? []).map((i) => ({
-      name: i.name,
-      kind: i.kind,
-      time: i.time,
-      proverSteps: i.prover_steps,
-      rules: i.rules ?? [],
-      abortCauses: i.abort_causes,
-    }));
-    model.innerTotal = e.inner_total ?? model.inner.length;
-    model.nTop = e.n_top ?? 0;
-    model.nSub = e.n_sub ?? 0;
+    Object.assign(model, toPanelEnvelope(e), { elapsedMs: e.elapsed_ms });
   }
   return model;
+}
+
+/**
+ * The wire's envelope in the panel's spelling. One function, because the
+ * daemon flattens a unit's envelope and an eval's identically -- and if that
+ * ever stops being true, this is where it breaks loudly rather than in one
+ * of two renderers that drifted apart.
+ */
+function toPanelEnvelope(e: Envelope): PanelEnvelope {
+  const inner = (e.inner ?? []).map((i) => ({
+    name: i.name,
+    kind: i.kind,
+    time: i.time,
+    proverSteps: i.prover_steps,
+    rules: i.rules ?? [],
+    abortCauses: i.abort_causes,
+  }));
+  return {
+    proverSteps: e.prover_steps,
+    outputLines: e.output_lines,
+    errorLine: e.error_line,
+    abortCause: e.abort_cause,
+    checkpoints: e.checkpoints ?? [],
+    rules: e.rules ?? [],
+    warnings: e.warnings,
+    time: e.time,
+    hintEvents: e.hint_events ?? [],
+    splitterRules: e.splitter_rules ?? [],
+    preRevert: e.pre_revert ?? false,
+    forced: e.forced ?? false,
+    inner,
+    innerTotal: e.inner_total ?? inner.length,
+    nTop: e.n_top ?? 0,
+    nSub: e.n_sub ?? 0,
+  };
+}
+
+function toConsoleResult(r: EvalReply): ConsoleResult {
+  return {
+    ...toPanelEnvelope(r),
+    elapsedMs: r.elapsed_ms,
+    outcome: r.outcome,
+    worldChange: r.world_change,
+    failStatus: r.status,
+  };
 }
 
 async function fetchGoal(m: PanelModel, goal: string, slot: number): Promise<void> {

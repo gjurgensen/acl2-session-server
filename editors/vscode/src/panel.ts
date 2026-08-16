@@ -5,6 +5,12 @@
 // a compound form, rules -- and streaming the live tail while that form
 // proves. Plain HTML on the editor's theme variables, zero dependencies.
 //
+// Per-form, and only per-form: what it shows is whatever the cursor is in,
+// and it forgets the previous form entirely. Forms evaluated outside the
+// file belong to the session rather than to any cursor position, so they
+// live in the console (console.ts) instead. The renderer they share is in
+// webviewParts.ts.
+//
 // Terms arrive already tokenized and already colored -- see highlight.ts,
 // which runs them through the book grammar and the active theme's own rules,
 // so a term here and the same term in the buffer look alike. The `acl2::`
@@ -13,6 +19,7 @@
 
 import * as vscode from 'vscode';
 import { TokLines } from './highlight';
+import { SHARED_CSS, SHARED_JS } from './webviewParts';
 
 export interface PanelCheckpoint {
   kind: string;
@@ -29,13 +36,11 @@ export interface PanelInnerEvent {
   abortCauses?: string;
 }
 
-export interface PanelModel {
-  book: string;
-  index: number;
-  total: number;
-  lineStart: number;
-  lineEnd: number;
-  status: string;
+/**
+ * What ACL2 had to say about one form. A unit and an eval carry the same
+ * fields meaning the same things; each adds its own on top.
+ */
+export interface PanelEnvelope {
   elapsedMs?: number;
   proverSteps?: number;
   outputLines?: number;
@@ -43,7 +48,6 @@ export interface PanelModel {
   abortCause?: string;
   checkpoints: PanelCheckpoint[];
   rules: string[];
-  skipped: boolean;
   warnings?: string;
   time?: string;
   hintEvents?: string[];
@@ -54,6 +58,51 @@ export interface PanelModel {
   innerTotal?: number;
   nTop?: number;
   nSub?: number;
+}
+
+export interface PanelModel extends PanelEnvelope {
+  book: string;
+  index: number;
+  total: number;
+  lineStart: number;
+  lineEnd: number;
+  /** The paint status: `admitted`, `conditional`, `skipped`, `failed`, ... */
+  status: string;
+  skipped: boolean;
+}
+
+/** The strings in an envelope that are ACL2 code rather than prose. */
+export function highlightable(m: PanelEnvelope): string[] {
+  return [
+    ...m.checkpoints.map((c) => c.term),
+    ...(m.rules ?? []),
+    ...(m.hintEvents ?? []),
+    ...(m.splitterRules ?? []),
+    ...(m.inner ?? []).flatMap((e) => e.rules ?? []),
+  ];
+}
+
+/**
+ * Tokenize each string once, keyed by its own text: a webview looks a string
+ * up rather than carrying a tokenizer, and a rune repeated across a dozen
+ * events is tokenized once.
+ */
+export function tokenizeAll(
+  strings: string[],
+  tokenizer?: (text: string) => TokLines | undefined
+): Record<string, TokLines> {
+  const toks: Record<string, TokLines> = {};
+  if (tokenizer) {
+    for (const s of strings) {
+      if (!(s in toks)) {
+        const t = tokenizer(s);
+        if (t) {
+          toks[s] = t;
+        }
+      }
+    }
+  }
+  return toks;
 }
 
 export class Panel {
@@ -135,24 +184,12 @@ export class Panel {
     }
   }
 
-  /**
-   * Every term and rune in the model, tokenized once and keyed by its own
-   * text: the webview looks a string up rather than carrying a tokenizer,
-   * and a rune repeated across a dozen events is tokenized once.
-   */
   private post(model: PanelModel): void {
-    const toks: Record<string, TokLines> = {};
-    if (this.tokenizer) {
-      for (const s of highlightable(model)) {
-        if (!(s in toks)) {
-          const t = this.tokenizer(s);
-          if (t) {
-            toks[s] = t;
-          }
-        }
-      }
-    }
-    void this.panel?.webview.postMessage({ kind: 'model', model, toks });
+    void this.panel?.webview.postMessage({
+      kind: 'model',
+      model,
+      toks: tokenizeAll(highlightable(model), this.tokenizer),
+    });
   }
 
   tail(book: string, unit: number | null, elapsedMs: number, text: string): void {
@@ -172,97 +209,25 @@ export class Panel {
   }
 }
 
-/** The strings in a model that are ACL2 code rather than prose. */
-function highlightable(m: PanelModel): string[] {
-  return [
-    ...m.checkpoints.map((c) => c.term),
-    ...(m.rules ?? []),
-    ...(m.hintEvents ?? []),
-    ...(m.splitterRules ?? []),
-    ...(m.inner ?? []).flatMap((e) => e.rules ?? []),
-  ];
-}
-
-const HTML = `<!DOCTYPE html>
+/** Exported so `webview.mjs` can parse-check it; nothing else imports it. */
+export const HTML = `<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy"
       content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
 <style>
-body { font-family: var(--vscode-font-family); color: var(--vscode-foreground);
-       font-size: 13px; padding: 2px 12px 12px; }
-.h { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; margin: 10px 0 4px; }
-.status { font-weight: 600; padding: 1px 8px; border-radius: 9px; }
-.status.admitted { background: rgba(46, 125, 50, 0.25); }
-.status.conditional { background: rgba(212, 172, 13, 0.25); }
-.status.skipped, .status.failed { background: rgba(198, 40, 40, 0.25); }
-.status.running { background: rgba(90, 140, 210, 0.3); }
-.status.pending { background: rgba(136, 136, 136, 0.2); }
-.meta { opacity: 0.7; font-size: 12px; }
-h3 { margin: 14px 0 4px; font-size: 11px; text-transform: uppercase;
-     letter-spacing: 0.05em; opacity: 0.75; }
-pre, code { font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; }
-pre { background: var(--vscode-textCodeBlock-background); padding: 6px 8px;
-      border-radius: 4px; overflow: auto; margin: 4px 0; white-space: pre-wrap; }
-/* Override the webview default: its light chip behind inline code is
-   unreadable on dark themes. A faint neutral chip with the theme
-   foreground works on both. */
-code { background-color: rgba(128, 128, 128, 0.14);
-       color: var(--vscode-foreground); padding: 0 4px; border-radius: 3px; }
-pre code { background: none; padding: 0; }
-button { background: var(--vscode-button-secondaryBackground);
-         color: var(--vscode-button-secondaryForeground); border: none;
-         padding: 2px 9px; border-radius: 3px; cursor: pointer; font-size: 11px; }
-button:hover { background: var(--vscode-button-secondaryHoverBackground); }
-.note { background: rgba(198, 40, 40, 0.15); padding: 6px 9px; border-radius: 4px;
-        margin: 8px 0; font-size: 12px; }
+${SHARED_CSS}
+body { padding: 2px 12px 12px; }
 #tailtext { max-height: 45vh; overflow: auto; }
-.rules code, .codes code { display: inline-block; margin: 1px 5px 1px 0; }
-.cp { margin: 8px 0; }
-details > summary { cursor: pointer; }
-details > summary h3 { display: inline; }
-table.inner { border-collapse: collapse; font-size: 12px; }
-table.inner td { padding: 1px 10px 1px 0; vertical-align: baseline; }
-.failtag { color: var(--vscode-terminal-ansiRed, #cc6666); font-weight: 600; }
 </style>
 </head>
 <body>
 <div id="root"><p class="meta">Put the cursor in a form of a live book.</p></div>
 <script>
 const vscode = acquireVsCodeApi();
+${SHARED_JS}
 let model;
-const esc = (s) => String(s).replace(/[&<>"]/g,
-  (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-// Not anchored: the outer abort cause is a bare symbol, but an inner event's
-// causes arrive as a printed list -- \`(ACL2::INDUCTION-DEPTH-LIMIT-EXCEEDED)\`
-// -- where a leading-only strip never fires. Only \`acl2::\` goes, and only
-// where it is a whole package prefix, so \`my-acl2::\` is left alone.
-const strip = (s) => String(s).replace(/(?<![\\w-])acl2::/gi, '');
-
-// ACL2 hands us one cause or a list of them, printed as it prints lists. The
-// parentheses are a Lisp-ism the reader did not ask for and the plural is
-// the point, so peel the list and report the causes as causes.
-function causes(s) {
-  const t = String(s).trim();
-  const body = t.startsWith('(') && t.endsWith(')') ? t.slice(1, -1) : t;
-  return body.split(/\\s+/).filter(Boolean).map(strip);
-}
-
-// Terms arrive tokenized and colored by the extension, which ran them
-// through the same grammar and the same theme rules the editor uses. Here
-// they are only spans; a string with no entry is code we were not asked to
-// highlight, or a tokenizer that has not finished loading.
-let toks = {};
-function hl(src) {
-  const lines = toks[String(src)];
-  if (!lines) { return esc(src); }
-  return lines.map((line) => line.map((t) =>
-    t.c
-      ? '<span style="color:' + t.c + (t.i ? ';font-style:italic' : '') + '">' + esc(t.t) + '</span>'
-      : esc(t.t)
-  ).join('')).join('\\n');
-}
 
 window.addEventListener('message', (ev) => {
   const m = ev.data;
@@ -283,46 +248,6 @@ window.addEventListener('message', (ev) => {
     if (d) { d.textContent = m.text || '(nothing captured under this goal)'; }
   }
 });
-
-function codes(list) {
-  return '<p class="codes">' +
-    list.map((r) => '<code class="lisp">' + hl(r) + '</code>').join('') + '</p>';
-}
-
-// ACL2 reports times as rationals of seconds; render them as labeled
-// decimals instead of fractions.
-function rat(tok) {
-  const m = /^(-?[0-9]+)(?:\\/([0-9]+))?$/.exec(tok);
-  if (m) { return Number(m[1]) / (m[2] ? Number(m[2]) : 1); }
-  const f = parseFloat(tok);
-  return isNaN(f) ? null : f;
-}
-function fmtSecs(v) {
-  if (v === 0) { return '0s'; }
-  if (v >= 10) { return v.toFixed(1) + 's'; }
-  if (v >= 0.0005) { return v.toFixed(3) + 's'; }
-  return '<0.001s';
-}
-function timeParts(t) {
-  const toks = String(t || '').replace(/[()]/g, '').trim().split(/\\s+/);
-  if (toks.length !== 4) { return null; }
-  const vals = toks.map(rat);
-  return vals.some((v) => v === null) ? null : vals;
-}
-function fmtTime(t) {
-  const vals = timeParts(t);
-  if (!vals) { return esc(t); }
-  const names = ['prove', 'print', 'proof-tree', 'other'];
-  return names
-    .map((n, i) => ({ n, v: vals[i] }))
-    .filter((x, i) => x.v > 0 || i === 0)
-    .map((x) => x.n + ' ' + fmtSecs(x.v))
-    .join(' \\u00b7 ');
-}
-function proveSecs(t) {
-  const vals = timeParts(t);
-  return vals ? fmtSecs(vals[0]) : '';
-}
 
 function render() {
   const m = model;
@@ -349,96 +274,11 @@ function render() {
   if (m.status === 'pending') {
     h += '<p class="meta">Not processed yet.</p>';
   }
-  if (m.errorLine || m.abortCause || (m.checkpoints || []).length) {
-    h += '<h3>Failure</h3>';
-    if (m.errorLine) { h += '<pre>' + esc(m.errorLine) + '</pre>'; }
-    if (m.abortCause) {
-      const cs = causes(m.abortCause);
-      h += '<p class="meta">abort cause' + (cs.length > 1 ? 's' : '') + ': ' +
-        cs.map((c) => '<code>' + esc(c) + '</code>').join(' ') + '</p>';
-    }
-    if (m.forced) {
-      h += '<p class="meta">forced assumptions are present.</p>';
-    }
-    if (m.preRevert) {
-      h += '<p class="meta">top checkpoints are from before the proof reverted to induction.</p>';
-    }
-    (m.checkpoints || []).forEach((c, i) => {
-      const kind = c.kind === 'top' && m.preRevert ? 'top!' : c.kind;
-      h += '<div class="cp"><div class="meta">' + esc(kind) + ' ' + esc(c.goal || '') + ' ' +
-        (c.goal
-          ? '<button data-goal="' + esc(c.goal) + '" data-slot="' + i + '">prover output</button>'
-          : '') +
-        '</div><pre>' + hl(c.term) + '</pre><pre id="goal-' + i + '" hidden></pre></div>';
-    });
-    const shownTop = (m.checkpoints || []).filter((c) => c.kind === 'top').length;
-    const shownSub = (m.checkpoints || []).filter((c) => c.kind === 'sub').length;
-    if ((m.nTop || 0) > shownTop || (m.nSub || 0) > shownSub) {
-      h += '<p class="meta">showing ' + shownTop + ' of ' + (m.nTop || shownTop) +
-        ' top and ' + shownSub + ' of ' + (m.nSub || shownSub) +
-        ' subgoal checkpoints; the rest are in the full log.</p>';
-    }
-  }
-  if (m.warnings) {
-    // The daemon joins the kinds with ", ", so splitting counts them exactly.
-    const kinds = String(m.warnings).split(', ');
-    h += '<details open><summary><h3>Warnings (' + kinds.length + ')</h3></summary>' +
-      '<pre>' + esc(m.warnings) + '</pre></details>';
-  }
-  if ((m.hintEvents || []).length) {
-    h += '<h3>Hints that fired</h3>' + codes(m.hintEvents);
-  }
-  if ((m.splitterRules || []).length) {
-    h += '<h3>Splitter rules</h3>' + codes(m.splitterRules);
-  }
-  if ((m.rules || []).length) {
-    const label = m.status === 'skipped' || m.status === 'failed'
-      ? 'Rules the attempt used'
-      : 'Rules';
-    h += '<details open><summary><h3>' + label + ' (' + m.rules.length + ')</h3></summary>' +
-      codes(m.rules) + '</details>';
-  }
-  const inner = m.inner || [];
-  if (inner.length) {
-    const total = m.innerTotal != null && m.innerTotal > inner.length
-      ? inner.length + ' shown of ' + m.innerTotal
-      : String(inner.length);
-    h += '<details open><summary><h3>Inside this form (' + total + ')</h3></summary>' +
-      '<table class="inner">' +
-      inner.map((e) => {
-        // An empty steps cell has meant two different things: this event
-        // never entered the prover, and this event's detail was never read.
-        // A probed event has *something* -- kind, time, rules -- so a dash
-        // can say "no steps" where blank keeps meaning "not looked at".
-        const probed = !!(e.kind || e.time || (e.rules || []).length || e.proverSteps != null);
-        const steps = e.proverSteps != null
-          ? e.proverSteps + ' steps'
-          : (probed ? '<span title="the prover was not entered">&mdash;</span>' : '');
-        let row = '<tr><td>' + esc(e.kind || '') + '</td>' +
-          '<td><code>' + esc(e.name) + '</code></td>' +
-          '<td class="meta">' + proveSecs(e.time) + '</td>' +
-          '<td class="meta">' + steps + '</td>' +
-          '<td>' + causes(e.abortCauses || '')
-            .map((c) => '<span class="failtag">' + esc(c) + '</span>').join(', ') + '</td></tr>';
-        if ((e.rules || []).length) {
-          // Second-level detail, folded: the count keeps it visible that the
-          // rules are there without a wall of chips between one event's row
-          // and the next.
-          row += '<tr><td></td><td colspan="4" class="innerrules">' +
-            '<details><summary class="meta">rules (' + e.rules.length + ')</summary>' +
-            codes(e.rules) + '</details></td></tr>';
-        }
-        return row;
-      }).join('') + '</table>';
-    const detailed = inner.filter(
-      (e) => e.kind || e.time || e.proverSteps != null || (e.rules || []).length
-    ).length;
-    if (detailed < inner.length) {
-      h += '<p class="meta">detail (kind, time, steps, rules) is probed for the first ' +
-        detailed + ' events; the rest are names only.</p>';
-    }
-    h += '</details>';
-  }
+  h += envelope(
+    { ...m, failed: m.status === 'skipped' || m.status === 'failed' },
+    'goal-',
+    'goal'
+  );
   h += '<h3>Actions</h3><p>' +
     (m.outputLines
       ? '<button id="fulllog">full log (' + m.outputLines + ' lines)</button> '
@@ -446,14 +286,6 @@ function render() {
     '<button id="retract">retract this form</button> ' +
     '<button id="target">hold target here</button></p>';
   document.getElementById('root').innerHTML = h;
-  for (const b of document.querySelectorAll('button[data-goal]')) {
-    b.addEventListener('click', () => {
-      const pre = document.getElementById('goal-' + b.dataset.slot);
-      pre.hidden = false;
-      pre.textContent = '(fetching\\u2026)';
-      vscode.postMessage({ cmd: 'goal', goal: b.dataset.goal, slot: Number(b.dataset.slot) });
-    });
-  }
   const on = (id, cmd) => {
     const el = document.getElementById(id);
     if (el) { el.addEventListener('click', () => vscode.postMessage({ cmd })); }
@@ -462,6 +294,8 @@ function render() {
   on('retract', 'retract');
   on('target', 'target');
 }
+
+bindGoals(document, (b, slot) => 'goal-' + slot);
 </script>
 </body>
 </html>`;

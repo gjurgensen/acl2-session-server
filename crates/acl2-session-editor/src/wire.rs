@@ -6,8 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use acl2_session::sync::{FailureReport, UnitReport};
-use acl2_session::{Slice, Status};
+use acl2_session::sync::{Checkpoints, EvalResult, FailureReport, UnitReport};
+use acl2_session::{Outcome, Slice, Status, WorldChange};
 
 #[derive(Debug, Deserialize)]
 pub struct OpenParams {
@@ -50,6 +50,14 @@ pub struct RetractParams {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct EvalParams {
+    pub book: String,
+    /// One or more top-level forms, as the user typed them. Not part of the
+    /// file, so nothing here is admitted: see the core's `eval`.
+    pub form: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct OutputParams {
     pub book: String,
     /// A handle from a `unit` event. Never construct one.
@@ -88,6 +96,71 @@ pub struct RunningReply {
 pub struct ImagesReply {
     pub images: Vec<String>,
     pub default: Option<String>,
+}
+
+/// What an eval'd form did.
+///
+/// The failure fields are `UnitEvent`'s, flattened the same way and meaning
+/// the same things, so one renderer serves a red form and a red experiment
+/// alike; the file coordinates are the only ones missing, because an eval has
+/// none. `world_change` is the fact only an eval has.
+#[derive(Debug, Serialize)]
+pub struct EvalReply {
+    /// `ok` or `failed`. Never `still_running`: the driver follows an eval to
+    /// completion before it answers.
+    pub outcome: &'static str,
+    /// `none` -- the form introduced no events; `undone` -- it did and they
+    /// were rolled back, which is the contract working; `dirty` -- the
+    /// rollback did not verify, so the next sync rebuilds by replay.
+    pub world_change: &'static str,
+    pub elapsed_ms: u128,
+    pub output_ref: String,
+    pub output_lines: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_line: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub abort_cause: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prover_steps: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warnings: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hint_events: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub splitter_rules: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub checkpoints: Vec<CheckpointEvent>,
+    #[serde(skip_serializing_if = "is_false")]
+    pub pre_revert: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub forced: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub inner: Vec<InnerEventWire>,
+    pub inner_total: usize,
+    pub n_top: usize,
+    pub n_sub: usize,
+}
+
+/// Where a queued eval stands.
+///
+/// Sent when an eval is accepted and again when it actually starts. Without
+/// it, an eval submitted behind a four-minute proof looks identical to one
+/// the daemon dropped: the reply is the only other thing the client hears,
+/// and it does not come until the form has run.
+#[derive(Debug, Serialize)]
+pub struct EvalStateEvent {
+    pub book: String,
+    /// `queued` -- the session is busy; this goes when the form in flight
+    /// finishes. `running` -- it is the form in flight.
+    pub state: &'static str,
+    /// Evals ahead of this one in the queue.
+    pub ahead: usize,
 }
 
 // ---- Events, daemon to client ----------------------------------------------
@@ -323,19 +396,26 @@ pub fn unit_admitted(book: &str, revision: u64, u: &UnitReport) -> UnitEvent {
     }
 }
 
+/// Top checkpoints first, then sub -- the order a reader wants them, and the
+/// order both envelopes render them in.
+fn checkpoint_wire(c: &Checkpoints) -> Vec<CheckpointEvent> {
+    let mut out = Vec::with_capacity(c.top.len() + c.sub.len());
+    for k in &c.top {
+        out.push(CheckpointEvent { kind: "top", goal: k.goal.clone(), term: k.term.clone() });
+    }
+    for k in &c.sub {
+        out.push(CheckpointEvent { kind: "sub", goal: k.goal.clone(), term: k.term.clone() });
+    }
+    out
+}
+
 pub fn unit_failure(
     book: &str,
     revision: u64,
     f: &FailureReport,
     outcome: &'static str,
 ) -> UnitEvent {
-    let mut checkpoints = Vec::new();
-    for c in &f.checkpoints.top {
-        checkpoints.push(CheckpointEvent { kind: "top", goal: c.goal.clone(), term: c.term.clone() });
-    }
-    for c in &f.checkpoints.sub {
-        checkpoints.push(CheckpointEvent { kind: "sub", goal: c.goal.clone(), term: c.term.clone() });
-    }
+    let checkpoints = checkpoint_wire(&f.checkpoints);
     UnitEvent {
         book: book.to_string(),
         revision,
@@ -363,6 +443,45 @@ pub fn unit_failure(
         inner_total: f.inner_total,
         n_top: f.checkpoints.n_top,
         n_sub: f.checkpoints.n_sub,
+    }
+}
+
+pub fn evaluated(r: &EvalResult) -> EvalReply {
+    // An eval carries no `EventData` of its own when it succeeded: the
+    // envelope the core builds is the failure envelope, and a form that ran
+    // clean has nothing to explain. Everything below the outcome therefore
+    // comes from `failed`, or is empty.
+    let f = r.failed.as_ref();
+    EvalReply {
+        outcome: match r.outcome {
+            Outcome::Ok => "ok",
+            Outcome::Failed => "failed",
+            Outcome::StillRunning => "still_running",
+        },
+        world_change: match r.world_change {
+            WorldChange::None => "none",
+            WorldChange::Undone => "undone",
+            WorldChange::Dirty => "dirty",
+        },
+        elapsed_ms: r.elapsed.as_millis(),
+        output_ref: r.output_ref.as_str().to_string(),
+        output_lines: r.output_lines,
+        status: f.map(|f| status_str(f.status)),
+        error_line: f.and_then(|f| f.error_line.clone()),
+        abort_cause: f.and_then(|f| f.checkpoints.abort_cause.clone()),
+        prover_steps: f.and_then(|f| f.event_data.prover_steps),
+        warnings: f.and_then(|f| join_warnings(&f.event_data.warnings)),
+        time: f.and_then(|f| f.event_data.time.clone()),
+        hint_events: f.map(|f| f.event_data.hint_events.clone()).unwrap_or_default(),
+        splitter_rules: f.map(|f| f.event_data.splitter_rules.clone()).unwrap_or_default(),
+        rules: f.map(|f| f.event_data.rules.clone()).unwrap_or_default(),
+        checkpoints: f.map(|f| checkpoint_wire(&f.checkpoints)).unwrap_or_default(),
+        pre_revert: f.is_some_and(|f| f.checkpoints.pre_revert),
+        forced: f.is_some_and(|f| f.checkpoints.forced),
+        inner: f.map(|f| inner_wire(&f.inner)).unwrap_or_default(),
+        inner_total: f.map_or(0, |f| f.inner_total),
+        n_top: f.map_or(0, |f| f.checkpoints.n_top),
+        n_sub: f.map_or(0, |f| f.checkpoints.n_sub),
     }
 }
 
