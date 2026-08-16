@@ -160,6 +160,11 @@ pub struct UnitEvent {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub inner: Vec<InnerEventWire>,
     pub inner_total: usize,
+    /// How many top/sub checkpoints the prover pushed. The probe reads a
+    /// fixed number of slots, so `checkpoints` may hold fewer; these counts
+    /// keep a truncation from reading as the whole story.
+    pub n_top: usize,
+    pub n_sub: usize,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -175,6 +180,10 @@ pub struct InnerEventWire {
     pub time: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prover_steps: Option<i64>,
+    /// Runes this inner event used. Present only within the core's detail
+    /// slots (`INNER_DETAIL_SLOTS`), like the rest of the per-event detail.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<String>,
     /// Non-empty when this inner event is the one that failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub abort_causes: Option<String>,
@@ -225,6 +234,7 @@ fn inner_wire(inner: &[acl2_session::InnerEvent]) -> Vec<InnerEventWire> {
             kind: e.kind.clone(),
             time: e.time.clone(),
             prover_steps: e.prover_steps,
+            rules: e.rules.clone(),
             abort_causes: e.abort_causes.clone(),
         })
         .collect()
@@ -256,6 +266,8 @@ pub fn unit_admitted(book: &str, revision: u64, u: &UnitReport) -> UnitEvent {
         forced: false,
         inner: inner_wire(&u.inner),
         inner_total: u.inner_total,
+        n_top: 0,
+        n_sub: 0,
     }
 }
 
@@ -297,6 +309,8 @@ pub fn unit_failure(
         forced: f.checkpoints.forced,
         inner: inner_wire(&f.inner),
         inner_total: f.inner_total,
+        n_top: f.checkpoints.n_top,
+        n_sub: f.checkpoints.n_sub,
     }
 }
 

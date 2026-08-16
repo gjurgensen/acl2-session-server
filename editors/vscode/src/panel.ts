@@ -24,6 +24,7 @@ export interface PanelInnerEvent {
   kind?: string;
   time?: string;
   proverSteps?: number;
+  rules?: string[];
   abortCauses?: string;
 }
 
@@ -50,6 +51,8 @@ export interface PanelModel {
   forced?: boolean;
   inner?: PanelInnerEvent[];
   innerTotal?: number;
+  nTop?: number;
+  nSub?: number;
 }
 
 export class Panel {
@@ -156,6 +159,12 @@ h3 { margin: 14px 0 4px; font-size: 11px; text-transform: uppercase;
 pre, code { font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; }
 pre { background: var(--vscode-textCodeBlock-background); padding: 6px 8px;
       border-radius: 4px; overflow: auto; margin: 4px 0; white-space: pre-wrap; }
+/* Override the webview default: its light chip behind inline code is
+   unreadable on dark themes. A faint neutral chip with the theme
+   foreground works on both. */
+code { background-color: rgba(128, 128, 128, 0.14);
+       color: var(--vscode-foreground); padding: 0 4px; border-radius: 3px; }
+pre code { background: none; padding: 0; }
 button { background: var(--vscode-button-secondaryBackground);
          color: var(--vscode-button-secondaryForeground); border: none;
          padding: 2px 9px; border-radius: 3px; cursor: pointer; font-size: 11px; }
@@ -248,6 +257,41 @@ function codes(list) {
     list.map((r) => '<code class="lisp">' + hl(r) + '</code>').join('') + '</p>';
 }
 
+// ACL2 reports times as rationals of seconds; render them as labeled
+// decimals instead of fractions.
+function rat(tok) {
+  const m = /^(-?[0-9]+)(?:\\/([0-9]+))?$/.exec(tok);
+  if (m) { return Number(m[1]) / (m[2] ? Number(m[2]) : 1); }
+  const f = parseFloat(tok);
+  return isNaN(f) ? null : f;
+}
+function fmtSecs(v) {
+  if (v === 0) { return '0s'; }
+  if (v >= 10) { return v.toFixed(1) + 's'; }
+  if (v >= 0.0005) { return v.toFixed(3) + 's'; }
+  return '<0.001s';
+}
+function timeParts(t) {
+  const toks = String(t || '').replace(/[()]/g, '').trim().split(/\\s+/);
+  if (toks.length !== 4) { return null; }
+  const vals = toks.map(rat);
+  return vals.some((v) => v === null) ? null : vals;
+}
+function fmtTime(t) {
+  const vals = timeParts(t);
+  if (!vals) { return esc(t); }
+  const names = ['prove', 'print', 'proof-tree', 'other'];
+  return names
+    .map((n, i) => ({ n, v: vals[i] }))
+    .filter((x, i) => x.v > 0 || i === 0)
+    .map((x) => x.n + ' ' + fmtSecs(x.v))
+    .join(' \\u00b7 ');
+}
+function proveSecs(t) {
+  const vals = timeParts(t);
+  return vals ? fmtSecs(vals[0]) : '';
+}
+
 function render() {
   const m = model;
   let h = '<div class="h">' +
@@ -260,7 +304,7 @@ function render() {
   if (m.proverSteps != null) { h += '<span class="meta">' + m.proverSteps + ' steps</span>'; }
   h += '</div>';
   if (m.time) {
-    h += '<p class="meta">time (prove print proof-tree other): ' + esc(m.time) + '</p>';
+    h += '<p class="meta">time: ' + fmtTime(m.time) + '</p>';
   }
   if (m.skipped) {
     h += '<div class="note">Admitted with its proofs skipped \\u2014 checking continued. ' +
@@ -293,6 +337,13 @@ function render() {
           : '') +
         '</div><pre>' + hl(c.term) + '</pre><pre id="goal-' + i + '" hidden></pre></div>';
     });
+    const shownTop = (m.checkpoints || []).filter((c) => c.kind === 'top').length;
+    const shownSub = (m.checkpoints || []).filter((c) => c.kind === 'sub').length;
+    if ((m.nTop || 0) > shownTop || (m.nSub || 0) > shownSub) {
+      h += '<p class="meta">showing ' + shownTop + ' of ' + (m.nTop || shownTop) +
+        ' top and ' + shownSub + ' of ' + (m.nSub || shownSub) +
+        ' subgoal checkpoints; the rest are in the full log.</p>';
+    }
   }
   if (m.warnings) {
     h += '<h3>Warnings</h3><pre>' + esc(m.warnings) + '</pre>';
@@ -317,11 +368,25 @@ function render() {
       : String(inner.length);
     h += '<details open><summary><h3>Inside this form (' + total + ')</h3></summary>' +
       '<table class="inner">' +
-      inner.map((e) => '<tr><td>' + esc(e.kind || '') + '</td>' +
-        '<td><code>' + esc(e.name) + '</code></td>' +
-        '<td class="meta">' + (e.proverSteps != null ? e.proverSteps + ' steps' : '') + '</td>' +
-        '<td>' + (e.abortCauses ? '<span class="failtag">' + esc(strip(e.abortCauses)) + '</span>' : '') + '</td></tr>'
-      ).join('') + '</table></details>';
+      inner.map((e) => {
+        let row = '<tr><td>' + esc(e.kind || '') + '</td>' +
+          '<td><code>' + esc(e.name) + '</code></td>' +
+          '<td class="meta">' + proveSecs(e.time) + '</td>' +
+          '<td class="meta">' + (e.proverSteps != null ? e.proverSteps + ' steps' : '') + '</td>' +
+          '<td>' + (e.abortCauses ? '<span class="failtag">' + esc(strip(e.abortCauses)) + '</span>' : '') + '</td></tr>';
+        if ((e.rules || []).length) {
+          row += '<tr><td></td><td colspan="4" class="innerrules">' + codes(e.rules) + '</td></tr>';
+        }
+        return row;
+      }).join('') + '</table>';
+    const detailed = inner.filter(
+      (e) => e.kind || e.time || e.proverSteps != null || (e.rules || []).length
+    ).length;
+    if (detailed < inner.length) {
+      h += '<p class="meta">detail (kind, time, steps, rules) is probed for the first ' +
+        detailed + ' events; the rest are names only.</p>';
+    }
+    h += '</details>';
   }
   h += '<h3>Actions</h3><p>' +
     (m.outputLines

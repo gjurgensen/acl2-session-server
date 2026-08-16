@@ -36,6 +36,7 @@ export interface InnerEventWire {
   kind?: string;
   time?: string;
   prover_steps?: number;
+  rules?: string[];
   abort_causes?: string;
 }
 
@@ -64,6 +65,8 @@ export interface UnitEvent {
   forced?: boolean;
   inner?: InnerEventWire[];
   inner_total?: number;
+  n_top?: number;
+  n_sub?: number;
 }
 
 export interface TailEvent {

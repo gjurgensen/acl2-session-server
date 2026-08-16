@@ -525,9 +525,12 @@ function buildPanelModel(s: BookSession, index: number): PanelModel | undefined 
       kind: i.kind,
       time: i.time,
       proverSteps: i.prover_steps,
+      rules: i.rules ?? [],
       abortCauses: i.abort_causes,
     }));
     model.innerTotal = e.inner_total ?? model.inner.length;
+    model.nTop = e.n_top ?? 0;
+    model.nSub = e.n_sub ?? 0;
   }
   return model;
 }
