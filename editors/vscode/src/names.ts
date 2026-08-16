@@ -21,6 +21,18 @@ export interface DescribeReply {
   path?: string;
 }
 
+/** Where a name is defined. `unit` means this file; `path` means another. */
+export interface DefinitionReply {
+  available: boolean;
+  found: boolean;
+  unit?: number;
+  path?: string;
+  /** Absent means "somewhere in that file" -- open it at the top. */
+  line?: number;
+  /** `definer` when the name is written at that line. */
+  how?: string;
+}
+
 /**
  * ACL2's own name for a book, as a human would say it.
  *

@@ -152,6 +152,48 @@ pub fn describe_busy(name: &str) -> DescribeReply {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct DefinitionParams {
+    pub book: String,
+    /// The token under the cursor, like `describe`.
+    pub name: String,
+}
+
+/// Where a name is defined -- a `Location`, in LSP's shape.
+///
+/// `path` absent with `unit` present means "in the file you are looking at";
+/// the client already has that unit's span and needs no path to jump.
+#[derive(Debug, Serialize)]
+pub struct DefinitionReply {
+    /// As in `DescribeReply`: the session was busy and nothing was cached.
+    pub available: bool,
+    pub found: bool,
+    /// The unit of *this* file, when the name is defined here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<usize>,
+    /// Another file, when it is not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// 1-based line within whichever file. Absent means "the file, somewhere"
+    /// -- open it at the top rather than pointing at a form we did not find.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
+    /// How the line was reached, so the client can say how sure it is:
+    /// `definer` (the name is written there -- exact) or `unit` (the file's
+    /// own envelope said so -- exact). Generated names in *other* books wait
+    /// on the census; until then they answer with a path and no line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub how: Option<&'static str>,
+}
+
+pub fn definition_busy() -> DefinitionReply {
+    DefinitionReply { available: false, found: false, unit: None, path: None, line: None, how: None }
+}
+
+pub fn definition_missing() -> DefinitionReply {
+    DefinitionReply { available: true, found: false, unit: None, path: None, line: None, how: None }
+}
+
+#[derive(Debug, Deserialize)]
 pub struct OutputParams {
     pub book: String,
     /// A handle from a `unit` event. Never construct one.

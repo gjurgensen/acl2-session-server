@@ -139,6 +139,16 @@ impl Daemon {
                 .map_err(fail)?;
                 Ok(Answer::ByDriver)
             }
+            "definition" => {
+                let p: wire::DefinitionParams = args(params)?;
+                let id = id.clone();
+                self.handle_of(&p.book, |h| {
+                    h.tx.send(Cmd::Definition { id, name: p.name }).map_err(|e| e.to_string())
+                })
+                .map_err(fail)?
+                .map_err(fail)?;
+                Ok(Answer::ByDriver)
+            }
             "interrupt" => {
                 let p: wire::BookParams = args(params)?;
                 self.handle_of(&p.book, |h| {

@@ -30,6 +30,9 @@ pub enum Cmd {
     /// from a 10 ms probe when the session is free, and otherwise declined --
     /// never queued. See [`Driver::describe`].
     Describe { id: Value, name: String },
+    /// Where is this name defined? Same never-queue policy as `Describe`,
+    /// which it is built on. See [`Driver::definition`].
+    Definition { id: Value, name: String },
     Pause,
     Close,
 }
@@ -64,6 +67,25 @@ enum Flow {
 
 fn to_value(r: impl serde::Serialize) -> Value {
     serde_json::to_value(r).expect("serialize")
+}
+
+/// Whether two written symbols name the same thing, for the purpose of
+/// finding a definition in text.
+///
+/// Case-insensitive, because ACL2's reader upcases and books are written in
+/// both. Package prefixes are compared only when *both* carry one: a book
+/// that is `(in-package "FTY")` writes `(define fixtype …)` while the world
+/// reports `fty::fixtype`, so requiring the prefix to appear in the text
+/// would find nothing at all in exactly the books that use packages most.
+/// Comparing bare tails can in principle confuse `foo::bar` with `baz::bar`
+/// -- but only within one file, which is a single book's own namespace, so
+/// the collision needs two packages defining the same name in the same file.
+fn same_symbol(written: &str, wanted: &str) -> bool {
+    let bare = |s: &str| s.rsplit("::").next().unwrap_or(s).to_ascii_lowercase();
+    match (written.contains("::"), wanted.contains("::")) {
+        (true, true) => written.eq_ignore_ascii_case(wanted),
+        _ => bare(written) == bare(wanted),
+    }
 }
 
 pub struct Driver {
@@ -280,6 +302,10 @@ impl Driver {
                 self.describe(&id, &name);
                 Flow::Continue
             }
+            Cmd::Definition { id, name } => {
+                self.definition(&id, &name);
+                Flow::Continue
+            }
             Cmd::Pause => {
                 // The protocol loop already sent request_abort, so a blocked
                 // call has yielded; the escalation itself runs here, where
@@ -323,9 +349,95 @@ impl Driver {
     /// `available: false` is not an error and not "no such name": the client
     /// shows nothing and asks again on the next hover.
     fn describe(&mut self, id: &Value, name: &str) {
+        match self.cached_detail(name) {
+            Ok(d) => self.out.reply(id, to_value(wire::described(name, d.as_ref()))),
+            // Busy, or the session unwell -- which the client learns about
+            // through `status`; a hover is not the place to surface it a
+            // second time, so both degrade to the same "ask again".
+            Err(()) => self.out.reply(id, to_value(wire::describe_busy(name))),
+        }
+    }
+
+    /// Where is this name defined?
+    ///
+    /// Three tiers, and each says honestly how it got its answer. The world
+    /// names the *file*; finding the form inside it is
+    /// text work, done here.
+    ///
+    /// 1. A name this file defines. The world reports no book for it, so the
+    ///    answer is a unit of the buffer -- located by the definer scan over
+    ///    the snapshot we already hold, which needs no ACL2 and therefore
+    ///    works for units below the frontier that have not been admitted yet.
+    /// 2. A name from an included book: `describe` gives the file, and the
+    ///    same scan over that file's text gives the line.
+    /// 3. A generated name -- absent from its book's text. Measured, the
+    ///    decomposition heuristic on its own is only ~83% precise however it
+    ///    is guarded, so roughly one jump in six would land on the wrong
+    ///    form. That is worse than not answering, so until the census
+    ///    supplies the anchoring window that took it to 100%, these return
+    ///    the file with **no line**: the editor opens it at the top, which is
+    ///    honest about what is known.
+    fn definition(&mut self, id: &Value, name: &str) {
+        // The buffer first, and not merely as an optimisation. A name written
+        // in this file but not yet admitted is unknown to the world -- so
+        // asking the world first would fail to find exactly the definition
+        // the author is in the middle of writing, which is when they are most
+        // likely to want it. Scanning the snapshot needs no session at all,
+        // which also means an in-file jump works while a proof is running.
+        //
+        // A local definition also rightly wins over an included one of the
+        // same name: it is the text in front of the reader.
+        if let Some(s) = self.site_in(&self.bytes.clone(), name) {
+            let unit = self.units.iter().position(|u| s.offset >= u.start && s.offset < u.end);
+            return self.out.reply(id, to_value(wire::DefinitionReply {
+                available: true,
+                found: true,
+                unit,
+                path: None,
+                line: Some(s.line),
+                how: Some("definer"),
+            }));
+        }
+        // Not in the buffer, so ask the world which book has it.
+        let detail = match self.cached_detail(name) {
+            Ok(d) => d,
+            Err(()) => return self.out.reply(id, to_value(wire::definition_busy())),
+        };
+        let Some(p) = detail.and_then(|d| d.book_path) else {
+            // Either no such name, or one ACL2 itself defines -- for which
+            // there is no book to open. Both are "nothing to jump to".
+            return self.out.reply(id, to_value(wire::definition_missing()));
+        };
+        let line = std::fs::read(&p).ok().and_then(|b| self.site_in(&b, name).map(|s| s.line));
+        self.out.reply(id, to_value(wire::DefinitionReply {
+            available: true,
+            found: true,
+            unit: None,
+            path: Some(p.display().to_string()),
+            line,
+            how: line.map(|_| "definer"),
+        }));
+    }
+
+    /// The form in `text` that defines `name`, if its text names it.
+    ///
+    /// Tier 3. Tier 4 -- a generated name, absent from the
+    /// text -- deliberately answers `None` for now: measured, decomposition
+    /// without the census's anchoring window is only ~83% precise however it
+    /// is guarded, and a jump that lands on the wrong form is worse than one
+    /// that opens the file at the top.
+    fn site_in(&self, text: &[u8], name: &str) -> Option<acl2_session::DefinerSite> {
+        acl2_session::definer_sites(text).into_iter().find(|s| same_symbol(&s.name, name))
+    }
+
+    /// `describe`, through the cache, as `definition` needs it.
+    ///
+    /// `Err(())` means the session was busy and nothing was cached -- the
+    /// same decline `describe` itself gives, propagated rather than turned
+    /// into "no such name".
+    fn cached_detail(&mut self, name: &str) -> Result<Option<NameDetail>, ()> {
         if let Some(d) = self.details.get(name) {
-            self.out.reply(id, to_value(wire::described(name, d.as_ref())));
-            return;
+            return Ok(d.clone());
         }
         let r = {
             let mut book = self.book.lock().expect("book lock");
@@ -333,16 +445,10 @@ impl Driver {
         };
         match r {
             Ok(d) => {
-                self.out.reply(id, to_value(wire::described(name, d.as_ref())));
-                self.details.insert(name.to_string(), d);
+                self.details.insert(name.to_string(), d.clone());
+                Ok(d)
             }
-            Err(SyncError::Busy { .. }) => {
-                self.out.reply(id, to_value(wire::describe_busy(name)))
-            }
-            // Anything else is the session being unwell, which the client
-            // learns about through `status`; a hover is not the place to
-            // surface it, so it degrades to "ask again" like a busy one.
-            Err(_) => self.out.reply(id, to_value(wire::describe_busy(name))),
+            Err(_) => Err(()),
         }
     }
 

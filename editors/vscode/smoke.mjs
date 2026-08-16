@@ -197,6 +197,18 @@ if (!hovered.available) {
   assert(hoverMarkdown(hovered) === undefined, 'and a declined hover renders nothing');
 }
 
+// definition: this file, by unit and line, located in the buffer rather than
+// in the world -- so it is right even for a form the session has not admitted.
+const dhere = await c.request('definition', { book: opened.book, name: 'alpha' });
+assert(dhere.available && dhere.found, 'definition finds a name defined here');
+assert(dhere.path === undefined, 'a name defined here answers with no path');
+assert(dhere.unit === 1, 'and names the unit that defines it');
+assert(dhere.line === 3, 'and the line the form starts on');
+assert(dhere.how === 'definer', 'reported as exact, since the name is written there');
+
+const dnone = await c.request('definition', { book: opened.book, name: 'not-a-name-here' });
+assert(dnone.available && !dnone.found, 'an unknown token has no definition');
+
 const closed = await c.request('close', { book: opened.book });
 assert(closed.closed === true, 'close closes');
 c.dispose();

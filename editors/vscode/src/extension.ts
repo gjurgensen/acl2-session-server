@@ -31,7 +31,7 @@ import { EVAL_SCHEME, OutputView, SCHEME } from './outputView';
 import { Highlighter } from './highlight';
 import { Panel, PanelEnvelope, PanelModel } from './panel';
 import { Console, ConsoleResult, HISTORY } from './console';
-import { DescribeReply, hoverMarkdown } from './names';
+import { DefinitionReply, DescribeReply, hoverMarkdown } from './names';
 
 const UPDATE_DEBOUNCE_MS = 300;
 
@@ -165,9 +165,12 @@ export function activate(context: vscode.ExtensionContext): void {
     panel,
     status,
     channel,
+    outputView,
+    evalView,
     vscode.workspace.registerTextDocumentContentProvider(SCHEME, outputView),
     vscode.workspace.registerTextDocumentContentProvider(EVAL_SCHEME, evalView),
     vscode.languages.registerHoverProvider({ language: 'acl2' }, hoverProvider),
+    vscode.languages.registerDefinitionProvider({ language: 'acl2' }, definitionProvider),
     vscode.commands.registerCommand('acl2-session.start', startCommand),
     vscode.commands.registerCommand('acl2-session.evalSelection', () => forBook(evalCommand)),
     vscode.commands.registerCommand('acl2-session.showConsole', () =>
@@ -319,6 +322,54 @@ const hoverProvider: vscode.HoverProvider = {
     return md ? new vscode.Hover(new vscode.MarkdownString(md), range) : undefined;
   },
 };
+
+/**
+ * Go to definition.
+ *
+ * The daemon answers with a file and, when it could find the form, a line.
+ * A missing line is not a failure: it means the world named the file but the
+ * name is generated and absent from its text, so the file opens at the top
+ * rather than pointing confidently at the wrong form (tier 3/4).
+ *
+ * A unit index rather than a path means "this file", and the client already
+ * holds that unit's span -- so the jump uses the buffer's own coordinates and
+ * stays right even if the document has moved on since the unit was admitted.
+ */
+const definitionProvider: vscode.DefinitionProvider = {
+  async provideDefinition(doc, position, token) {
+    const s = books.get(doc.uri.toString());
+    if (!s || !client?.alive) {
+      return undefined;
+    }
+    const range = doc.getWordRangeAtPosition(position);
+    if (!range) {
+      return undefined;
+    }
+    let r: DefinitionReply;
+    try {
+      r = await client.request('definition', { book: s.id, name: doc.getText(range) });
+    } catch {
+      return undefined;
+    }
+    if (token.isCancellationRequested || !r.available || !r.found) {
+      return undefined;
+    }
+    if (r.path) {
+      const line = Math.max(0, (r.line ?? 1) - 1);
+      return new vscode.Location(vscode.Uri.file(r.path), new vscode.Position(line, 0));
+    }
+    const line = r.line ?? (r.unit !== undefined ? unitLine(s, r.unit) : undefined);
+    if (line === undefined) {
+      return undefined;
+    }
+    return new vscode.Location(doc.uri, new vscode.Position(Math.max(0, line - 1), 0));
+  },
+};
+
+/** The 1-based start line of a unit, from the last state event. */
+function unitLine(s: BookSession, index: number): number | undefined {
+  return s.lastState?.units.find((u) => u.index === index)?.line_start;
+}
 
 function forBook(f: (s: BookSession) => unknown): void {
   const editor = vscode.window.activeTextEditor;

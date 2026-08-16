@@ -251,3 +251,75 @@ fn the_daemon_triages_a_book_and_holds_a_retraction() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Go to definition, across a file boundary.
+///
+/// The case the feature exists for: a name that is *not* in the buffer. The
+/// world says which book defines it -- `pe`'s own include-book-path -- and
+/// the definer scan finds the form inside that book's text. Nothing here is
+/// guessed from the buffer, and nothing needs the census: the name is written
+/// in its book, so it is tier 3, exact.
+///
+/// The in-file half is checked too, and deliberately for a form the session
+/// has *not* admitted: the scan runs over the snapshot, so a definition below
+/// the frontier is still found. That is the difference between locating a name
+/// in the text and asking the world where it is.
+#[test]
+#[ignore = "needs ACL2"]
+fn definition_crosses_into_an_included_book() {
+    let Some(acl2) = acl2() else {
+        eprintln!("ACL2 not set; skipping");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("acl2-editord-def-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let book_path: PathBuf = dir.join("d.lisp");
+    let text = "(in-package \"ACL2\")\n\n\
+                (include-book \"std/util/bstar\" :dir :system)\n\n\
+                (defun alpha (x) (if (consp x) (alpha (cdr x)) nil))\n\n\
+                (defun beta (x) (b* ((y (alpha x))) y))\n";
+    std::fs::write(&book_path, text).expect("write book");
+
+    let mut d = Daemon::start(&acl2);
+    let opened = d.request("open", json!({ "path": book_path.to_str().unwrap() }));
+    let book = opened["book"].as_str().expect("book id").to_string();
+
+    // Hold the target before the last form, so `beta` is never admitted.
+    d.notify("update", json!({ "book": book, "text": text, "target_line": 5, "revision": 1 }));
+    let events = d.events_until_settled();
+    assert_eq!(events.last().expect("settled").1["reason"], "reached_target");
+
+    // In this file, and admitted.
+    let a = d.request("definition", json!({ "book": book, "name": "alpha" }));
+    assert_eq!(a["found"], true, "alpha is defined here: {a}");
+    assert!(a["path"].is_null(), "a name defined here answers with no path");
+    assert_eq!(a["unit"], 2, "the unit that defines it");
+    assert_eq!(a["line"], 5, "and its line");
+    assert_eq!(a["how"], "definer");
+
+    // In this file, and *not* admitted -- found because the scan reads the
+    // snapshot, not the world.
+    let b = d.request("definition", json!({ "book": book, "name": "beta" }));
+    assert_eq!(b["found"], true, "a form below the frontier is still located: {b}");
+    assert_eq!(b["line"], 7);
+
+    // The cross-file jump: bstar's own file, at the line that defines `b*`.
+    let m = d.request("definition", json!({ "book": book, "name": "b*" }));
+    assert_eq!(m["found"], true, "b* comes from an included book: {m}");
+    let path = m["path"].as_str().expect("a path into the included book");
+    assert!(path.ends_with("bstar.lisp"), "into bstar, got {path}");
+    assert!(std::path::Path::new(path).is_file(), "which exists: {path}");
+    let line = m["line"].as_u64().expect("and a line") as usize;
+    let src = std::fs::read_to_string(path).expect("read bstar");
+    let at = src.lines().nth(line - 1).expect("that line exists");
+    assert!(
+        at.contains("b*"),
+        "line {line} of bstar.lisp should define b*, but reads {at:?}"
+    );
+
+    let closed = d.request("close", json!({ "book": book }));
+    assert_eq!(closed["closed"], true);
+    d.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
