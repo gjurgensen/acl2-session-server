@@ -1,4 +1,4 @@
-// ACL2 Session: entry point and UI wiring.
+// ACL2: entry point and UI wiring.
 //
 // One daemon per window, one book per document. The extension is a thin
 // renderer of the daemon's event stream: edits become `update` notifications
@@ -95,7 +95,7 @@ export function activate(context: vscode.ExtensionContext): void {
   evalView = new OutputView(EVAL_SCHEME, 'ACL2 Eval', '(nothing evaluated yet)');
   panel = new Panel();
   status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 10);
-  channel = vscode.window.createOutputChannel('ACL2 Session');
+  channel = vscode.window.createOutputChannel('ACL2');
 
   panel.onGoal = (m, goal, slot) => void fetchGoal(m, goal, slot);
   panel.onFullLog = (m) => {
@@ -304,7 +304,7 @@ function ensureClient(): DaemonClient {
   c.on('exit', () => {
     if (client === c && books.size > 0) {
       void vscode.window.showErrorMessage(
-        'acl2-session: the daemon exited; see the "ACL2 Session" output channel'
+        'acl2-session: the daemon exited; see the "ACL2" output channel'
       );
     }
     if (client === c) {

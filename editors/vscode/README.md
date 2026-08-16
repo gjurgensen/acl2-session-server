@@ -1,4 +1,4 @@
-# ACL2 Session (VSCode)
+# ACL2 (VSCode)
 
 Live form-by-form checking of ACL2 books, as a thin client of the
 `acl2-session-editor` daemon (this repository's third crate). The daemon owns

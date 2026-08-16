@@ -1,6 +1,6 @@
 {
   "name": "acl2-session",
-  "displayName": "ACL2 Session",
+  "displayName": "ACL2",
   "description": "Live form-by-form checking of ACL2 books, driven by the acl2-session-editor daemon",
   "version": "0.0.1",
   "publisher": "gjurgensen",
@@ -134,7 +134,7 @@
       }
     ],
     "configuration": {
-      "title": "ACL2 Session",
+      "title": "ACL2",
       "properties": {
         "acl2-session.daemonPath": {
           "type": "string",
