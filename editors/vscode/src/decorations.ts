@@ -69,7 +69,7 @@ export class Decorations {
     for (const [status, c] of Object.entries(WASH_COLORS)) {
       const ruler =
         status === 'conditional'
-          ? 'rgba(184, 187, 38, 0.5)'
+          ? 'rgba(212, 172, 13, 0.5)'
           : status === 'skipped' || status === 'failed'
             ? 'rgba(220, 60, 60, 0.6)'
             : status === 'running'
@@ -87,12 +87,12 @@ export class Decorations {
         })
       );
     }
-    // Pending is blue: neutral but visible, unlike gray -- and not purple,
-    // which in the gruvbox family is pink and collides with red. Running is a
-    // clean yellow; the earlier
-    // mustard read as green-yellow.
-    this.pendingBar = gutterType(context, 'pending', 'rgba(90, 140, 210, 0.4)');
-    this.runningBar = gutterType(context, 'running', 'rgba(255, 214, 51, 0.6)');
+    // The bars: pending neutral gray, running BLUE (true blue, hue 262),
+    // admitted green,
+    // conditional YELLOW (the bar only; the conditional wash keeps its
+    // olive family), red for the reds.
+    this.pendingBar = gutterType(context, 'pending', 'rgba(136, 136, 136, 0.35)');
+    this.runningBar = gutterType(context, 'running', 'rgba(90, 140, 210, 0.6)');
     this.admittedBar = gutterType(context, 'admitted', 'rgba(80, 160, 90, 0.35)');
     // The conditional wash already marks the ruler; the red diagnostic marks
     // its own lane. Neither bar doubles it.

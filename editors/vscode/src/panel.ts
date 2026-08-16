@@ -146,10 +146,10 @@ body { font-family: var(--vscode-font-family); color: var(--vscode-foreground);
 .h { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; margin: 10px 0 4px; }
 .status { font-weight: 600; padding: 1px 8px; border-radius: 9px; }
 .status.admitted { background: rgba(46, 125, 50, 0.25); }
-.status.conditional { background: rgba(160, 150, 20, 0.25); }
+.status.conditional { background: rgba(212, 172, 13, 0.25); }
 .status.skipped, .status.failed { background: rgba(198, 40, 40, 0.25); }
-.status.running { background: rgba(212, 172, 13, 0.3); }
-.status.pending { background: rgba(90, 140, 210, 0.2); }
+.status.running { background: rgba(90, 140, 210, 0.3); }
+.status.pending { background: rgba(136, 136, 136, 0.2); }
 .meta { opacity: 0.7; font-size: 12px; }
 h3 { margin: 14px 0 4px; font-size: 11px; text-transform: uppercase;
      letter-spacing: 0.05em; opacity: 0.75; }
