@@ -411,6 +411,12 @@ function render() {
     b.addEventListener('click', () =>
       vscode.postMessage({ cmd: 'fullLog', seq: Number(b.dataset.log) }));
   }
+  // Each excerpt is already the tail of its log, but the box is shorter than
+  // the excerpt -- so start it at the end, where the answer is, rather than
+  // 200 lines above it.
+  for (const log of box.querySelectorAll('.evlog')) {
+    log.scrollTop = log.scrollHeight;
+  }
 }
 
 bindGoals(document, (b, slot) => 'egoal-' + seqOf(b) + '-' + slot);

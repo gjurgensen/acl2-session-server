@@ -24,6 +24,8 @@ export class OutputView implements vscode.TextDocumentContentProvider {
   shownBook: string | null = null;
   shownUnit: number | null = null;
 
+  private readonly sub: vscode.Disposable;
+
   constructor(
     readonly scheme: string,
     title: string,
@@ -31,6 +33,15 @@ export class OutputView implements vscode.TextDocumentContentProvider {
   ) {
     this.uri = vscode.Uri.parse(`${scheme}:${title}`);
     this.content = placeholder;
+    // Scrolling has to follow the *document*, not `set`. Firing the change
+    // event only asks VSCode for new content; the document has not grown by
+    // the time `set` returns, so revealing there would scroll to the end of
+    // the previous form's log. This event fires once the text is really in.
+    this.sub = vscode.workspace.onDidChangeTextDocument((e) => {
+      if (e.document.uri.toString() === this.uri.toString()) {
+        this.revealTail();
+      }
+    });
   }
 
   provideTextDocumentContent(): string {
@@ -58,6 +69,41 @@ export class OutputView implements vscode.TextDocumentContentProvider {
       preserveFocus: true,
       preview: true,
     });
+    // Opening onto content that was set before the editor existed fires no
+    // change event, so the reveal has to happen here too.
+    this.revealTail();
+  }
+
+  /**
+   * Put the end of the log on screen.
+   *
+   * The answer is always at the bottom -- the error line, `Q.E.D.`, the
+   * summary -- and VSCode reuses the editor for a URI along with its scroll
+   * position, so without this the view opens wherever the *previous* form's
+   * log had been left.
+   *
+   * The last line is usually blank (ACL2 pads the end), so this lands on the
+   * last line with something on it; `Default` then scrolls the minimum
+   * needed, which puts that line at the foot of the viewport.
+   */
+  private revealTail(): void {
+    for (const editor of vscode.window.visibleTextEditors) {
+      if (editor.document.uri.toString() !== this.uri.toString()) {
+        continue;
+      }
+      const doc = editor.document;
+      let line = doc.lineCount - 1;
+      while (line > 0 && doc.lineAt(line).isEmptyOrWhitespace) {
+        line--;
+      }
+      const pos = doc.lineAt(line).range.end;
+      editor.selection = new vscode.Selection(pos, pos);
+      editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.Default);
+    }
+  }
+
+  dispose(): void {
+    this.sub.dispose();
   }
 
   /** Re-read the setting for a document that is already open. */
