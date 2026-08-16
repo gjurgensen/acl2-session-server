@@ -17,6 +17,11 @@ use rmcp::model::{CallToolResult, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler, ServiceExt};
 use serde::Deserialize;
 
+/// Version plus the commit built from, as one short string. `build.rs`
+/// leaves `ACL2_MCP_BUILD` empty when there is no git, so this degrades to
+/// the bare version rather than lying about provenance.
+const SERVER: &str = concat!(env!("CARGO_PKG_VERSION"), env!("ACL2_MCP_BUILD"));
+
 /// Default when a call does not give one. Bounds the *call*, never the proof:
 /// an expired deadline leaves ACL2 working and hands back a handle.
 const DEFAULT_DEADLINE: u64 = 60;
@@ -81,8 +86,19 @@ struct SyncArgs {
     session_id: String,
     /// Sync only as far as this line. Omit for the whole file, which is the
     /// usual call. Resolved forgivingly: a line inside a form selects that
-    /// form. It bounds how far forward to admit and never undoes anything.
+    /// form. On its own it bounds how far forward to admit and never undoes
+    /// anything; pair it with `retract` to move the frontier back.
     through_line: Option<usize>,
+    /// Also undo everything after `through_line`, if the session is already
+    /// past it.
+    ///
+    /// Off by default, and deliberately a flag rather than an inference from
+    /// a smaller line number: line numbers shift with every edit above them,
+    /// and undoing proven work should never be triggered by a stale one.
+    /// Editing the file is still the ordinary way to retract -- this is for
+    /// deliberately parking the frontier, such as re-admitting an
+    /// `include-book` whose dependency was just recertified.
+    retract: Option<bool>,
     /// Seconds to wait before handing control back. ACL2 keeps working.
     deadline_seconds: Option<u64>,
 }
@@ -223,6 +239,7 @@ impl Acl2Mcp {
         .map_err(fail)?;
         json(wire::OpenReply {
             session_id: id.to_string(),
+            server: SERVER.to_string(),
             file: a.file,
             acl2: image.display().to_string(),
             prove_output_overridden: overridden,
@@ -287,16 +304,25 @@ impl Acl2Mcp {
         Edit the file with ordinary tools, then call this: the server reuses the \
         unchanged prefix, rolls back to the first difference, and admits forward, \
         stopping at the first failure. You never say what changed. Reindenting or \
-        editing a comment costs nothing.")]
+        editing a comment costs nothing.\n\n\
+        Undo is normally a consequence of editing. To park the frontier without \
+        editing -- to re-admit an include-book after recertifying what it \
+        includes, say -- pass through_line with retract:true.")]
     async fn acl2_sync(
         &self,
         Parameters(a): Parameters<SyncArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let book = self.book(&a.session_id)?;
         let d = secs(a.deadline_seconds);
+        // Retraction needs something to retract *to*; silently doing nothing
+        // would read as a frontier that refused to move.
+        let retract = a.retract.unwrap_or(false);
+        if retract && a.through_line.is_none() {
+            return Err(fail("retract needs through_line: it says where to leave the frontier"));
+        }
         let out = blocking!({
             let mut b = book.lock().map_err(|e| e.to_string())?;
-            b.sync(a.through_line, d).map_err(|e| e.to_string())
+            b.sync_to(a.through_line, retract, d).map_err(|e| e.to_string())
         })
         .map_err(fail)?;
         json(wire::SyncReply::from(out))

@@ -62,7 +62,7 @@ fn main() {
         } else {
             wrap("rules", &e.rules.join(" "), 4, 70);
         }
-        if let Some(w) = &e.warnings { wrap("warnings", w, 4, 70); }
+        if !e.warnings.is_empty() { wrap("warnings", &e.warnings.join(" "), 4, 70); }
         for ev in &u.inner {
             // Print the name even with no rules: a clique introduces plenty
             // of events that have none, and skipping them made the list look

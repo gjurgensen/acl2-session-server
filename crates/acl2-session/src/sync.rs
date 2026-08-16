@@ -107,7 +107,14 @@ pub struct EventData {
     pub prover_steps: Option<i64>,
     /// Runes the proof used, one per entry.
     pub rules: Vec<String>,
-    pub warnings: Option<String>,
+    /// The *kinds* of warning the event emitted -- `Double-rewrite`, `Use`
+    /// -- one per entry, as ACL2 records them.
+    ///
+    /// Kinds only: `get-event-data` deduplicates, so a form emitting five
+    /// double-rewrite warnings and one emitting a single warning record
+    /// identically here. Multiplicity exists solely in the printed output,
+    /// which is where a client counting them must look.
+    pub warnings: Vec<String>,
     /// `(prove print proof-tree other)`, in seconds.
     pub time: Option<String>,
     /// Hints that fired, one per entry -- `((:use lemma))` and friends.
@@ -486,6 +493,13 @@ pub enum SyncError {
     /// and starting a second form would interleave both on the same channel.
     Busy { index: Option<usize> },
     Split(SplitError),
+    /// The anchored book is gone from disk.
+    ///
+    /// A session is anchored to one path for life, so a rename or a delete
+    /// orphans it -- and the bare `NotFound` this used to surface named no
+    /// file, prescribed nothing, and read like a transient I/O hiccup. The
+    /// remedy is always the same, so the error says it.
+    BookMissing { path: PathBuf },
     /// The undo itself was rejected by ACL2.
     RollbackFailed { output: String },
     /// Replaying a unit that had previously been admitted failed.
@@ -520,6 +534,14 @@ impl std::fmt::Display for SyncError {
                 ),
             },
             SyncError::Split(e) => write!(f, "cannot split file: {e}"),
+            SyncError::BookMissing { path } => write!(
+                f,
+                "the book this session is anchored to no longer exists: {}. \
+                 It was there when the session opened, so it has been renamed, \
+                 moved, or deleted; a session cannot follow it. Open a new \
+                 session on the current path.",
+                path.display()
+            ),
             SyncError::RollbackFailed { output } => {
                 let first = output.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
                 write!(f, "rollback rejected by ACL2: {}", first.trim())
@@ -851,10 +873,13 @@ fn parse_inner(sub: &crate::session::Submission) -> (Vec<InnerEvent>, usize) {
 /// immediately preceding event, and planting a label first would make it
 /// describe the label.
 const EVENT_DATA_PROBE: &str = r#"(acl2::prog2$
-  (acl2::cw "~%<<<ASS-BEGIN evd>>>~%steps ~x0~%warnings ~x1~%time ~x2~%"
+  (acl2::cw "~%<<<ASS-BEGIN evd>>>~%steps ~x0~%time ~x1~%"
     (acl2::get-event-data 'acl2::prover-steps-counted acl2::state)
-    (acl2::get-event-data 'acl2::warnings acl2::state)
     (acl2::get-event-data 'acl2::time acl2::state))
+  (acl2::prog2$
+    (acl2::cw "~*0"
+      (acl2::list "" "warning ~x*~%" "warning ~x*~%" "warning ~x*~%"
+        (acl2::get-event-data 'acl2::warnings acl2::state)))
   (acl2::prog2$
     (acl2::cw "~*0"
       (acl2::list "" "rule ~x*~%" "rule ~x*~%" "rule ~x*~%"
@@ -869,7 +894,7 @@ const EVENT_DATA_PROBE: &str = r#"(acl2::prog2$
             (acl2::get-event-data 'acl2::splitter-rules acl2::state)))
         (acl2::prog2$
           (acl2::cw "<<<ASS-END evd>>>~%")
-          (acl2::value :invisible))))))"#;
+          (acl2::value :invisible)))))))"#;
 
 /// Report the key checkpoints of the most recent failed proof.
 ///
@@ -1079,7 +1104,7 @@ fn parse_event_data(sub: &crate::session::Submission) -> EventData {
     let Some(body) = sub.block("evd") else { return e };
     // ACL2 wraps long values at its right margin, so a value runs until the
     // next known key rather than to end of line.
-    let done = keyed_block(body, &["steps", "warnings", "time", "rule", "hint", "splitter"]);
+    let done = keyed_block(body, &["steps", "warning", "time", "rule", "hint", "splitter"]);
     let pick = |k: &str| -> Option<String> {
         done.iter()
             .find(|(dk, _)| dk == k)
@@ -1091,7 +1116,12 @@ fn parse_event_data(sub: &crate::session::Submission) -> EventData {
     e.rules = items(&done, "rule");
     e.hint_events = items(&done, "hint");
     e.splitter_rules = items(&done, "splitter");
-    e.warnings = pick("warnings");
+    // Warning kinds are strings, so `~x` prints them quoted; the quotes are
+    // notation, not content.
+    e.warnings = items(&done, "warning")
+        .into_iter()
+        .map(|w| unquote(&w).unwrap_or(w))
+        .collect();
     e.time = pick("time");
     e
 }
@@ -1529,8 +1559,40 @@ impl Book {
         through_line: Option<usize>,
         deadline: Duration,
     ) -> Result<SyncOutcome, SyncError> {
-        let bytes = std::fs::read(&self.path)?;
-        self.sync_bytes(&bytes, through_line, deadline)
+        self.sync_to(through_line, false, deadline)
+    }
+
+    /// `sync`, with the frontier allowed to move *backward* to the target.
+    ///
+    /// Retraction is asked for, never inferred. A target's line number is the
+    /// one input in this system that goes stale constantly -- every edit above
+    /// it shifts it -- and `resolve_target` is forgiving precisely because of
+    /// that. Reading a *smaller* number as "undo" would make the stalest input
+    /// available the trigger for discarding proven work; today the worst a
+    /// stale number costs is admitting less than you meant to.
+    ///
+    /// With `retract`, the target becomes an upper bound on the reusable
+    /// prefix as well as on admission: units past it are undone, and the
+    /// reply reports them under `rolled_back` exactly as an edit would.
+    /// Without a target there is nothing to retract to, and the call is an
+    /// ordinary sync.
+    pub fn sync_to(
+        &mut self,
+        through_line: Option<usize>,
+        retract: bool,
+        deadline: Duration,
+    ) -> Result<SyncOutcome, SyncError> {
+        let bytes = self.read_anchor()?;
+        self.sync_bytes_to(&bytes, through_line, retract, deadline)
+    }
+
+    /// Read the anchored file, distinguishing "gone" from any other I/O
+    /// failure. See [`SyncError::BookMissing`].
+    fn read_anchor(&self) -> Result<Vec<u8>, SyncError> {
+        std::fs::read(&self.path).map_err(|e| match e.kind() {
+            io::ErrorKind::NotFound => SyncError::BookMissing { path: self.path.clone() },
+            _ => SyncError::Io(e),
+        })
     }
 
     /// Bring the session into agreement with a caller-supplied snapshot.
@@ -1567,6 +1629,19 @@ impl Book {
         through_line: Option<usize>,
         deadline: Duration,
     ) -> Result<SyncOutcome, SyncError> {
+        self.sync_bytes_to(bytes, through_line, false, deadline)
+    }
+
+    /// `sync_bytes`, with the frontier allowed to move backward. See
+    /// [`sync_to`](Self::sync_to) for what `retract` means and why it is a
+    /// flag rather than an inference.
+    pub fn sync_bytes_to(
+        &mut self,
+        bytes: &[u8],
+        through_line: Option<usize>,
+        retract: bool,
+        deadline: Duration,
+    ) -> Result<SyncOutcome, SyncError> {
         if self.session.is_running() {
             return Err(SyncError::Busy { index: self.running_unit() });
         }
@@ -1595,7 +1670,17 @@ impl Book {
         // `through_line` above the first unit, or a file emptied of forms --
         // while reporting `reused: 0` as though nothing were admitted.
         let hashes: Vec<u64> = self.admitted.iter().map(|a| a.hash).collect();
-        let keep = common_prefix(&hashes, &units);
+        let mut keep = common_prefix(&hashes, &units);
+
+        // Retraction bounds the reusable prefix, and is applied before the
+        // rollback below so that undoing on request and undoing because the
+        // file changed are the same operation, reported the same way. A
+        // target that resolves to nothing -- a line above the first unit, or
+        // a snapshot with no units at all -- retracts everything.
+        let target = resolve_target(&units, through_line);
+        if retract {
+            keep = keep.min(target.map_or(0, |t| t + 1));
+        }
         out.reused = keep;
 
         if keep < self.admitted.len() {
@@ -1622,13 +1707,10 @@ impl Book {
             }
         }
 
-        let target = match resolve_target(&units, through_line) {
-            Some(t) => t,
-            None => {
-                // Nothing selected; nothing to admit.
-                out.conditional_from = self.first_skipped();
-                return Ok(out);
-            }
+        let Some(target) = target else {
+            // Nothing selected; nothing to admit.
+            out.conditional_from = self.first_skipped();
+            return Ok(out);
         };
         out.resolved_through = Some(target);
 
@@ -2253,6 +2335,12 @@ impl Book {
     ) -> Result<crate::cert::CertReport, SyncError> {
         use crate::cert::{blamed_books, cert_out_error, cert_pl_for, Build, CertReport, CertStatus};
         if self.build.is_none() {
+            // Certification runs against the file on disk, so an orphaned
+            // session must say so here too rather than leaving cert.pl to
+            // fail about a path the caller never typed.
+            if !self.path.is_file() {
+                return Err(SyncError::BookMissing { path: self.path.clone() });
+            }
             let cert_pl = match self.books_dir.as_deref() {
                 Some(d) => crate::cert::cert_pl_in(d, &self.acl2)?,
                 None => cert_pl_for(&self.acl2)?,

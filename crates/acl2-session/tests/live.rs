@@ -1168,6 +1168,82 @@ fn a_stopped_session_reads_as_unresponsive() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A renamed anchor orphans the session, and says so.
+///
+/// A session is anchored to one path for life. When the book moves out from
+/// under it the read fails, and the bare `NotFound` this used to surface
+/// named no file and prescribed nothing -- so a rename looked like a
+/// transient I/O hiccup rather than "this session is finished, open another".
+#[test]
+#[ignore = "needs ACL2"]
+fn a_renamed_book_orphans_the_session_loudly() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("renamed");
+    let before = dir.join("normalize.lisp");
+    write(&before, &["(in-package \"ACL2\")", "(defun rn-f (x) x)"]);
+    let mut b = Book::open(&acl2, &before).unwrap();
+    assert_eq!(b.sync(None, D).expect("first sync").admitted.len(), 2);
+
+    std::fs::rename(&before, dir.join("rebalance.lisp")).expect("rename");
+
+    let err = b.sync(None, D).expect_err("an orphaned session cannot sync");
+    assert!(matches!(err, acl2_session::SyncError::BookMissing { .. }),
+            "a missing anchor is its own error, not a generic I/O one: {err}");
+    let msg = err.to_string();
+    assert!(msg.contains("normalize.lisp"), "it names the path: {msg}");
+    assert!(msg.contains("Open a new session"), "and the remedy: {msg}");
+
+    // Certification runs against the same vanished path, so it says the same.
+    match b.certify(Duration::from_secs(30), 2) {
+        Err(e) => assert!(matches!(e, acl2_session::SyncError::BookMissing { .. }), "{e}"),
+        Ok(_) => panic!("certify must refuse a book that is not there"),
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `retract` parks the frontier where asked, and only when asked.
+#[test]
+#[ignore = "needs ACL2"]
+fn retract_parks_the_frontier_on_request() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("retract");
+    let file = dir.join("r.lisp");
+    // Forms land on lines 1, 3, 5, 7.
+    write(&file, &["(in-package \"ACL2\")",
+                   "(defun rt-f (x) x)",
+                   "(defthm rt-1 (equal (rt-f x) x))",
+                   "(defthm rt-2 (equal (rt-f (rt-f x)) x))"]);
+    let mut b = Book::open(&acl2, &file).unwrap();
+    assert_eq!(b.sync(None, D).expect("sync").admitted.len(), 4);
+
+    // Without the flag a smaller target is still purely a forward bound.
+    let o = b.sync(Some(3), D).expect("targeted sync");
+    assert_eq!((o.reused, o.rolled_back), (4, 0), "a target alone never retracts");
+
+    // With it, the frontier moves back to the form that line selects.
+    let o = b.sync_to(Some(3), true, D).expect("retracting sync");
+    assert_eq!((o.reused, o.rolled_back), (2, 2), "{o:?}");
+    assert_eq!(b.admitted_lines().len(), 2, "two units remain admitted");
+    assert!(!o.rebuilt, "retraction is an undo, not a replay");
+
+    // The retracted forms are gone from the world, not merely unreported.
+    let r = b.eval("(acl2::pe 'rt-1)", D).expect("query");
+    let text = b.output(&r.output_ref, Slice::All).unwrap().text.to_lowercase();
+    assert!(text.contains("error") || text.contains("not"),
+            "the retracted theorem must be absent: {text}");
+
+    // A plain sync puts them back, and nothing before the mark re-proves.
+    let o = b.sync(None, D).expect("resync");
+    assert_eq!((o.reused, o.admitted.len(), o.rolled_back), (2, 2, 0));
+
+    // Retracting to a line past the frontier is an ordinary sync.
+    let o = b.sync_to(Some(999), true, D).expect("forward retract");
+    assert_eq!((o.reused, o.rolled_back), (4, 0));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A crashed ACL2 must read as dead, not busy forever.
 ///
 /// `is_running` is bookkeeping; a child that dies mid-form leaves it set. The

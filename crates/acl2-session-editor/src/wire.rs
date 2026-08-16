@@ -226,6 +226,14 @@ pub fn status_str(s: Status) -> &'static str {
     }
 }
 
+/// The editor paints warnings as one line, so the kinds ACL2 recorded are
+/// joined here rather than in every renderer. `None` means none were
+/// emitted. Kinds only -- see the core's `EventData::warnings` on why there
+/// are no counts.
+fn join_warnings(kinds: &[String]) -> Option<String> {
+    (!kinds.is_empty()).then(|| kinds.join(", "))
+}
+
 fn inner_wire(inner: &[acl2_session::InnerEvent]) -> Vec<InnerEventWire> {
     inner
         .iter()
@@ -256,7 +264,7 @@ pub fn unit_admitted(book: &str, revision: u64, u: &UnitReport) -> UnitEvent {
         error_line: None,
         abort_cause: None,
         prover_steps: u.event_data.prover_steps,
-        warnings: u.event_data.warnings.clone(),
+        warnings: join_warnings(&u.event_data.warnings),
         time: u.event_data.time.clone(),
         hint_events: u.event_data.hint_events.clone(),
         splitter_rules: u.event_data.splitter_rules.clone(),
@@ -299,7 +307,7 @@ pub fn unit_failure(
         error_line: f.error_line.clone(),
         abort_cause: f.checkpoints.abort_cause.clone(),
         prover_steps: f.event_data.prover_steps,
-        warnings: f.event_data.warnings.clone(),
+        warnings: join_warnings(&f.event_data.warnings),
         time: f.event_data.time.clone(),
         hint_events: f.event_data.hint_events.clone(),
         splitter_rules: f.event_data.splitter_rules.clone(),

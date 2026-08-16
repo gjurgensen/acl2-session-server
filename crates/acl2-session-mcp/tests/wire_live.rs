@@ -198,10 +198,12 @@ fn clean_admitted_records_are_compact_and_unease_surfaces() {
         Some("(:use w-app-assoc)"),
         "the fired hint surfaces on the form that fired it: {hinted}"
     );
-    assert!(
-        hinted["warnings"].as_str().unwrap_or("").contains("Use"),
-        "and so does its warning: {hinted}"
-    );
+    let kinds: Vec<&str> =
+        hinted["warnings"].as_array().expect("warnings is a JSON list")
+            .iter().map(|w| w.as_str().unwrap_or("")).collect();
+    assert!(kinds.contains(&"Use"),
+            "and so does its warning, as list entries rather than ACL2's \
+             printed list: {hinted}");
     for rec in admitted {
         assert!(rec.get("inner").is_none(), "inner must not regrow: {rec}");
         assert!(rec.get("time").is_none(), "nor raw time tuples: {rec}");
@@ -351,6 +353,74 @@ fn a_blocked_session_answers_status_health_output_and_interrupt() {
 
     let h = s.tool("acl2_health", json!({"session_id": sid}));
     assert_eq!(h["state"].as_str(), Some("ready"), "usable again: {h}");
+    s.tool("acl2_session_close", json!({"session_id": sid}));
+}
+
+/// The open reply says which build answered.
+///
+/// A client once spent days reporting behaviour fixed the day before,
+/// against an installed binary that had never been restarted; no reply could
+/// have revealed it. This one can.
+#[test]
+#[ignore = "needs ACL2"]
+fn the_open_reply_identifies_the_build() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("stamp");
+    let book = dir.join("s.lisp");
+    std::fs::write(&book, "(in-package \"ACL2\")\n").unwrap();
+
+    let mut s = Server::start(&acl2);
+    let o = s.tool("acl2_session_open", json!({"file": book}));
+    let server = o["server"].as_str().expect("the open reply names the server");
+    assert!(server.starts_with(env!("CARGO_PKG_VERSION")),
+            "it starts with the version: {server}");
+    assert!(server.contains("+g"),
+            "and carries the commit, which is what makes staleness visible: {server}");
+    assert!(server.len() < 32, "one short string, not a banner: {server}");
+    s.tool("acl2_session_close", json!({"session_id": o["session_id"].as_str().unwrap()}));
+}
+
+/// Retraction is available over the wire, and only when asked for.
+#[test]
+#[ignore = "needs ACL2"]
+fn retraction_is_asked_for_never_inferred() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("wireretract");
+    let book = dir.join("r.lisp");
+    // Forms on lines 1, 2, 3.
+    std::fs::write(
+        &book,
+        "(in-package \"ACL2\")\n\
+         (defun wr-f (x) x)\n\
+         (defthm wr-1 (equal (wr-f x) x))\n",
+    )
+    .unwrap();
+
+    let mut s = Server::start(&acl2);
+    let sid = s.tool("acl2_session_open", json!({"file": book}))["session_id"]
+        .as_str().unwrap().to_string();
+    let o = s.tool("acl2_sync", json!({"session_id": sid, "deadline_seconds": 120}));
+    assert_eq!(o["admitted"].as_array().unwrap().len(), 3, "{o}");
+
+    // A backward target alone leaves the frontier where it is.
+    let o = s.tool("acl2_sync", json!({"session_id": sid, "through_line": 2,
+                                       "deadline_seconds": 120}));
+    assert_eq!(o["rolled_back"].as_u64(), Some(0), "a target alone never retracts: {o}");
+
+    // The flag moves it back.
+    let o = s.tool("acl2_sync", json!({"session_id": sid, "through_line": 2,
+                                       "retract": true, "deadline_seconds": 120}));
+    assert_eq!((o["reused"].as_u64(), o["rolled_back"].as_u64()),
+               (Some(2), Some(1)), "{o}");
+
+    // And it needs somewhere to retract to, rather than silently doing nothing.
+    let id = s.send_tool("acl2_sync", json!({"session_id": sid, "retract": true,
+                                             "deadline_seconds": 120}));
+    let reply = s.wait(id, Duration::from_secs(60));
+    let complaint = serde_json::to_string(&reply).unwrap();
+    assert!(complaint.contains("through_line"),
+            "retract without a target is refused, and says why: {complaint}");
+
     s.tool("acl2_session_close", json!({"session_id": sid}));
 }
 

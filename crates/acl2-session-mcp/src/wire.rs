@@ -164,10 +164,16 @@ pub struct Admitted {
     pub line_start: usize,
     pub line_end: usize,
     pub elapsed_ms: u128,
-    /// Present only when ACL2 warned about something -- unlike rules, a
-    /// warning is an exception rather than a fact every form carries.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub warnings: Option<String>,
+    /// The kinds of warning this form emitted -- `Double-rewrite`, `Use` --
+    /// present only when there were any, since unlike rules a warning is an
+    /// exception rather than a fact every form carries.
+    ///
+    /// Kinds, not counts: ACL2 records the set, so two double-rewrite
+    /// warnings on one form look exactly like one. If you are fixing them
+    /// one at a time, count the `ACL2 Warning [...]` headers in this form's
+    /// log rather than reading an unchanged list as no progress.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
     /// Hints that fired -- `((:use lemma))` and friends. Present exactly when
     /// a hint did something, so "did my hint matter" is answered on success
     /// too, where it matters most.
@@ -541,6 +547,11 @@ pub struct ResumeReply {
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct OpenReply {
     pub session_id: String,
+    /// This server's version and the commit it was built from, e.g.
+    /// `0.0.1+g5c575da`. Reported once per session so that behaviour can be
+    /// attributed to a build: an installed binary that was never restarted
+    /// serves the old code, and nothing else in any reply reveals it.
+    pub server: String,
     pub file: String,
     /// The ACL2 image this session is running. Reported because it is usually
     /// derived rather than requested, and a session keeps it for life.
