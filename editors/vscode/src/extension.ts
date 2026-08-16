@@ -76,6 +76,7 @@ let panel: Panel;
 let highlighter: Highlighter;
 let status: vscode.StatusBarItem;
 let channel: vscode.OutputChannel;
+let windowIcon: { light: vscode.Uri; dark: vscode.Uri };
 
 function mode(): DecorationMode {
   return vscode.workspace.getConfiguration('acl2-session').get<DecorationMode>('decorations', 'minimal');
@@ -93,7 +94,14 @@ export function activate(context: vscode.ExtensionContext): void {
     '(no form under the cursor has been checked yet)'
   );
   evalView = new OutputView(EVAL_SCHEME, 'ACL2 Eval', '(nothing evaluated yet)');
+  // Webview tabs take an icon; the output views cannot, since they are text
+  // documents and VSCode takes an editor tab's icon from the file icon theme.
+  windowIcon = {
+    light: vscode.Uri.joinPath(context.extensionUri, 'media', 'window-light.svg'),
+    dark: vscode.Uri.joinPath(context.extensionUri, 'media', 'window-dark.svg'),
+  };
   panel = new Panel();
+  panel.iconPath = windowIcon;
   status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 10);
   channel = vscode.window.createOutputChannel('ACL2');
 
@@ -490,6 +498,7 @@ const CONSOLE_LOG_LINES = 200;
 function consoleFor(s: BookSession): Console {
   if (!s.console) {
     const c = new Console(s.id, vscode.workspace.asRelativePath(s.doc.uri));
+    c.iconPath = windowIcon;
     c.tokenizer = highlighter.ready ? (t) => highlighter.tokenize(t) : undefined;
     c.onEval = (seq, form) => void consoleEval(s, seq, form);
     c.onGoal = (seq, goal, slot) => void fetchEvalGoal(s, seq, goal, slot);

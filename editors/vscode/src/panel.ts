@@ -121,6 +121,9 @@ export class Panel {
    */
   tokenizer?: (text: string) => TokLines | undefined;
 
+  /** The tab icon, so an ACL2 window is recognizable among a row of tabs. */
+  iconPath?: { light: vscode.Uri; dark: vscode.Uri };
+
   get visible(): boolean {
     return this.panel !== undefined;
   }
@@ -142,6 +145,7 @@ export class Panel {
       { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
       { enableScripts: true, retainContextWhenHidden: true }
     );
+    this.panel.iconPath = this.iconPath;
     this.panel.webview.html = HTML;
     this.panel.webview.onDidReceiveMessage((m: { cmd?: string; goal?: string; slot?: number }) => {
       if (!this.model) {

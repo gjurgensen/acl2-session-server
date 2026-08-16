@@ -1,0 +1,20 @@
+<!-- The extension's mark: a turnstile inside parentheses.
+
+     Original work, deliberately: ACL2's own logo is BSD-licensed but its
+     licence forbids using the project's name to promote derived works
+     without written permission, and a permissive licence grants no
+     trademark rights in any case. This borrows neither.
+
+     The turnstile is the subject and the parentheses recede, because what
+     the extension does is prove things and what it proves them about is
+     Lisp. Green is the palette's `admitted`; the slate is the same neutral
+     the panel uses for prose. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <rect width="256" height="256" rx="56" fill="#1f2933"/>
+  <g fill="none" stroke-linecap="round">
+    <path d="M80 58 C 50 94, 50 162, 80 198" stroke="#78889a" stroke-width="17"/>
+    <path d="M176 58 C 206 94, 206 162, 176 198" stroke="#78889a" stroke-width="17"/>
+    <path d="M102 76 L 102 180" stroke="#8ec07c" stroke-width="22"/>
+    <path d="M102 128 L 150 128" stroke="#8ec07c" stroke-width="22"/>
+  </g>
+</svg>

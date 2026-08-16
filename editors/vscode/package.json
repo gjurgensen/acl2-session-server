@@ -1,6 +1,7 @@
 {
   "name": "acl2-session",
   "displayName": "ACL2",
+  "icon": "media/icon.png",
   "description": "Live form-by-form checking of ACL2 books, driven by the acl2-session-editor daemon",
   "version": "0.0.1",
   "publisher": "gjurgensen",

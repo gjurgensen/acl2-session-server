@@ -64,6 +64,9 @@ export class Console {
 
   tokenizer?: (text: string) => TokLines | undefined;
 
+  /** The tab icon, so an ACL2 window is recognizable among a row of tabs. */
+  iconPath?: { light: vscode.Uri; dark: vscode.Uri };
+
   /**
    * @param book the daemon's id, for the extension's own bookkeeping
    * @param title what to call the window -- the file's name, since a user
@@ -89,6 +92,7 @@ export class Console {
       { viewColumn: vscode.ViewColumn.Beside, preserveFocus: !focus },
       { enableScripts: true, retainContextWhenHidden: true }
     );
+    this.panel.iconPath = this.iconPath;
     this.panel.webview.html = html(this.title);
     this.panel.webview.onDidReceiveMessage(
       (m: {

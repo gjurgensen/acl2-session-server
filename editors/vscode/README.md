@@ -128,6 +128,19 @@ under the real TextMate engine: no file ends with an unterminated string or
 comment, and of 244,608 definer heads none went unrecognized outside of the
 4,024 that sit inside comments or strings, where silence is correct.
 
+## The mark
+
+`media/icon.svg` is a turnstile inside parentheses: the extension proves
+things, and what it proves them about is Lisp. Original work, deliberately.
+ACL2's own logo is BSD-licensed and could be copied, but that licence
+forbids using the project's name to promote derived works without written
+permission, and no permissive licence grants trademark rights in a logo.
+This borrows neither, so there is nothing to ask.
+
+The webview windows -- panel and console -- carry it as their tab icon.
+The output views cannot: they are text documents, and VSCode takes an editor
+tab's icon from the file icon theme with no per-document override.
+
 To keep another Lisp extension on `.lisp` instead, override the association:
 
 ```json

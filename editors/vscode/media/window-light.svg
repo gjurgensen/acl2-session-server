@@ -1,0 +1,11 @@
+<!-- Tab icon for the ACL2 windows, light themes. The plate is dropped: a tab
+     icon sits on the tab bar, not on a badge, and the strokes are heavier
+     than icon.svg's because this renders at 16px. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <g fill="none" stroke-linecap="round">
+    <path d="M80 58 C 50 94, 50 162, 80 198" stroke="#5a6674" stroke-width="18"/>
+    <path d="M176 58 C 206 94, 206 162, 176 198" stroke="#5a6674" stroke-width="18"/>
+    <path d="M102 76 L 102 180" stroke="#4f8f43" stroke-width="22"/>
+    <path d="M102 128 L 150 128" stroke="#4f8f43" stroke-width="22"/>
+  </g>
+</svg>
