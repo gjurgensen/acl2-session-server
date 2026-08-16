@@ -67,6 +67,9 @@ struct BookHandle {
     outputs: Arc<Mutex<OutputStore>>,
     /// Fallback revision counter for clients that send none.
     auto_rev: AtomicU64,
+    /// Joined at shutdown, so daemon exit always runs the driver's `Book`
+    /// drop -- the thing that kills the ACL2 child.
+    driver: std::thread::JoinHandle<()>,
 }
 
 enum RequestError {
@@ -142,6 +145,9 @@ impl Daemon {
         if p.continue_past_failure.unwrap_or(true) {
             book.set_sync_mode(SyncMode::ContinuePastFailure);
         }
+        // The editor renders rather than pays per token: complete per-event
+        // detail on compound units, not the agent-facing default slots.
+        book.set_inner_detail(usize::MAX);
         let control = book.control();
         let outputs = book.output_store();
         let (id, shared) = {
@@ -152,10 +158,10 @@ impl Daemon {
         };
         let (tx, rx) = std::sync::mpsc::channel();
         let d = Driver::new(id.to_string(), shared, rx, self.out.clone());
-        std::thread::spawn(move || d.run());
+        let driver = std::thread::spawn(move || d.run());
         self.books.lock().expect("books lock").insert(
             id.to_string(),
-            BookHandle { tx, control, outputs, auto_rev: AtomicU64::new(0) },
+            BookHandle { tx, control, outputs, auto_rev: AtomicU64::new(0), driver },
         );
         Ok(serde_json::to_value(wire::OpenReply {
             book: id.to_string(),
@@ -347,10 +353,21 @@ fn main() {
             None => daemon.notification(&method, params),
         }
     }
-    // EOF: wake anything blocked and let every driver exit; each session dies
-    // with the last Arc holding its book.
-    for (_, h) in daemon.books.lock().expect("books lock").drain() {
+    // EOF: wake anything blocked, close every driver, and JOIN them.
+    // Exiting with drivers unjoined skips their `Book` drops -- the drop is
+    // what kills the ACL2 child -- and an ACL2 abandoned mid-proof never
+    // reaches the read that would tell it to exit: it grinds and allocates
+    // unattended, which is how a machine ends up out of memory. The joins
+    // make "the daemon exited" mean "its sessions are dead", always.
+    let handles: Vec<BookHandle> = {
+        let mut books = daemon.books.lock().expect("books lock");
+        books.drain().map(|(_, h)| h).collect()
+    };
+    for h in &handles {
         h.control.request_abort();
         let _ = h.tx.send(Cmd::Close);
+    }
+    for h in handles {
+        let _ = h.driver.join();
     }
 }

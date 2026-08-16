@@ -173,10 +173,15 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 }
 
-export function deactivate(): void {
-  for (const s of books.values()) {
-    void client?.request('close', { book: s.id }).catch(() => undefined);
-  }
+export async function deactivate(): Promise<void> {
+  // Close every book and wait for the answers: firing the requests and
+  // exiting raced the daemon's own shutdown. EOF then ends the daemon,
+  // which joins its drivers so every ACL2 dies with it.
+  await Promise.all(
+    [...books.values()].map((s) =>
+      client?.request('close', { book: s.id }).catch(() => undefined)
+    )
+  );
   books.clear();
   byId.clear();
   client?.dispose();

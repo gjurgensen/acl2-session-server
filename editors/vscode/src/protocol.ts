@@ -116,6 +116,11 @@ export class DaemonClient extends EventEmitter {
     return this.proc.exitCode === null && !this.proc.killed;
   }
 
+  /** For last-resort cleanup by a host that is exiting. */
+  get pid(): number | undefined {
+    return this.proc.pid;
+  }
+
   request(method: string, params: unknown): Promise<any> {
     const id = this.nextId++;
     const p = new Promise<any>((resolve, reject) => this.pending.set(id, { resolve, reject }));
@@ -134,12 +139,14 @@ export class DaemonClient extends EventEmitter {
     } catch {
       /* already gone */
     }
+    // On EOF the daemon aborts in-flight proofs, joins its drivers, and
+    // exits with every session dead; give that a moment before the hammer.
     const p = this.proc;
     setTimeout(() => {
       if (p.exitCode === null && !p.killed) {
         p.kill('SIGKILL');
       }
-    }, 1000);
+    }, 3000);
   }
 
   private frame(v: unknown): void {

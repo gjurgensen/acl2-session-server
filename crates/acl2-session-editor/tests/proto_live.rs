@@ -14,10 +14,20 @@ fn acl2() -> Option<String> {
 struct Daemon {
     child: Child,
     r: BufReader<ChildStdout>,
-    w: ChildStdin,
+    w: Option<ChildStdin>,
     next_id: u64,
     /// Notifications that arrived while waiting for a response.
     pending: Vec<(String, Value)>,
+}
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        // A panicking test must not strand the daemon and its ACL2: kill
+        // whatever is still there and reap it. After a graceful shutdown the
+        // child is already gone and this is a no-op.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 impl Daemon {
@@ -32,13 +42,14 @@ impl Daemon {
             .expect("spawn daemon");
         let r = BufReader::new(child.stdout.take().expect("stdout"));
         let w = child.stdin.take().expect("stdin");
-        Daemon { child, r, w, next_id: 0, pending: Vec::new() }
+        Daemon { child, r, w: Some(w), next_id: 0, pending: Vec::new() }
     }
 
     fn frame(&mut self, v: Value) {
         let s = v.to_string();
-        write!(self.w, "Content-Length: {}\r\n\r\n{s}", s.len()).expect("write frame");
-        self.w.flush().expect("flush");
+        let w = self.w.as_mut().expect("stdin");
+        write!(w, "Content-Length: {}\r\n\r\n{s}", s.len()).expect("write frame");
+        w.flush().expect("flush");
     }
 
     fn read_frame(&mut self) -> Value {
@@ -108,11 +119,15 @@ impl Daemon {
         }
     }
 
-    fn shutdown(self) {
-        let Daemon { mut child, r, w, .. } = self;
-        drop(w); // EOF ends the protocol loop
-        drop(r);
-        let _ = child.wait();
+    fn shutdown(mut self) {
+        drop(self.w.take()); // EOF ends the protocol loop; drivers join
+        for _ in 0..50 {
+            if self.child.try_wait().expect("wait").is_some() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        // The Drop guard kills whatever would not exit.
     }
 }
 

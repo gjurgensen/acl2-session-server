@@ -31,6 +31,15 @@ writeFileSync(book, text);
 
 const c = new DaemonClient(daemon, ['--default', acl2]);
 c.on('stderr', (s) => process.stderr.write(s));
+// However this script exits -- assertion failure, timeout, success -- the
+// daemon must not be stranded with a live ACL2 under it.
+process.on('exit', () => {
+  try {
+    process.kill(c.pid, 'SIGKILL');
+  } catch {
+    /* already gone */
+  }
+});
 const events = [];
 for (const m of ['state', 'unit', 'tail', 'settled', 'daemon-error']) {
   c.on(m, (p) => events.push([m, p]));
