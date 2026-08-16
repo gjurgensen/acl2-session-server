@@ -57,6 +57,10 @@ pub struct Driver {
     have_snapshot: bool,
     /// Unit of the last terminal failure, painted `failed` until an update.
     failed_unit: Option<usize>,
+    /// Whether the current snapshot's diff has run. The frontier can only
+    /// be read honestly after it: the world may still hold units the new
+    /// text rolled out from under.
+    reconciled: bool,
 }
 
 impl Driver {
@@ -73,6 +77,7 @@ impl Driver {
             parked: true,
             have_snapshot: false,
             failed_unit: None,
+            reconciled: false,
         }
     }
 
@@ -113,6 +118,7 @@ impl Driver {
                 self.target_line = target_line;
                 self.parked = false;
                 self.failed_unit = None;
+                self.reconciled = false;
                 match split(&bytes) {
                     Ok(units) => {
                         self.units = units;
@@ -135,6 +141,7 @@ impl Driver {
                 }
                 self.failed_unit = None;
                 self.parked = false;
+                self.reconciled = false;
                 // Hold the target where the retraction puts the world, so the
                 // drive that follows does not immediately re-admit.
                 self.target_line = Some(match keep.checked_sub(1).and_then(|k| self.units.get(k)) {
@@ -177,18 +184,28 @@ impl Driver {
                 return Flow::Continue;
             }
 
+            // The first sync after a new snapshot reconciles without
+            // admitting anything: rollback is driven by the text, never the
+            // target, and the frontier can only be read honestly after the
+            // diff has run. Deciding "done" from the pre-rollback frontier
+            // once made a fully-green book settle as reached_target right
+            // after an edit -- one reconcile rolled the suffix back to
+            // pending, nothing re-admitted it, and the book sat gray.
             let goal = self.goal_unit();
-            let frontier = self.frontier();
-            let done = match goal {
-                None => true,
-                Some(g) => frontier > g,
+            let through = if !self.reconciled {
+                Some(0)
+            } else {
+                let frontier = self.frontier();
+                match goal {
+                    Some(g) if frontier <= g => Some(self.units[frontier].line_end),
+                    _ => {
+                        self.emit_state(None);
+                        self.settle("reached_target", None);
+                        return Flow::Continue;
+                    }
+                }
             };
-            // A done round still syncs once: rollback is driven by the text,
-            // not the target, so edits above a held target must reconcile.
-            let through = match (done, goal) {
-                (false, Some(g)) => Some(self.units[frontier.min(g)].line_end),
-                _ => Some(self.target_line.unwrap_or(0)),
-            };
+            let reconciling = !self.reconciled;
             let o = {
                 let mut book = self.book.lock().expect("book lock");
                 book.sync_bytes(&self.bytes, through, STEP)
@@ -208,6 +225,9 @@ impl Driver {
                     return Flow::Continue;
                 }
             };
+            if reconciling {
+                self.reconciled = true;
+            }
             for u in &o.admitted {
                 self.out.notify("unit", &wire::unit_admitted(&self.id, self.revision, u));
             }
@@ -230,10 +250,6 @@ impl Driver {
                 return Flow::Continue;
             }
             self.emit_state(None);
-            if done {
-                self.settle("reached_target", None);
-                return Flow::Continue;
-            }
         }
     }
 

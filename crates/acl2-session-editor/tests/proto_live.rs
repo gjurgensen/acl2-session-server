@@ -209,6 +209,27 @@ fn the_daemon_triages_a_book_and_holds_a_retraction() {
     assert_eq!(statuses(&state), ["admitted", "admitted", "pending", "pending"]);
     assert!(state["conditional_from"].is_null());
 
+    // Back to the whole book, fully settled again.
+    d.notify("update", json!({ "book": book, "text": text, "revision": 8 }));
+    let full = d.events_until_settled();
+    assert_eq!(
+        statuses(&last_state(&full)),
+        ["admitted", "admitted", "skipped", "conditional"]
+    );
+
+    // An edit to a fully-settled book must roll back and re-check -- not
+    // reconcile the suffix to pending and park there (the stale-frontier
+    // settle bug: "done" decided before the diff had run).
+    let text2 = text.replace("ed-below", "ed-below2");
+    d.notify("update", json!({ "book": book, "text": text2, "revision": 9 }));
+    let after = d.events_until_settled();
+    assert_eq!(after.last().expect("settled").1["revision"], 9);
+    assert_eq!(
+        statuses(&last_state(&after)),
+        ["admitted", "admitted", "skipped", "conditional"],
+        "the edited suffix re-checks rather than parking gray"
+    );
+
     let closed = d.request("close", json!({ "book": book }));
     assert_eq!(closed["closed"], true);
     d.shutdown();
