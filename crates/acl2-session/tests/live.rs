@@ -1244,6 +1244,77 @@ fn retract_parks_the_frontier_on_request() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A dependency edited under a live session is reported, and a merely
+/// touched one is not.
+///
+/// The field case, reproduced: a rule is added to a dependency, the
+/// dependency is recertified, the dependent is re-synced -- and the rule is
+/// still absent while the reply says everything was reused and nothing is
+/// amiss. The session is not wrong about its own file; it is out of step
+/// with what that file includes, which the prefix invariant never covered.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_changed_dependency_is_reported_and_attributed() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("deps");
+    let dep = dir.join("dep.lisp");
+    let main = dir.join("main.lisp");
+    write(&dep, &["(in-package \"ACL2\")", "(defun dep-id (x) x)"]);
+    // Forms on lines 1, 3, 5.
+    write(&main, &["(in-package \"ACL2\")",
+                   "(include-book \"dep\")",
+                   "(defthm main-thm (equal (dep-id (dep-id x)) x))"]);
+
+    // The dependency must be certified before it can be included.
+    let mut d = Book::open(&acl2, &dep).unwrap();
+    assert_eq!(d.certify(Duration::from_secs(300), 2).unwrap().status,
+               acl2_session::cert::CertStatus::Certified);
+    drop(d);
+
+    let mut b = Book::open(&acl2, &main).unwrap();
+    let o = b.sync(None, D).expect("sync");
+    assert!(o.failed.is_none(), "{:?}", o.failed.as_ref().map(|f| &f.error_line));
+    assert!(o.stale_includes.is_empty(), "nothing is stale yet: {:?}", o.stale_includes);
+
+    // Touching without changing must not cost a thing: the write date moves,
+    // the content does not, and re-proving here would be pure waste.
+    let same = std::fs::read(&dep).unwrap();
+    std::thread::sleep(Duration::from_millis(1100));
+    std::fs::write(&dep, &same).unwrap();
+    let o = b.sync(None, D).expect("sync after touch");
+    assert!(o.stale_includes.is_empty(),
+            "a touch is not a change: {:?}", o.stale_includes);
+    assert_eq!(o.reused, 3, "and nothing is re-proved");
+
+    // A real edit is reported, attributed to the form that included it.
+    write(&dep, &["(in-package \"ACL2\")", "(defun dep-id (x) x)",
+                  "(defthm dep-id-is-id (equal (dep-id x) x))"]);
+    let o = b.sync(None, D).expect("sync after edit");
+    assert_eq!(o.stale_includes.len(), 1, "{:?}", o.stale_includes);
+    let st = &o.stale_includes[0];
+    assert!(st.path.ends_with("dep.lisp"), "{st:?}");
+    assert!(!st.missing);
+    assert_eq!(st.unit, Some(1), "attributed to the include-book form: {st:?}");
+    assert_eq!(o.reused, 3, "reported, not acted on -- the world is untouched");
+
+    // The remedy composes with what already exists: retract to that form and
+    // sync forward, which re-admits the include and picks up the new rule.
+    b.sync_to(Some(1), true, D).expect("retract to the include");
+    let o = b.sync(None, D).expect("resync");
+    assert!(o.stale_includes.is_empty(), "re-including re-baselines: {:?}", o.stale_includes);
+    let r = b.eval("(acl2::pe 'dep-id-is-id)", D).expect("query");
+    let text = b.output(&r.output_ref, Slice::All).unwrap().text;
+    assert!(text.to_lowercase().contains("dep-id-is-id"),
+            "the new rule is in the world now: {text}");
+
+    // A dependency that vanishes is reported as missing rather than changed.
+    std::fs::remove_file(&dep).unwrap();
+    let o = b.sync(None, D).expect("sync after removal");
+    assert!(o.stale_includes.iter().any(|s| s.missing), "{:?}", o.stale_includes);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A crashed ACL2 must read as dead, not busy forever.
 ///
 /// `is_running` is bookkeeping; a child that dies mid-form leaves it set. The

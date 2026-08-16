@@ -228,6 +228,17 @@ impl Driver {
             if reconciling {
                 self.reconciled = true;
             }
+            // Say so as soon as it is known. The frontier is *visible* here:
+            // a green gutter is an assertion, and one resting on a book that
+            // has since changed is a claim the user is looking at. Reported
+            // only -- acting on it is the next step, and belongs to a
+            // deliberate choice rather than a surprise mid-proof.
+            if !o.stale_includes.is_empty() {
+                self.out.notify(
+                    "stale_deps",
+                    &wire::stale_deps(&self.id, self.revision, &o.stale_includes),
+                );
+            }
             for u in &o.admitted {
                 self.out.notify("unit", &wire::unit_admitted(&self.id, self.revision, u));
             }

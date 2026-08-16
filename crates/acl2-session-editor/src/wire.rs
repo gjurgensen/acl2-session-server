@@ -206,6 +206,50 @@ pub struct TailEvent {
     pub text: String,
 }
 
+/// Books the world rests on whose sources have changed underneath it.
+///
+/// Sent when the daemon notices, so the client can say *why* a frontier is
+/// suspect rather than leaving a green gutter asserting something that is no
+/// longer true. Reported, not acted on -- the world is still exactly what
+/// these forms admitted.
+#[derive(Debug, Serialize)]
+pub struct StaleDepsEvent {
+    pub book: String,
+    pub revision: u64,
+    pub stale: Vec<StaleDep>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StaleDep {
+    /// The book, as ACL2 names it.
+    pub name: String,
+    pub path: String,
+    /// The unit of *this* file that included it, when one did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<usize>,
+    /// Gone rather than merely different.
+    #[serde(skip_serializing_if = "is_false")]
+    pub missing: bool,
+}
+
+pub fn stale_deps(book: &str, revision: u64, stale: &[acl2_session::StaleInclude])
+    -> StaleDepsEvent
+{
+    StaleDepsEvent {
+        book: book.to_string(),
+        revision,
+        stale: stale
+            .iter()
+            .map(|s| StaleDep {
+                name: s.book.clone(),
+                path: s.path.display().to_string(),
+                unit: s.unit,
+                missing: s.missing,
+            })
+            .collect(),
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct SettledEvent {
     pub book: String,

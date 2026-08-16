@@ -11,10 +11,11 @@
 
 #![forbid(unsafe_code)]
 // This module is pure logic; all FFI lives in pty.rs and session.rs.
+use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::session::{Outcome, Session, SessionControl};
 use crate::output::{OutputRef, OutputSlice, OutputStore, Slice};
@@ -42,6 +43,50 @@ struct Admitted {
     /// rebuild must replay such a unit under `skip-proofs` too, and every
     /// admitted unit after the first of these is conditional.
     skipped: bool,
+    /// Length of `include-book-alist-all` just after this unit.
+    ///
+    /// This is how a stale dependency is attributed to the unit that pulled
+    /// it in -- which matters because a transitively or locally included book
+    /// corresponds to no form in this file at all. The list is newest-first,
+    /// so an entry at position `p` of a list of length `L` was the `L - p`th
+    /// ever pushed, and the unit that added it is the first whose count
+    /// reached that. Arithmetic, from one integer per unit.
+    dep_count: Option<usize>,
+}
+
+/// A book the session's world was built from, as it looked when first seen.
+#[derive(Debug, Clone)]
+struct Dep {
+    /// The cheap filter: ACL2 keys certification on a source's length and
+    /// write date, and so do we -- but only to decide whether to bother
+    /// reading.
+    len: u64,
+    mtime: Option<SystemTime>,
+    /// The verdict. Content, like the file-prefix invariant itself: a
+    /// `git checkout`, a rebase, an editor's save-without-change or a restore
+    /// from backup all move the write date without changing a byte, and each
+    /// would otherwise re-prove everything downstream for nothing.
+    ///
+    /// Raw bytes, deliberately *not* normalised the way this file's own forms
+    /// are. Normalising someone else's book would mean splitting hundreds of
+    /// files we have no business parsing, on every check; and a comment-only
+    /// edit to a dependency genuinely does put it out of step with its
+    /// certificate, which is worth knowing rather than hiding.
+    hash: u64,
+}
+
+/// A dependency whose source has changed since the world was built on it.
+#[derive(Debug, Clone)]
+pub struct StaleInclude {
+    /// As ACL2 names it: an absolute path, or `(:system . "rel.lisp")`.
+    pub book: String,
+    /// Where it resolved to.
+    pub path: PathBuf,
+    /// The unit that pulled it in, when it was one of this file's own.
+    /// `None` for a book the session environment supplied.
+    pub unit: Option<usize>,
+    /// The file is gone entirely, rather than merely different.
+    pub missing: bool,
 }
 
 /// How far the deadline of one call has been spent.
@@ -374,6 +419,11 @@ pub struct SyncOutcome {
     /// it is conditional on unproved claims; a client paints from this one
     /// number without remembering earlier replies.
     pub conditional_from: Option<usize>,
+    /// Books the world rests on whose sources have changed since it was
+    /// built on them. Reported, not acted on: the world is still exactly
+    /// what these forms admitted, but it no longer describes what is on
+    /// disk, and only the caller knows whether re-proving now is worth it.
+    pub stale_includes: Vec<StaleInclude>,
 }
 
 /// Whether an `eval` disturbed the logical world.
@@ -622,10 +672,47 @@ const OWN_OUTPUT: &str = "(acl2::prog2$ \
 /// rollback re-establishes it explicitly. Both values are short; the one-line
 /// marker protocol is safe for them (see `Submission::data`).
 const CMD_PROBE: &str = "(acl2::prog2$ \
-    (acl2::cw \"~%<<<ASS-DATA cmd ~x0>>>~%<<<ASS-DATA pkg ~x1>>>~%\" \
+    (acl2::cw \"~%<<<ASS-DATA cmd ~x0>>>~%<<<ASS-DATA pkg ~x1>>>~%\
+<<<ASS-DATA ndeps ~x2>>>~%\" \
       (acl2::max-absolute-command-number (acl2::w acl2::state)) \
-      (acl2::f-get-global 'acl2::current-package acl2::state)) \
+      (acl2::f-get-global 'acl2::current-package acl2::state) \
+      (acl2::len (acl2::global-val 'acl2::include-book-alist-all \
+        (acl2::w acl2::state)))) \
     (acl2::value :invisible))";
+
+/// Name every book the world was built from, newest first.
+///
+/// `include-book-alist-all` rather than `include-book-alist`, and the
+/// difference is the whole point: the plain alist holds what is *in* the
+/// world, so it omits a book included locally inside an `encapsulate` --
+/// whose events the encapsulate discarded, but whose rules were what
+/// *admitted* it. Measured: a book with three includes (one plain, one
+/// top-level `local`, one local to an `encapsulate`) reports 14 entries in
+/// the plain alist and 23 in `-all`, and only `-all` names the
+/// encapsulate-local one.
+///
+/// Asking ACL2 also means never parsing `include-book` forms ourselves, so
+/// macros that expand to one, every `:dir` spelling, and the whole
+/// transitive closure are ACL2's answer rather than our guess. Names come
+/// back in two shapes, both measured: an absolute string for a book found by
+/// relative path, and `(:system . "under/books.lisp")` for `:dir :system`.
+///
+/// `true-list-fix` for the same reason `INNER_EVENTS_PROBE` needs it: an
+/// unguarded `strip-cars` on something that is not an `alistp` is a guard
+/// violation, and a probe's guard violation fails the *unit* it is spliced
+/// into.
+const DEPS_PROBE: &str = r#"(acl2::prog2$
+  (acl2::cw "~%<<<ASS-BEGIN deps>>>~%")
+  (acl2::prog2$
+    (acl2::cw "~*0"
+      (acl2::list "" "dep ~x*~%" "dep ~x*~%" "dep ~x*~%"
+        (acl2::strip-cars
+          (acl2::true-list-fix
+            (acl2::global-val 'acl2::include-book-alist-all
+                              (acl2::w acl2::state))))))
+    (acl2::prog2$
+      (acl2::cw "<<<ASS-END deps>>>~%")
+      (acl2::value :invisible))))"#;
 
 /// Report the events ACL2 recorded *inside* this unit.
 ///
@@ -1022,6 +1109,12 @@ fn keyed_block(body: &str, keys: &[&str]) -> Vec<(String, String)> {
     done
 }
 
+/// Content hash of a file, or 0 when it cannot be read. The splitter's
+/// hash, so the whole design keys on content in one way rather than two.
+fn hash_file(path: &Path) -> u64 {
+    std::fs::read(path).map(|b| crate::split::fnv1a(&b)).unwrap_or(0)
+}
+
 fn is_nil(v: &str) -> bool {
     let t = v.trim();
     t.is_empty() || t.eq_ignore_ascii_case("nil")
@@ -1145,6 +1238,12 @@ pub struct Book {
     outputs: Arc<Mutex<OutputStore>>,
     /// The unit whose submission has not reported yet.
     pending: Option<PendingUnit>,
+    /// Every book the world is currently built on, keyed by ACL2's name for
+    /// it, as it looked when first observed. See `stale_includes`.
+    deps: HashMap<String, Dep>,
+    /// Length of `include-book-alist-all` before any unit was admitted: the
+    /// books the session's own environment supplied, which belong to no unit.
+    base_dep_count: Option<usize>,
     /// Command number just after the base label, i.e. the empty prefix.
     base_command_number: Option<i64>,
     /// `current-package` at the empty prefix, as the customization left it.
@@ -1230,6 +1329,8 @@ impl Book {
             rebuilds: 0,
             outputs: Arc::new(Mutex::new(OutputStore::new()?)),
             pending: None,
+            deps: HashMap::new(),
+            base_dep_count: None,
             base_command_number: None,
             base_package: None,
             dirty: false,
@@ -1349,6 +1450,10 @@ impl Book {
         let sub = self.session.submit(&body, Duration::from_secs(60))?;
         self.base_command_number = sub.get("cmd").and_then(|v| v.parse().ok());
         self.base_package = sub.get("pkg").and_then(unquote);
+        self.base_dep_count = sub.get("ndeps").and_then(|v| v.parse().ok());
+        // The environment's own books are the baseline; a rebuild re-observes
+        // everything, so the map starts empty either way.
+        self.deps.clear();
         Ok(())
     }
 
@@ -1660,6 +1765,10 @@ impl Book {
         let units = split(bytes).map_err(SyncError::Split)?;
 
         let mut out = SyncOutcome::default();
+        // Before the diff, because it describes the world as this call found
+        // it: what the *previous* sync built, measured against disk now.
+        let deps_before = self.dep_count_now();
+        out.stale_includes = self.stale_includes(budget.floored());
 
         // Longest common prefix by hash. This is the whole diff: the client
         // never says what changed, we just re-derive it.
@@ -1710,6 +1819,7 @@ impl Book {
         let Some(target) = target else {
             // Nothing selected; nothing to admit.
             out.conditional_from = self.first_skipped();
+            self.baseline_new_deps(deps_before, &budget);
             return Ok(out);
         };
         out.resolved_through = Some(target);
@@ -1811,7 +1921,29 @@ impl Book {
             }
         }
         out.conditional_from = self.first_skipped();
+        self.baseline_new_deps(deps_before, &budget);
         Ok(out)
+    }
+
+    /// Length of `include-book-alist-all` as the last admitted unit saw it.
+    fn dep_count_now(&self) -> Option<usize> {
+        match self.admitted.last() {
+            Some(a) => a.dep_count,
+            None => self.base_dep_count,
+        }
+    }
+
+    /// Record a baseline for books this sync newly included.
+    ///
+    /// Only a sync that admitted an `include-book` pays for this, and it is
+    /// how the check stays honest: a book first seen at the *start* of some
+    /// later sync would be baselined against a file that may already have
+    /// changed, and would then never be reported stale. Baselining right
+    /// after inclusion records the state the world was actually built on.
+    fn baseline_new_deps(&mut self, before: Option<usize>, budget: &Budget) {
+        if self.dep_count_now() != before {
+            let _ = self.stale_includes(budget.floored());
+        }
     }
 
     /// Undo admitted units on request, keeping only the first `keep`.
@@ -2021,6 +2153,7 @@ impl Book {
                 label,
                 command_number: sub.get("cmd").and_then(|v| v.parse().ok()),
                 package: sub.get("pkg").and_then(unquote),
+                dep_count: sub.get("ndeps").and_then(|v| v.parse().ok()),
                 output_ref: output_ref.clone(),
                 skipped,
             });
@@ -2117,6 +2250,7 @@ impl Book {
                 label: p.label,
                 command_number: sub.get("cmd").and_then(|v| v.parse().ok()),
                 package: sub.get("pkg").and_then(unquote),
+                dep_count: sub.get("ndeps").and_then(|v| v.parse().ok()),
                 output_ref: output_ref.clone(),
                 skipped: p.skipped,
             });
@@ -2404,6 +2538,126 @@ impl Book {
             tail: String::new(),
             elapsed,
         })
+    }
+
+    /// Books whose sources have changed since the world was built on them.
+    ///
+    /// The invariant this server keeps is that the world equals the result of
+    /// admitting the file's forms -- but the forms `include-book`, and what
+    /// they include is not the file. A dependency edited and recertified
+    /// under a live session leaves that session's world quietly describing
+    /// nothing on disk: measured in the field as a rule added, the dependency
+    /// recertified, the dependent re-synced, and the rule still absent with
+    /// the reply reporting everything reused and nothing amiss.
+    ///
+    /// Cheap in the common case by construction: one probe, then a `stat` per
+    /// dependency, and a file is only *read* when its length or write date
+    /// moved. A read that hashes equal means someone touched it -- a
+    /// checkout, a re-save -- and updates the recorded stat rather than
+    /// crying stale.
+    ///
+    /// Best effort, like every probe that runs beside real work: a session
+    /// that cannot answer reports nothing rather than failing the caller's
+    /// sync.
+    pub fn stale_includes(&mut self, deadline: Duration) -> Vec<StaleInclude> {
+        let Some(names) = self.probe_deps(deadline) else { return Vec::new() };
+        let total = names.len();
+        let mut stale = Vec::new();
+        let mut seen: Vec<String> = Vec::with_capacity(total);
+        for (pos, name) in names.iter().enumerate() {
+            seen.push(name.clone());
+            let Some(path) = self.resolve_dep(name) else { continue };
+            let meta = std::fs::metadata(&path).ok();
+            let Some(known) = self.deps.get(name).cloned() else {
+                // First sight: record what it looks like now. A book is only
+                // ever first seen just after the unit that included it, so
+                // this baseline is the state the world was built on.
+                if let Some(m) = meta {
+                    let hash = hash_file(&path);
+                    self.deps.insert(
+                        name.clone(),
+                        Dep { len: m.len(), mtime: m.modified().ok(), hash },
+                    );
+                }
+                continue;
+            };
+            let Some(m) = meta else {
+                stale.push(StaleInclude {
+                    book: name.clone(),
+                    path,
+                    unit: self.unit_that_included(pos, total),
+                    missing: true,
+                });
+                continue;
+            };
+            if m.len() == known.len && m.modified().ok() == known.mtime {
+                continue; // Unmoved: no read at all.
+            }
+            let hash = hash_file(&path);
+            if hash == known.hash {
+                // Touched, not changed. Re-baseline the cheap filter so the
+                // next check is free again.
+                if let Some(d) = self.deps.get_mut(name) {
+                    d.len = m.len();
+                    d.mtime = m.modified().ok();
+                }
+                continue;
+            }
+            stale.push(StaleInclude {
+                book: name.clone(),
+                path,
+                unit: self.unit_that_included(pos, total),
+                missing: false,
+            });
+        }
+        // Books the world no longer rests on -- undone by a rollback -- stop
+        // being watched, so a later re-inclusion re-baselines rather than
+        // comparing against a world that no longer exists.
+        self.deps.retain(|k, _| seen.contains(k));
+        stale
+    }
+
+    /// Ask ACL2 which books the world rests on. `None` when it could not say.
+    fn probe_deps(&mut self, deadline: Duration) -> Option<Vec<String>> {
+        if self.session.is_running() {
+            return None;
+        }
+        let sub = self.session.submit(DEPS_PROBE, deadline.max(PROBE_FLOOR)).ok()?;
+        let body = sub.block("deps")?;
+        Some(items(&keyed_block(body, &["dep"]), "dep"))
+    }
+
+    /// Turn ACL2's name for a book into a path on disk.
+    ///
+    /// Two shapes, both measured: a plain string is already absolute, and
+    /// `(:system . "rel.lisp")` is relative to the books directory ACL2
+    /// reported at startup. Anything else -- a project's own `:dir` alias --
+    /// is declined rather than guessed at, so an unresolvable name simply
+    /// goes unwatched instead of raising a false alarm.
+    fn resolve_dep(&self, name: &str) -> Option<PathBuf> {
+        let t = name.trim();
+        if let Some(abs) = unquote(t) {
+            return Some(PathBuf::from(abs));
+        }
+        let inner = t.strip_prefix('(')?.strip_suffix(')')?;
+        let (key, rel) = inner.split_once('.')?;
+        if !key.trim().eq_ignore_ascii_case(":system") {
+            return None;
+        }
+        let rel = unquote(rel.trim())?;
+        Some(self.books_dir.as_ref()?.join(rel))
+    }
+
+    /// The unit that pulled in the book at `pos` of a newest-first list of
+    /// length `total`. See `Admitted::dep_count`.
+    fn unit_that_included(&self, pos: usize, total: usize) -> Option<usize> {
+        let nth = total.checked_sub(pos)?; // it was the nth ever pushed
+        if nth <= self.base_dep_count.unwrap_or(0) {
+            return None; // the environment's, not any unit's
+        }
+        self.admitted
+            .iter()
+            .position(|a| a.dep_count.is_some_and(|c| c >= nth))
     }
 
     /// The file this session is anchored to.

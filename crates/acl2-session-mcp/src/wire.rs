@@ -303,6 +303,45 @@ pub struct SyncReply {
     /// `acl2_interrupt` to stop it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub in_flight: Option<InFlight>,
+    /// Books this file includes whose sources have changed since the session
+    /// built its world on them -- so the world is out of step with disk, and
+    /// forms reported `reused` were reused against the old ones. Present
+    /// only when there are any; see `StaleInclude` for what to do.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub stale_includes: Vec<StaleInclude>,
+}
+
+/// A book the session's world rests on whose source has changed since.
+///
+/// The world is still exactly what this file's forms admitted -- but one of
+/// the books they include is no longer what it was, so the world no longer
+/// describes what is on disk. Nothing has been undone: re-proving from the
+/// including form may cost the rest of the book, and only you know whether
+/// that is worth it now. To act, sync with `through_line` at that form and
+/// `retract:true`, or close the session and open a new one.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct StaleInclude {
+    /// The book, as ACL2 names it.
+    pub book: String,
+    /// Where it resolved to on disk.
+    pub path: String,
+    /// The form in *this* file that pulled it in. Absent when no form did:
+    /// a book included transitively by another book, or one the session
+    /// environment supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<usize>,
+    /// The file is gone, not merely different.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub missing: bool,
+}
+
+pub fn stale_include(s: &core::StaleInclude) -> StaleInclude {
+    StaleInclude {
+        book: s.book.clone(),
+        path: s.path.display().to_string(),
+        unit: s.unit,
+        missing: s.missing,
+    }
 }
 
 /// A form ACL2 is still working on.
@@ -329,6 +368,7 @@ impl From<core::SyncOutcome> for SyncReply {
             rebuilt: o.rebuilt,
             admitted: o.admitted.iter().map(admitted).collect(),
             failed: o.failed.as_ref().filter(|_| !running).map(failed),
+            stale_includes: o.stale_includes.iter().map(stale_include).collect(),
             in_flight: o.failed.as_ref().filter(|_| running).map(|f| InFlight {
                 index: f.index,
                 line_start: f.line_start,
