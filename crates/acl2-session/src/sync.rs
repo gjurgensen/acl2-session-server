@@ -615,84 +615,94 @@ const CMD_PROBE: &str = "(acl2::prog2$ \
 /// growing without bound.
 ///
 /// The alist is a fast-alist and therefore *improper*: its final cdr is the
-/// symbol `event-data-fal` rather than `nil`, so `strip-cars` guard-fails on
-/// it. Hence the `consp`-guarded walk. Entries are pushed newest-first, and a
-/// fixed number of slots is read for the same reason as the checkpoints:
-/// iterating would need a recursive helper, and defining one would put it in
-/// the world.
-/// Note the `true-list-fix` around `event-data-fal`. That global is a fast
-/// alist whose final cdr is the symbol naming it, so it is never `alistp` --
-/// and `CLEAR_STALE` blanks it to that bare symbol, so it is sometimes not a
-/// cons at all. `strip-cars` needs `alistp`, and an unguarded call is a guard
-/// violation that fails the *unit* the probe is spliced into, not just the
-/// probe. Measured: `(alistp (@ event-data-fal))` is `nil` after two events,
-/// while `(strip-cars (true-list-fix ...))` gives both names.
+/// symbol `event-data-fal` rather than `nil`, so it is never `alistp` -- and
+/// `CLEAR_STALE` blanks it to that bare symbol, so it is sometimes not a
+/// cons at all. Hence `true-list-fix` before anything touches it. Entries
+/// are pushed newest-first, so the failing event of a compound form is
+/// always at index 0.
 ///
-/// Per detail slot, alongside the rules and abort causes: the event's kind
+/// Per probed event, alongside the rules and abort causes: the event's kind
 /// (from `event`, falling back to `form` when its head is a symbol -- the
 /// `verify-guards` entry records its form as a fmt string), whether a `namex`
 /// was recorded (the failing entry is the one without), and the entry's own
 /// `time` and `prover-steps-counted` -- which member of a clique was slow,
 /// which the aggregate outer numbers cannot say.
-const INNER_EVENTS_PROBE: &str = r#"(acl2::let*
-  ((acl2::f0 (acl2::@ acl2::event-data-fal))
-   (acl2::e0 (acl2::and (acl2::consp acl2::f0) (acl2::car acl2::f0)))
-   (acl2::f1 (acl2::and (acl2::consp acl2::f0) (acl2::cdr acl2::f0)))
-   (acl2::e1 (acl2::and (acl2::consp acl2::f1) (acl2::car acl2::f1)))
-   (acl2::f2 (acl2::and (acl2::consp acl2::f1) (acl2::cdr acl2::f1)))
-   (acl2::e2 (acl2::and (acl2::consp acl2::f2) (acl2::car acl2::f2)))
-   (acl2::d0 (acl2::and (acl2::consp acl2::e0) (acl2::car (acl2::cdr acl2::e0))))
-   (acl2::d1 (acl2::and (acl2::consp acl2::e1) (acl2::car (acl2::cdr acl2::e1))))
-   (acl2::d2 (acl2::and (acl2::consp acl2::e2) (acl2::car (acl2::cdr acl2::e2))))
-   (acl2::ev0 (acl2::cdr (acl2::assoc-eq 'acl2::event acl2::d0)))
-   (acl2::ev1 (acl2::cdr (acl2::assoc-eq 'acl2::event acl2::d1)))
-   (acl2::ev2 (acl2::cdr (acl2::assoc-eq 'acl2::event acl2::d2)))
-   (acl2::fo0 (acl2::cdr (acl2::assoc-eq 'acl2::form acl2::d0)))
-   (acl2::fo1 (acl2::cdr (acl2::assoc-eq 'acl2::form acl2::d1)))
-   (acl2::fo2 (acl2::cdr (acl2::assoc-eq 'acl2::form acl2::d2))))
+///
+/// The probe is generated, not constant, because the detail depth is a
+/// per-[`Book`] choice (`set_inner_detail`): the iteration is `loop$` over
+/// the fal *value* -- no state in the body, nothing defined into the world --
+/// with LIMIT spliced in as a number and applied via `take`/`min`, and the
+/// per-event rune lists carried as index-tagged pairs (`(3 :rewrite foo)` is
+/// event 3's `(:rewrite foo)`) so they survive one flat `~*` stream. Every
+/// symbol is `acl2::`-qualified, the loop$ keywords included: the probe must
+/// read identically in any current package. Guard discipline: every accessor
+/// sits behind `alistp`/`true-list-fix`, because a guard violation here
+/// fails the unit the probe is spliced into, not just the probe. Measured
+/// end to end.
+///
+/// The index iteration's `to` bound is `(len ds)`, and must never be a
+/// sentinel-huge literal: loop$'s `from`/`to` MATERIALIZES the index list
+/// (`from-to-by-ac`), so `to 1000000000` allocated a billion conses -- some
+/// thirty gigabytes -- on every admission. "Heap exhausted, game over",
+/// measured the hard way.
+fn inner_events_probe(limit: usize) -> String {
+    format!(
+        r#"(acl2::let*
+  ((acl2::fal0 (acl2::true-list-fix (acl2::@ acl2::event-data-fal)))
+   (acl2::nn (acl2::min {limit} (acl2::len acl2::fal0)))
+   (acl2::ds (acl2::loop$ acl2::for acl2::e acl2::in (acl2::take acl2::nn acl2::fal0)
+               acl2::collect (acl2::car (acl2::cdr (acl2::true-list-fix acl2::e))))))
   (acl2::prog2$
     (acl2::cw "~%<<<ASS-BEGIN inner>>>~%")
     (acl2::prog2$
       (acl2::cw "~*0" (acl2::list "" "iname ~x*~%" "iname ~x*~%" "iname ~x*~%"
-                        (acl2::strip-cars (acl2::true-list-fix acl2::f0))))
-    (acl2::prog2$
-      (acl2::cw "~*0" (acl2::list "" "r0rune ~x*~%" "r0rune ~x*~%" "r0rune ~x*~%"
-                        (acl2::cdr (acl2::assoc-eq 'acl2::rules acl2::d0))))
+                        (acl2::strip-cars acl2::fal0)))
       (acl2::prog2$
-        (acl2::cw "~*0" (acl2::list "" "r1rune ~x*~%" "r1rune ~x*~%" "r1rune ~x*~%"
-                          (acl2::cdr (acl2::assoc-eq 'acl2::rules acl2::d1))))
+        (acl2::cw "~*0" (acl2::list "" "ik ~x*~%" "ik ~x*~%" "ik ~x*~%"
+          (acl2::loop$ acl2::for acl2::d acl2::in acl2::ds acl2::collect
+            (acl2::or (acl2::and (acl2::alistp acl2::d)
+                                 (acl2::consp (acl2::cdr (acl2::assoc-equal 'acl2::event acl2::d)))
+                                 (acl2::car (acl2::cdr (acl2::assoc-equal 'acl2::event acl2::d))))
+                      (acl2::and (acl2::alistp acl2::d)
+                                 (acl2::consp (acl2::cdr (acl2::assoc-equal 'acl2::form acl2::d)))
+                                 (acl2::symbolp (acl2::car (acl2::cdr (acl2::assoc-equal 'acl2::form acl2::d))))
+                                 (acl2::car (acl2::cdr (acl2::assoc-equal 'acl2::form acl2::d))))))))
         (acl2::prog2$
-          (acl2::cw "~*0" (acl2::list "" "r2rune ~x*~%" "r2rune ~x*~%" "r2rune ~x*~%"
-                            (acl2::cdr (acl2::assoc-eq 'acl2::rules acl2::d2))))
+          (acl2::cw "~*0" (acl2::list "" "ia ~x*~%" "ia ~x*~%" "ia ~x*~%"
+            (acl2::loop$ acl2::for acl2::d acl2::in acl2::ds acl2::collect
+              (acl2::and (acl2::alistp acl2::d)
+                         (acl2::cdr (acl2::assoc-equal 'acl2::abort-causes acl2::d))))))
           (acl2::prog2$
-            (acl2::cw "a0 ~x0~%a1 ~x1~%a2 ~x2~%k0 ~x3~%k1 ~x4~%k2 ~x5~%nx0 ~x6~%nx1 ~x7~%nx2 ~x8~%"
-              (acl2::cdr (acl2::assoc-eq 'acl2::abort-causes acl2::d0))
-              (acl2::cdr (acl2::assoc-eq 'acl2::abort-causes acl2::d1))
-              (acl2::cdr (acl2::assoc-eq 'acl2::abort-causes acl2::d2))
-              (acl2::or (acl2::and (acl2::consp acl2::ev0) (acl2::car acl2::ev0))
-                        (acl2::and (acl2::consp acl2::fo0)
-                                   (acl2::symbolp (acl2::car acl2::fo0))
-                                   (acl2::car acl2::fo0)))
-              (acl2::or (acl2::and (acl2::consp acl2::ev1) (acl2::car acl2::ev1))
-                        (acl2::and (acl2::consp acl2::fo1)
-                                   (acl2::symbolp (acl2::car acl2::fo1))
-                                   (acl2::car acl2::fo1)))
-              (acl2::or (acl2::and (acl2::consp acl2::ev2) (acl2::car acl2::ev2))
-                        (acl2::and (acl2::consp acl2::fo2)
-                                   (acl2::symbolp (acl2::car acl2::fo2))
-                                   (acl2::car acl2::fo2)))
-              (acl2::if (acl2::assoc-eq 'acl2::namex acl2::d0) 'acl2::yes 'acl2::no)
-              (acl2::if (acl2::assoc-eq 'acl2::namex acl2::d1) 'acl2::yes 'acl2::no)
-              (acl2::if (acl2::assoc-eq 'acl2::namex acl2::d2) 'acl2::yes 'acl2::no))
+            (acl2::cw "~*0" (acl2::list "" "inx ~x*~%" "inx ~x*~%" "inx ~x*~%"
+              (acl2::loop$ acl2::for acl2::d acl2::in acl2::ds acl2::collect
+                (acl2::if (acl2::and (acl2::alistp acl2::d)
+                                     (acl2::assoc-equal 'acl2::namex acl2::d))
+                          'acl2::yes 'acl2::no))))
             (acl2::prog2$
-              (acl2::cw "t0 ~x0~%t1 ~x1~%t2 ~x2~%s0 ~x3~%s1 ~x4~%s2 ~x5~%<<<ASS-END inner>>>~%"
-                (acl2::cdr (acl2::assoc-eq 'acl2::time acl2::d0))
-                (acl2::cdr (acl2::assoc-eq 'acl2::time acl2::d1))
-                (acl2::cdr (acl2::assoc-eq 'acl2::time acl2::d2))
-                (acl2::cdr (acl2::assoc-eq 'acl2::prover-steps-counted acl2::d0))
-                (acl2::cdr (acl2::assoc-eq 'acl2::prover-steps-counted acl2::d1))
-                (acl2::cdr (acl2::assoc-eq 'acl2::prover-steps-counted acl2::d2)))
-              (acl2::value :invisible)))))))))"#;
+              (acl2::cw "~*0" (acl2::list "" "it ~x*~%" "it ~x*~%" "it ~x*~%"
+                (acl2::loop$ acl2::for acl2::d acl2::in acl2::ds acl2::collect
+                  (acl2::and (acl2::alistp acl2::d)
+                             (acl2::cdr (acl2::assoc-equal 'acl2::time acl2::d))))))
+              (acl2::prog2$
+                (acl2::cw "~*0" (acl2::list "" "is ~x*~%" "is ~x*~%" "is ~x*~%"
+                  (acl2::loop$ acl2::for acl2::d acl2::in acl2::ds acl2::collect
+                    (acl2::and (acl2::alistp acl2::d)
+                               (acl2::cdr (acl2::assoc-equal 'acl2::prover-steps-counted acl2::d))))))
+                (acl2::prog2$
+                  (acl2::cw "~*0" (acl2::list "" "irune ~x*~%" "irune ~x*~%" "irune ~x*~%"
+                    (acl2::loop$ acl2::for acl2::d acl2::in acl2::ds
+                                 acl2::as acl2::i acl2::from 0 acl2::to (acl2::len acl2::ds)
+                      acl2::append
+                        (acl2::loop$ acl2::for acl2::r acl2::in
+                            (acl2::true-list-fix
+                              (acl2::and (acl2::alistp acl2::d)
+                                         (acl2::cdr (acl2::assoc-equal 'acl2::rules acl2::d))))
+                          acl2::collect (acl2::cons acl2::i acl2::r)))))
+                  (acl2::prog2$
+                    (acl2::cw "<<<ASS-END inner>>>~%")
+                    (acl2::value :invisible)))))))))))"#
+    )
+}
 
 /// ACL2 prints a string with `~x` in quotes; the value is the text inside.
 fn unquote(v: &str) -> Option<String> {
@@ -724,20 +734,20 @@ fn in_package_target(text: &[u8]) -> Option<String> {
     Some(name.to_string())
 }
 
-/// How many inner events the probe reads detail (abort causes, rules) for.
+/// The default number of inner events the probes read detail for; see
+/// [`Book::set_inner_detail`] to raise it.
 ///
 /// Names are complete however many there are; this bounds only the detail.
 /// A consumer is told where it stops, because "no rules" and "rules not read"
 /// look identical otherwise -- the silent-incompleteness trap that made a
 /// three-name `inner` list read as the whole story.
 ///
-/// Three is not a magic number: fmt indexes `~x0` to `~x9`, so one `cw` carried
-/// three events' worth of fields plus a marker. It stays because the detail
-/// that matters is always in reach -- `event-data-fal` is newest-first and a
-/// compound form stops at the event that failed, so that event is at index 0.
-/// Detail for the rest is per-event in the captured log: search a form's
-/// output for `Rules:` and it is there under a `Form:` header, 13 of them for
-/// a `defines` clique.
+/// Three remains the right *default* because the detail that matters most is
+/// always in reach -- `event-data-fal` is newest-first and a compound form
+/// stops at the event that failed, so that event is at index 0 -- and because
+/// an `include-book` unit can hold thousands of events whose per-event runes
+/// would flood every admission's capture. An editor client, which renders
+/// rather than pays per token, raises it to "everything".
 pub const INNER_DETAIL_SLOTS: usize = 3;
 
 /// Every value recorded under a repeated key, with ACL2's wrapping undone.
@@ -767,56 +777,68 @@ fn symbol_name_of(v: &str) -> String {
     t.to_ascii_lowercase()
 }
 
+/// Positional per-event values under KEY: one entry per probed event, `nil`
+/// kept as `None`, so positions stay aligned with the names.
+fn items_positional(pairs: &[(String, String)], key: &str) -> Vec<Option<String>> {
+    pairs
+        .iter()
+        .filter(|(k, _)| k == key)
+        .map(|(_, v)| v.split_whitespace().collect::<Vec<_>>().join(" "))
+        .map(|v| if v.is_empty() || is_nil(&v) { None } else { Some(v) })
+        .collect()
+}
+
 fn parse_inner(sub: &crate::session::Submission) -> (Vec<InnerEvent>, usize) {
     let Some(body) = sub.block("inner") else { return (Vec::new(), 0) };
-    let pairs = keyed_block(body, &["iname", "a0", "a1", "a2",
-                                    "r0rune", "r1rune", "r2rune",
-                                    "k0", "k1", "k2", "nx0", "nx1", "nx2",
-                                    "t0", "t1", "t2", "s0", "s1", "s2"]);
-    let get = |k: &str| pairs.iter().find(|(pk, _)| pk == k)
-        .map(|(_, v)| v.trim().to_string()).filter(|v| !is_nil(v));
+    let pairs = keyed_block(body, &["iname", "ik", "ia", "inx", "it", "is", "irune"]);
     // Every name, not a sample of them. A `defines` clique introduces far more
     // than three events, and a list of three that looks complete is worse than
     // a long one: the reporter found two of a clique's own functions in the
     // world and absent from this list, with nothing to say it was truncated.
     let names = items(&pairs, "iname");
-    // Names are complete; the per-event detail is read for the first few.
-    //
-    // That number is a leftover -- fmt indexes `~x0` to `~x9`, so one `cw`
-    // carried three events' worth -- but it costs nothing where it matters.
-    // `event-data-fal` is newest-first and a compound form stops at the event
-    // that failed, so **the failing event is always at index 0**. Measured on
-    // a `progn` of four theorems whose fourth fails: names come back
-    // `(p4-bogus p3 p2 p1)` with the abort cause at slot 0, not slot 3.
-    //
-    // What the limit does cost is the detail of *non-failing* inner events
-    // past the third, on a form that failed. Raising it means more `~*` passes,
-    // one per slot. Either way a reader must be told where the detail stops,
-    // since an entry with no rules is otherwise indistinguishable from one
-    // whose rules were never read -- see `INNER_DETAIL_SLOTS`.
-    let detail = [("a0", "r0rune", "k0", "nx0", "t0", "s0"),
-                  ("a1", "r1rune", "k1", "nx1", "t1", "s1"),
-                  ("a2", "r2rune", "k2", "nx2", "t2", "s2")];
-    debug_assert_eq!(detail.len(), INNER_DETAIL_SLOTS);
+    // The per-event fields are positional: the probe's loop$ collects visit
+    // the same (limited) prefix of the fal in the same order the names walk
+    // it, and print one line per event, `nil` included. `event-data-fal` is
+    // newest-first and a compound form stops at the event that failed, so
+    // **the failing event is always at index 0** -- the default detail depth
+    // never misses it. Beyond the probed prefix the fields are simply absent,
+    // which is how a consumer tells "no rules" from "rules not read".
+    let kinds = items_positional(&pairs, "ik");
+    let aborts = items_positional(&pairs, "ia");
+    let namexes = items_positional(&pairs, "inx");
+    let times = items_positional(&pairs, "it");
+    let steps = items_positional(&pairs, "is");
+    // Runes arrive index-tagged -- `(3 :rewrite foo)` is event 3's
+    // `(:rewrite foo)` -- so the per-event lists survive one flat stream.
+    // The envelope is ours (index, space, rune, closing paren), so peeling
+    // it is sentinel parsing, not prose parsing.
+    let mut rules: Vec<Vec<String>> = vec![Vec::new(); names.len()];
+    for pair in items(&pairs, "irune") {
+        let Some(bare) = pair.strip_prefix('(').and_then(|p| p.strip_suffix(')')) else {
+            continue;
+        };
+        let Some((idx, rune)) = bare.split_once(' ') else { continue };
+        let Ok(i) = idx.parse::<usize>() else { continue };
+        if let Some(slot) = rules.get_mut(i) {
+            slot.push(format!("({rune})"));
+        }
+    }
     let mut out = Vec::new();
     for (i, name) in names.iter().enumerate() {
-        // Names are cheap and complete; the per-event detail is not, and is
-        // read for the first few only.
-        let d = detail.get(i).copied();
         out.push(InnerEvent {
             name: name.clone(),
-            abort_causes: d.and_then(|(a, ..)| get(a)),
-            rules: d.map_or(Vec::new(), |(_, r, ..)| items(&pairs, r)),
-            kind: d.and_then(|(_, _, k, ..)| get(k)).map(|v| symbol_name_of(&v)),
+            abort_causes: aborts.get(i).cloned().flatten(),
+            rules: rules.get(i).cloned().unwrap_or_default(),
+            kind: kinds.get(i).cloned().flatten().map(|v| symbol_name_of(&v)),
             // Printed as yes/no rather than t/nil, because a nil would be
             // indistinguishable here from the value having gone missing.
-            has_namex: d
-                .and_then(|(_, _, _, nx, ..)| get(nx))
+            has_namex: namexes
+                .get(i)
+                .cloned()
+                .flatten()
                 .map(|v| symbol_name_of(&v) == "yes"),
-            time: d
-                .and_then(|(.., t, _)| get(t))
-                .map(|v| v.split_whitespace().collect::<Vec<_>>().join(" ")),
-            prover_steps: d.and_then(|(.., s)| get(s)).and_then(|v| v.parse().ok()),
+            time: times.get(i).cloned().flatten(),
+            prover_steps: steps.get(i).cloned().flatten().and_then(|v| v.parse().ok()),
         });
     }
     let total = out.len();
@@ -1102,6 +1124,9 @@ pub struct Book {
     dirty: bool,
     /// What a sync does at a failed unit. See [`SyncMode`].
     mode: SyncMode,
+    /// The inner-events probe, generated for this book's detail depth. See
+    /// [`Book::set_inner_detail`].
+    inner_probe: String,
     /// `inhibit-output-lst` as inherited, before the server removed PROVE.
     inherited_inhibit: Option<String>,
     /// The handle handed out for a form that outran its deadline.
@@ -1179,6 +1204,7 @@ impl Book {
             base_package: None,
             dirty: false,
             mode: SyncMode::StopAtFailure,
+            inner_probe: inner_events_probe(INNER_DETAIL_SLOTS),
             inherited_inhibit: None,
             books_dir: None,
             in_flight_output: None,
@@ -1237,6 +1263,18 @@ impl Book {
     /// resume be called inconsistently and reopen exactly that hole.
     pub fn set_sync_mode(&mut self, mode: SyncMode) {
         self.mode = mode;
+    }
+
+    /// How many inner events of a compound unit the probes read detail for
+    /// (kind, rules, time, steps, abort causes). Names are always complete;
+    /// this raises only the detail depth, [`INNER_DETAIL_SLOTS`] by default.
+    ///
+    /// Any `n` at least the unit's event count is complete. The editor
+    /// daemon asks for everything; the agent-facing default stays small,
+    /// because an `include-book` unit can hold thousands of events whose
+    /// per-event runes would flood every admission's capture.
+    pub fn set_inner_detail(&mut self, n: usize) {
+        self.inner_probe = inner_events_probe(n);
     }
 
     /// The output store, shared for the same reason as the control block:
@@ -1814,7 +1852,7 @@ impl Book {
             Ok(sub) => parse_checkpoints(&sub),
             Err(_) => Checkpoints::default(),
         };
-        let (inner, inner_total) = match self.session.submit(INNER_EVENTS_PROBE, deadline) {
+        let (inner, inner_total) = match self.session.submit(&self.inner_probe, deadline) {
             Ok(sub) => parse_inner(&sub),
             Err(_) => (Vec::new(), 0),
         };
@@ -1869,8 +1907,9 @@ impl Book {
             text.to_owned()
         };
         let body = format!(
-            "{CLEAR_STALE}\n{payload}\n{EVENT_DATA_PROBE}\n{INNER_EVENTS_PROBE}\n\
+            "{CLEAR_STALE}\n{payload}\n{EVENT_DATA_PROBE}\n{}\n\
              (acl2::with-output :off :all (acl2::deflabel {}))\n{CMD_PROBE}",
+            self.inner_probe,
             Self::label_name(label)
         );
         // Named before submission, so a lock-free status reader can say which

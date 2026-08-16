@@ -293,6 +293,36 @@ fn continue_past_failure_triages_and_recovers() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Raised inner detail reaches every event of a compound unit, not just the
+/// default three slots -- the editor asks for everything.
+#[test]
+#[ignore = "needs ACL2"]
+fn raised_inner_detail_reaches_every_event() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("inner-detail");
+    let book = dir.join("demo.lisp");
+    write(&book, &["(in-package \"ACL2\")",
+                   "(progn\n\
+                     (defthm w1 (equal (car (cons x y)) x) :rule-classes nil)\n\
+                     (defthm w2 (equal (cdr (cons x y)) y) :rule-classes nil)\n\
+                     (defthm w3 (equal (car (cons y x)) y) :rule-classes nil)\n\
+                     (defthm w4 (equal (cdr (cons y x)) x) :rule-classes nil)\n\
+                     (defthm w5 (equal (car (cons x x)) x) :rule-classes nil))"]);
+    let mut b = Book::open(&acl2, &book).expect("open");
+    b.set_inner_detail(usize::MAX);
+    let o = b.sync(None, D).expect("sync");
+    assert!(o.failed.is_none(), "{:?}", o.failed);
+    let u = &o.admitted[1];
+    assert_eq!(u.inner.len(), 5, "{:?}", u.inner);
+    for e in &u.inner {
+        assert_eq!(e.kind.as_deref(), Some("defthm"), "every event has its kind: {e:?}");
+        assert!(!e.rules.is_empty(), "and its rules: {e:?}");
+        assert!(e.time.is_some(), "and its time: {e:?}");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A rebuild replays a skipped unit under skip-proofs too -- replaying it
 /// plainly would re-run the failed proof and read as an unreachable world.
 #[test]
