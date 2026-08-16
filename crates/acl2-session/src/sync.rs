@@ -1219,6 +1219,38 @@ fn parse_event_data(sub: &crate::session::Submission) -> EventData {
     e
 }
 
+/// What a caller wants from one sync, beyond the deadline.
+///
+/// A struct rather than a run of positional booleans: the defaults are the
+/// ordinary call, and every departure from it reads by name at the call site.
+#[derive(Debug, Clone, Default)]
+pub struct SyncOptions {
+    /// Admit only as far as this line. `None` means the end of the snapshot.
+    pub through_line: Option<usize>,
+    /// Also undo everything after `through_line`. See [`Book::sync_with`].
+    pub retract: bool,
+    /// Report dependency staleness without acting on it.
+    ///
+    /// By default a book whose source changed under the session invalidates
+    /// the unit that included it, exactly as editing that unit would: the
+    /// world is supposed to be what the file says, and a world resting on a
+    /// book that has since changed is not. This says "not now" -- for
+    /// finishing the proof in front of you before picking up a neighbour's
+    /// edit -- and is deliberately per call, so it cannot be set once and
+    /// forgotten back into the silent staleness it exists to escape.
+    pub ignore_stale_includes: bool,
+    /// Admit every unit under `skip-proofs`.
+    ///
+    /// For loose interactive work where time matters more than truth: the
+    /// forms go in, the proofs do not run, and `conditional_from` says from
+    /// where the world is believed rather than proved. Never coupled to
+    /// staleness recovery, and for a good reason -- the proofs a changed
+    /// dependency would break are exactly the ones this skips, so recovering
+    /// that way would turn the detection into theatre. Certify, or re-admit
+    /// without the flag, before trusting anything proved under it.
+    pub skip_proofs: bool,
+}
+
 /// A session anchored to one file.
 pub struct Book {
     acl2: PathBuf,
@@ -1241,6 +1273,14 @@ pub struct Book {
     /// Every book the world is currently built on, keyed by ACL2's name for
     /// it, as it looked when first observed. See `stale_includes`.
     deps: HashMap<String, Dep>,
+    /// The names in ACL2's order, newest first, as of the last probe.
+    ///
+    /// Kept so that staleness can be re-checked from the filesystem alone.
+    /// The list only changes when an `include-book` is admitted, so an idle
+    /// poller needs no ACL2 round trip at all -- which is what lets the
+    /// editor daemon watch dependencies on a timer without keeping its ACL2
+    /// permanently busy.
+    dep_names: Vec<String>,
     /// Length of `include-book-alist-all` before any unit was admitted: the
     /// books the session's own environment supplied, which belong to no unit.
     base_dep_count: Option<usize>,
@@ -1330,6 +1370,7 @@ impl Book {
             outputs: Arc::new(Mutex::new(OutputStore::new()?)),
             pending: None,
             deps: HashMap::new(),
+            dep_names: Vec::new(),
             base_dep_count: None,
             base_command_number: None,
             base_package: None,
@@ -1454,6 +1495,7 @@ impl Book {
         // The environment's own books are the baseline; a rebuild re-observes
         // everything, so the map starts empty either way.
         self.deps.clear();
+        self.dep_names.clear();
         Ok(())
     }
 
@@ -1664,7 +1706,7 @@ impl Book {
         through_line: Option<usize>,
         deadline: Duration,
     ) -> Result<SyncOutcome, SyncError> {
-        self.sync_to(through_line, false, deadline)
+        self.sync_with(&SyncOptions { through_line, ..Default::default() }, deadline)
     }
 
     /// `sync`, with the frontier allowed to move *backward* to the target.
@@ -1681,14 +1723,13 @@ impl Book {
     /// reply reports them under `rolled_back` exactly as an edit would.
     /// Without a target there is nothing to retract to, and the call is an
     /// ordinary sync.
-    pub fn sync_to(
+    pub fn sync_with(
         &mut self,
-        through_line: Option<usize>,
-        retract: bool,
+        opts: &SyncOptions,
         deadline: Duration,
     ) -> Result<SyncOutcome, SyncError> {
         let bytes = self.read_anchor()?;
-        self.sync_bytes_to(&bytes, through_line, retract, deadline)
+        self.sync_bytes_with(&bytes, opts, deadline)
     }
 
     /// Read the anchored file, distinguishing "gone" from any other I/O
@@ -1734,19 +1775,22 @@ impl Book {
         through_line: Option<usize>,
         deadline: Duration,
     ) -> Result<SyncOutcome, SyncError> {
-        self.sync_bytes_to(bytes, through_line, false, deadline)
+        self.sync_bytes_with(
+            bytes,
+            &SyncOptions { through_line, ..Default::default() },
+            deadline,
+        )
     }
 
-    /// `sync_bytes`, with the frontier allowed to move backward. See
-    /// [`sync_to`](Self::sync_to) for what `retract` means and why it is a
-    /// flag rather than an inference.
-    pub fn sync_bytes_to(
+    /// `sync_bytes`, with everything a caller can ask for. See
+    /// [`SyncOptions`].
+    pub fn sync_bytes_with(
         &mut self,
         bytes: &[u8],
-        through_line: Option<usize>,
-        retract: bool,
+        opts: &SyncOptions,
         deadline: Duration,
     ) -> Result<SyncOutcome, SyncError> {
+        let (through_line, retract) = (opts.through_line, opts.retract);
         if self.session.is_running() {
             return Err(SyncError::Busy { index: self.running_unit() });
         }
@@ -1780,6 +1824,34 @@ impl Book {
         // while reporting `reused: 0` as though nothing were admitted.
         let hashes: Vec<u64> = self.admitted.iter().map(|a| a.hash).collect();
         let mut keep = common_prefix(&hashes, &units);
+
+        // A book that changed under us invalidates the unit that included it,
+        // exactly as editing that unit would. The world is meant to be what
+        // the file says, and a world resting on a book that has since changed
+        // is not -- so the ordinary diff and this one converge on the same
+        // rollback, and the reply reports the cost under `rolled_back` either
+        // way. `stale_includes` still names what happened, so a sync that
+        // suddenly re-proves a book is attributable rather than mysterious.
+        //
+        // Only a unit can be invalidated this way. A book the *environment*
+        // supplied is reported with no unit and cannot be acted on here:
+        // re-admitting units would not re-include it, and only a fresh
+        // session would.
+        let mut folded = false;
+        if !opts.ignore_stale_includes {
+            for st in &out.stale_includes {
+                if let Some(u) = st.unit {
+                    keep = keep.min(u);
+                    folded = true;
+                    // Forget what this book looked like. Re-including it is
+                    // about to build the world on the *new* file, and an
+                    // entry surviving the round trip would compare the new
+                    // file against the old baseline forever -- reporting it
+                    // stale on every later sync.
+                    self.deps.remove(&st.book);
+                }
+            }
+        }
 
         // Retraction bounds the reusable prefix, and is applied before the
         // rollback below so that undoing on request and undoing because the
@@ -1819,13 +1891,14 @@ impl Book {
         let Some(target) = target else {
             // Nothing selected; nothing to admit.
             out.conditional_from = self.first_skipped();
-            self.baseline_new_deps(deps_before, &budget);
+            self.baseline_new_deps(deps_before, folded, &budget);
             return Ok(out);
         };
         out.resolved_through = Some(target);
 
         for (i, u) in units.iter().enumerate().take(target + 1).skip(keep) {
-            let (sub, output_ref) = self.admit_unit(u, i, bytes, budget.remaining())?;
+            let (sub, output_ref) =
+                self.admit_unit(u, i, bytes, opts.skip_proofs, budget.remaining())?;
             let output_lines = self.outs().lines(&output_ref).unwrap_or(0);
             match sub.outcome {
                 Outcome::Ok => {
@@ -1921,7 +1994,7 @@ impl Book {
             }
         }
         out.conditional_from = self.first_skipped();
-        self.baseline_new_deps(deps_before, &budget);
+        self.baseline_new_deps(deps_before, folded, &budget);
         Ok(out)
     }
 
@@ -1940,8 +2013,11 @@ impl Book {
     /// later sync would be baselined against a file that may already have
     /// changed, and would then never be reported stale. Baselining right
     /// after inclusion records the state the world was actually built on.
-    fn baseline_new_deps(&mut self, before: Option<usize>, budget: &Budget) {
-        if self.dep_count_now() != before {
+    fn baseline_new_deps(&mut self, before: Option<usize>, folded: bool, budget: &Budget) {
+        // `folded` matters on its own: undoing an include and re-admitting it
+        // leaves the count exactly where it started, so the count alone would
+        // miss the very case that most needs a fresh baseline.
+        if folded || self.dep_count_now() != before {
             let _ = self.stale_includes(budget.floored());
         }
     }
@@ -2088,10 +2164,11 @@ impl Book {
         u: &Form,
         index: usize,
         bytes: &[u8],
+        skip_proofs: bool,
         deadline: Duration,
     ) -> Result<(crate::session::Submission, OutputRef), SyncError> {
         let text = String::from_utf8_lossy(&bytes[u.start..u.end]).into_owned();
-        self.admit_text(&text, u.hash, u.line_start, u.line_end, index, false, deadline)
+        self.admit_text(&text, u.hash, u.line_start, u.line_end, index, skip_proofs, deadline)
     }
 
     /// The submission itself, for a unit's text however obtained -- sliced
@@ -2561,6 +2638,24 @@ impl Book {
     /// sync.
     pub fn stale_includes(&mut self, deadline: Duration) -> Vec<StaleInclude> {
         let Some(names) = self.probe_deps(deadline) else { return Vec::new() };
+        self.dep_names = names;
+        self.scan_deps()
+    }
+
+    /// The same check against the *last known* dependency list, with no ACL2
+    /// round trip at all.
+    ///
+    /// The list only grows when an `include-book` is admitted, so between
+    /// syncs the names are already known and staleness is a question for the
+    /// filesystem alone. This is what an idle poller should call: a few
+    /// hundred `stat`s cost nothing and leave the session's ACL2 untouched,
+    /// where probing on a timer would keep it permanently busy.
+    pub fn stale_includes_cached(&mut self) -> Vec<StaleInclude> {
+        self.scan_deps()
+    }
+
+    fn scan_deps(&mut self) -> Vec<StaleInclude> {
+        let names = std::mem::take(&mut self.dep_names);
         let total = names.len();
         let mut stale = Vec::new();
         let mut seen: Vec<String> = Vec::with_capacity(total);
@@ -2614,6 +2709,7 @@ impl Book {
         // being watched, so a later re-inclusion re-baselines rather than
         // comparing against a world that no longer exists.
         self.deps.retain(|k, _| seen.contains(k));
+        self.dep_names = names;
         stale
     }
 

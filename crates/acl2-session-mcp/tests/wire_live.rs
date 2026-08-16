@@ -424,6 +424,57 @@ fn retraction_is_asked_for_never_inferred() {
     s.tool("acl2_session_close", json!({"session_id": sid}));
 }
 
+/// A changed dependency reaches the wire, and the opt-out is honoured.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_changed_dependency_reaches_the_wire() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("wiredeps");
+    let dep = dir.join("wd.lisp");
+    let main = dir.join("wmain.lisp");
+    std::fs::write(&dep, "(in-package \"ACL2\")\n(defun wd-id (x) x)\n").unwrap();
+    std::fs::write(&main, "(in-package \"ACL2\")\n(include-book \"wd\")\n").unwrap();
+
+    let mut s = Server::start(&acl2);
+    // Certify the dependency through its own session, as a client would.
+    let dsid = s.tool("acl2_session_open", json!({"file": dep}))["session_id"]
+        .as_str().unwrap().to_string();
+    let c = s.tool("acl2_certify", json!({"session_id": dsid, "deadline_seconds": 300}));
+    assert_eq!(c["outcome"].as_str(), Some("certified"), "{c}");
+    s.tool("acl2_session_close", json!({"session_id": dsid}));
+
+    let sid = s.tool("acl2_session_open", json!({"file": main}))["session_id"]
+        .as_str().unwrap().to_string();
+    let o = s.tool("acl2_sync", json!({"session_id": sid, "deadline_seconds": 300}));
+    assert!(o.get("stale_includes").is_none(), "nothing stale yet: {o}");
+
+    // Change the dependency and recertify it.
+    std::fs::write(&dep,
+        "(in-package \"ACL2\")\n(defun wd-id (x) x)\n         (defthm wd-id-is-id (equal (wd-id x) x))\n").unwrap();
+    let dsid = s.tool("acl2_session_open", json!({"file": dep}))["session_id"]
+        .as_str().unwrap().to_string();
+    s.tool("acl2_certify", json!({"session_id": dsid, "deadline_seconds": 300}));
+    s.tool("acl2_session_close", json!({"session_id": dsid}));
+
+    // Asked to ignore it: named, nothing undone.
+    let o = s.tool("acl2_sync", json!({"session_id": sid, "ignore_stale_includes": true,
+                                       "deadline_seconds": 300}));
+    let stale = o["stale_includes"].as_array().expect("named on the wire");
+    assert_eq!(stale.len(), 1, "{o}");
+    assert!(stale[0]["path"].as_str().unwrap_or("").ends_with("wd.lisp"), "{o}");
+    assert_eq!(stale[0]["unit"].as_u64(), Some(1), "attributed to the include: {o}");
+    assert_eq!(o["rolled_back"].as_u64(), Some(0), "and nothing undone: {o}");
+
+    // By default it folds into the diff.
+    let o = s.tool("acl2_sync", json!({"session_id": sid, "deadline_seconds": 300}));
+    assert!(o["rolled_back"].as_u64().unwrap_or(0) >= 1, "the include is re-admitted: {o}");
+    assert!(o["stale_includes"].is_array(), "and the reply says why: {o}");
+
+    let o = s.tool("acl2_sync", json!({"session_id": sid, "deadline_seconds": 300}));
+    assert!(o.get("stale_includes").is_none(), "settled: {o}");
+    s.tool("acl2_session_close", json!({"session_id": sid}));
+}
+
 /// A certification wait holds the book's lock like any blocked call, and the
 /// same escape hatches must work: status and health answer from the build
 /// stamp, and an interrupt cuts through the wait at once and kills the build.

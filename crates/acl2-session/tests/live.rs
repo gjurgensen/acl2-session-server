@@ -18,7 +18,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use acl2_session::{
+use acl2_session::{SyncOptions, 
     Book, Budget, Health, Resumed, Session, SessionControl, Slice, Status, SyncMode,
     WorldChange,
 };
@@ -1222,7 +1222,7 @@ fn retract_parks_the_frontier_on_request() {
     assert_eq!((o.reused, o.rolled_back), (4, 0), "a target alone never retracts");
 
     // With it, the frontier moves back to the form that line selects.
-    let o = b.sync_to(Some(3), true, D).expect("retracting sync");
+    let o = b.sync_with(&SyncOptions { through_line: Some(3), retract: true, ..Default::default() }, D).expect("retracting sync");
     assert_eq!((o.reused, o.rolled_back), (2, 2), "{o:?}");
     assert_eq!(b.admitted_lines().len(), 2, "two units remain admitted");
     assert!(!o.rebuilt, "retraction is an undo, not a replay");
@@ -1238,79 +1238,132 @@ fn retract_parks_the_frontier_on_request() {
     assert_eq!((o.reused, o.admitted.len(), o.rolled_back), (2, 2, 0));
 
     // Retracting to a line past the frontier is an ordinary sync.
-    let o = b.sync_to(Some(999), true, D).expect("forward retract");
+    let o = b.sync_with(&SyncOptions { through_line: Some(999), retract: true, ..Default::default() }, D).expect("forward retract");
     assert_eq!((o.reused, o.rolled_back), (4, 0));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A dependency edited under a live session is reported, and a merely
-/// touched one is not.
+/// A dependency edited and recertified under a live session invalidates the
+/// form that included it -- and a merely touched one costs nothing.
 ///
 /// The field case, reproduced: a rule is added to a dependency, the
-/// dependency is recertified, the dependent is re-synced -- and the rule is
-/// still absent while the reply says everything was reused and nothing is
-/// amiss. The session is not wrong about its own file; it is out of step
+/// dependency is recertified, the dependent is re-synced -- and the rule was
+/// still absent while the reply said everything was reused and nothing was
+/// amiss. The session was never wrong about its own file; it was out of step
 /// with what that file includes, which the prefix invariant never covered.
 #[test]
 #[ignore = "needs ACL2"]
-fn a_changed_dependency_is_reported_and_attributed() {
+fn a_recertified_dependency_invalidates_the_form_that_included_it() {
     let acl2 = acl2_or_skip!();
     let dir = scratch("deps");
     let dep = dir.join("dep.lisp");
     let main = dir.join("main.lisp");
+    let certify = |path: &Path| {
+        let mut b = Book::open(&acl2, path).unwrap();
+        assert_eq!(b.certify(Duration::from_secs(300), 2).unwrap().status,
+                   acl2_session::cert::CertStatus::Certified);
+    };
     write(&dep, &["(in-package \"ACL2\")", "(defun dep-id (x) x)"]);
     // Forms on lines 1, 3, 5.
     write(&main, &["(in-package \"ACL2\")",
                    "(include-book \"dep\")",
                    "(defthm main-thm (equal (dep-id (dep-id x)) x))"]);
-
-    // The dependency must be certified before it can be included.
-    let mut d = Book::open(&acl2, &dep).unwrap();
-    assert_eq!(d.certify(Duration::from_secs(300), 2).unwrap().status,
-               acl2_session::cert::CertStatus::Certified);
-    drop(d);
+    certify(&dep);
 
     let mut b = Book::open(&acl2, &main).unwrap();
     let o = b.sync(None, D).expect("sync");
     assert!(o.failed.is_none(), "{:?}", o.failed.as_ref().map(|f| &f.error_line));
     assert!(o.stale_includes.is_empty(), "nothing is stale yet: {:?}", o.stale_includes);
 
-    // Touching without changing must not cost a thing: the write date moves,
-    // the content does not, and re-proving here would be pure waste.
+    // Touching without changing must cost nothing: the write date moves, the
+    // content does not, and re-proving here would be pure waste.
     let same = std::fs::read(&dep).unwrap();
     std::thread::sleep(Duration::from_millis(1100));
     std::fs::write(&dep, &same).unwrap();
     let o = b.sync(None, D).expect("sync after touch");
-    assert!(o.stale_includes.is_empty(),
-            "a touch is not a change: {:?}", o.stale_includes);
-    assert_eq!(o.reused, 3, "and nothing is re-proved");
+    assert!(o.stale_includes.is_empty(), "a touch is not a change: {:?}", o.stale_includes);
+    assert_eq!((o.reused, o.rolled_back), (3, 0), "and nothing moves");
 
-    // A real edit is reported, attributed to the form that included it.
+    // Now the real thing: add a rule to the dependency and recertify it.
     write(&dep, &["(in-package \"ACL2\")", "(defun dep-id (x) x)",
                   "(defthm dep-id-is-id (equal (dep-id x) x))"]);
-    let o = b.sync(None, D).expect("sync after edit");
+    certify(&dep);
+
+    // Asked to ignore it, the session reports and does nothing -- for
+    // finishing what you are doing before picking up a neighbour's edit.
+    let o = b
+        .sync_with(&SyncOptions { ignore_stale_includes: true, ..Default::default() }, D)
+        .expect("sync ignoring staleness");
     assert_eq!(o.stale_includes.len(), 1, "{:?}", o.stale_includes);
     let st = &o.stale_includes[0];
     assert!(st.path.ends_with("dep.lisp"), "{st:?}");
     assert!(!st.missing);
     assert_eq!(st.unit, Some(1), "attributed to the include-book form: {st:?}");
-    assert_eq!(o.reused, 3, "reported, not acted on -- the world is untouched");
+    assert_eq!((o.reused, o.rolled_back), (3, 0), "and the world is untouched");
 
-    // The remedy composes with what already exists: retract to that form and
-    // sync forward, which re-admits the include and picks up the new rule.
-    b.sync_to(Some(1), true, D).expect("retract to the include");
-    let o = b.sync(None, D).expect("resync");
-    assert!(o.stale_includes.is_empty(), "re-including re-baselines: {:?}", o.stale_includes);
+    // By default it folds into the diff: the including form is undone and
+    // re-admitted, exactly as editing that form would have done.
+    let o = b.sync(None, D).expect("sync folding staleness");
+    assert_eq!(o.stale_includes.len(), 1, "still says why it moved: {:?}", o.stale_includes);
+    assert_eq!(o.rolled_back, 2, "the include and everything after it: {o:?}");
+    assert_eq!(o.admitted.len(), 2, "and both go back in");
+    assert!(o.failed.is_none());
+
+    // The new rule really is in the world, and the session settles clean.
     let r = b.eval("(acl2::pe 'dep-id-is-id)", D).expect("query");
     let text = b.output(&r.output_ref, Slice::All).unwrap().text;
-    assert!(text.to_lowercase().contains("dep-id-is-id"),
-            "the new rule is in the world now: {text}");
+    assert!(text.to_lowercase().contains("dep-id-is-id"), "{text}");
+    let o = b.sync(None, D).expect("settled");
+    assert!(o.stale_includes.is_empty(), "re-including re-baselines: {:?}", o.stale_includes);
+    assert_eq!((o.reused, o.rolled_back), (3, 0));
 
-    // A dependency that vanishes is reported as missing rather than changed.
+    // A dependency that vanishes is reported missing rather than changed.
     std::fs::remove_file(&dep).unwrap();
-    let o = b.sync(None, D).expect("sync after removal");
+    let o = b
+        .sync_with(&SyncOptions { ignore_stale_includes: true, ..Default::default() }, D)
+        .expect("sync after removal");
     assert!(o.stale_includes.iter().any(|s| s.missing), "{:?}", o.stale_includes);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `skip_proofs` admits without proving, and says the world is conditional.
+#[test]
+#[ignore = "needs ACL2"]
+fn skip_proofs_admits_without_proving_and_says_so() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("skipmode");
+    let file = dir.join("s.lisp");
+    // The theorem is false, so it can only go in with proofs skipped.
+    write(&file, &["(in-package \"ACL2\")",
+                   "(defun sk-f (x) x)",
+                   "(defthm sk-false (equal (sk-f x) (cons x x)))"]);
+    let mut b = Book::open(&acl2, &file).unwrap();
+
+    let o = b.sync(None, D).expect("honest sync");
+    assert!(o.failed.is_some(), "a false theorem fails when proofs run");
+    assert!(o.conditional_from.is_none(), "and nothing is conditional");
+
+    let o = b
+        .sync_with(&SyncOptions { skip_proofs: true, ..Default::default() }, D)
+        .expect("skipping sync");
+    assert!(o.failed.is_none(), "with proofs skipped it goes in: {o:?}");
+    // Only the form that needed skipping is conditional: the two before it
+    // were admitted honestly by the failing sync and were reused untouched,
+    // so the claim is as narrow as the truth allows.
+    assert_eq!(o.conditional_from, Some(2),
+               "conditional from the skipped form on: {o:?}");
+    assert_eq!(o.reused, 2, "the honest prefix is not re-admitted: {o:?}");
+
+    // The claim persists until those forms are admitted honestly again, which
+    // is what retracting and re-syncing does.
+    let o = b.sync(None, D).expect("resync");
+    assert_eq!(o.conditional_from, Some(2), "reused forms stay conditional: {o:?}");
+    let o = b
+        .sync_with(&SyncOptions { through_line: Some(1), retract: true, ..Default::default() }, D)
+        .expect("retract");
+    assert!(o.conditional_from.is_none(), "retracting drops the claim: {o:?}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

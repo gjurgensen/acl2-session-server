@@ -8,7 +8,7 @@
 //! edit lands within a slice of arriving -- and only an edit that touches the
 //! prefix through the running unit aborts its proof.
 
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
 use std::time::Duration;
 
 use acl2_session::registry::SharedBook;
@@ -34,6 +34,14 @@ const SLICE: Duration = Duration::from_millis(500);
 /// deadline is really for.
 const RETRACT_DEADLINE: Duration = Duration::from_secs(600);
 const TAIL_LINES: usize = 40;
+/// How often an otherwise idle driver looks at the books its world rests on.
+///
+/// Filesystem only -- the dependency *list* changes only when an
+/// `include-book` is admitted, so between syncs this is a few hundred
+/// `stat`s and no ACL2 round trip at all. Polling rather than inotify keeps
+/// a rustix-only core free of a watcher dependency, and at this cadence the
+/// cost is unmeasurable.
+const DEP_TICK: Duration = Duration::from_secs(2);
 
 enum Flow {
     Continue,
@@ -57,6 +65,10 @@ pub struct Driver {
     have_snapshot: bool,
     /// Unit of the last terminal failure, painted `failed` until an update.
     failed_unit: Option<usize>,
+    /// Books reported stale on the previous tick. A change is acted on only
+    /// once it has been seen twice, which keeps a dependency being saved
+    /// repeatedly in another tab from restarting this session on every save.
+    stale_seen: Vec<String>,
     /// Whether the current snapshot's diff has run. The frontier can only
     /// be read honestly after it: the world may still hold units the new
     /// text rolled out from under.
@@ -75,6 +87,7 @@ impl Driver {
             target_line: None,
             revision: 0,
             parked: true,
+            stale_seen: Vec::new(),
             have_snapshot: false,
             failed_unit: None,
             reconciled: false,
@@ -83,7 +96,20 @@ impl Driver {
 
     pub fn run(mut self) {
         loop {
-            let Ok(cmd) = self.rx.recv() else { return };
+            let cmd = match self.rx.recv_timeout(DEP_TICK) {
+                Ok(c) => c,
+                // Nothing to do: look at the books the world rests on. The
+                // frontier is *visible* here, so a green gutter resting on a
+                // book that has since changed is a false claim the user is
+                // looking at -- and unlike a tool reply, it stays on screen.
+                Err(RecvTimeoutError::Timeout) => {
+                    if let Flow::Exit = self.tick() {
+                        return;
+                    }
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => return,
+            };
             if let Flow::Exit = self.apply(cmd) {
                 return;
             }
@@ -94,6 +120,44 @@ impl Driver {
                 return;
             }
         }
+    }
+
+    /// An idle look at the dependencies.
+    ///
+    /// Reports on the first sighting and acts on the second: a dependency
+    /// mid-save is a moving target, and re-driving on every save would make
+    /// a session on a dependent book thrash. Acting means simply re-driving
+    /// the snapshot we already hold -- `sync` folds staleness into the diff,
+    /// so the frontier retracts to the including form and re-admits it, with
+    /// the client seeing the ordinary painting rather than a special case.
+    fn tick(&mut self) -> Flow {
+        if !self.have_snapshot {
+            return Flow::Continue;
+        }
+        let stale = {
+            let Ok(mut book) = self.book.try_lock() else { return Flow::Continue };
+            book.stale_includes_cached()
+        };
+        if stale.is_empty() {
+            self.stale_seen.clear();
+            return Flow::Continue;
+        }
+        self.out.notify(
+            "stale_deps",
+            &wire::stale_deps(&self.id, self.revision, &stale),
+        );
+        let names: Vec<String> = stale.iter().map(|s| s.book.clone()).collect();
+        if names != self.stale_seen {
+            self.stale_seen = names;
+            return Flow::Continue; // seen once; act when it settles
+        }
+        // A dependency change is news the same way an edit is, so it also
+        // unparks: the terminal failure this driver parked on may be exactly
+        // what the neighbour's edit fixes.
+        self.stale_seen.clear();
+        self.parked = false;
+        self.reconciled = false;
+        self.drive()
     }
 
     /// Apply everything already queued, without blocking.

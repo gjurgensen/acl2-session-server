@@ -33,5 +33,6 @@ pub use session::Progress;
 pub use sync::{
     Book, Budget, Checkpoint, EvalFailure, EvalResult, Health, InnerEvent,
     InterruptEnvelope, InterruptReport, Resumed, StaleInclude, Status, SyncError, SyncMode,
+    SyncOptions,
     SyncOutcome, WorldChange,
 };

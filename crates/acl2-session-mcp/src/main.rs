@@ -89,6 +89,25 @@ struct SyncArgs {
     /// form. On its own it bounds how far forward to admit and never undoes
     /// anything; pair it with `retract` to move the frontier back.
     through_line: Option<usize>,
+    /// Report dependency staleness without acting on it.
+    ///
+    /// By default, a book this file includes whose source changed under the
+    /// session invalidates the form that included it, exactly as editing
+    /// that form would — the world is supposed to be what the file says.
+    /// Set this to finish what you are doing first; it applies to this call
+    /// only, so it cannot be set once and forgotten. `stale_includes` is
+    /// reported either way.
+    ignore_stale_includes: Option<bool>,
+    /// Admit every form under `skip-proofs`: the forms go in, the proofs do
+    /// not run.
+    ///
+    /// For loose interactive work where time matters more than truth —
+    /// getting a long book back under you to try something. The reply's
+    /// `conditional_from` says from which form the world is believed rather
+    /// than proved, and stays set until those forms are re-admitted without
+    /// this. Certify, or retract and sync again, before trusting anything
+    /// proved under it.
+    skip_proofs: Option<bool>,
     /// Also undo everything after `through_line`, if the session is already
     /// past it.
     ///
@@ -305,6 +324,9 @@ impl Acl2Mcp {
         unchanged prefix, rolls back to the first difference, and admits forward, \
         stopping at the first failure. You never say what changed. Reindenting or \
         editing a comment costs nothing.\n\n\
+        A book you include whose source has changed since the session built on \
+        it invalidates the form that included it, the same as editing that form; \
+        the reply names it under stale_includes.\n\n\
         Undo is normally a consequence of editing. To park the frontier without \
         editing -- to re-admit an include-book after recertifying what it \
         includes, say -- pass through_line with retract:true.")]
@@ -320,9 +342,15 @@ impl Acl2Mcp {
         if retract && a.through_line.is_none() {
             return Err(fail("retract needs through_line: it says where to leave the frontier"));
         }
+        let opts = acl2_session::SyncOptions {
+            through_line: a.through_line,
+            retract,
+            ignore_stale_includes: a.ignore_stale_includes.unwrap_or(false),
+            skip_proofs: a.skip_proofs.unwrap_or(false),
+        };
         let out = blocking!({
             let mut b = book.lock().map_err(|e| e.to_string())?;
-            b.sync_to(a.through_line, retract, d).map_err(|e| e.to_string())
+            b.sync_with(&opts, d).map_err(|e| e.to_string())
         })
         .map_err(fail)?;
         json(wire::SyncReply::from(out))
