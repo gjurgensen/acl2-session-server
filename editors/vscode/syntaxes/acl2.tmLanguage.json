@@ -337,10 +337,13 @@
       "name": "variable.other.constant.earmuff.acl2"
     },
     "namespace": {
-      "match": "(?:^|(?<=[\\s()\\[\\]'`,]))([^\\s()\\[\\]'\"`,;:]+::)",
+      "match": "(?:^|(?<=[\\s()\\[\\]'`,]))([^\\s()\\[\\]'\"`,;:]+)(::)",
       "captures": {
         "1": {
           "name": "entity.name.namespace.acl2"
+        },
+        "2": {
+          "name": "punctuation.separator.namespace.acl2"
         }
       }
     },
