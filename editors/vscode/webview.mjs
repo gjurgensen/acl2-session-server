@@ -470,6 +470,41 @@ check(
         'a world-reading directive is named, not resolved');
 }
 
+// ---- `pretty` stays linear on deeply nested terms ----
+{
+  const deep = (n) => {
+    let t = '(equal x y)';
+    for (let i = 0; i < n; i++) {
+      t = `(and ${t} (implies (natp x${i}) (equal (f x${i}) (g x${i}))))`;
+    }
+    return t;
+  };
+  // Indentation used to grow with nesting depth, so lines grew while their
+  // number grew: 43 KB of term laid out to 4.9 MB, and 88 KB took 13.5 s.
+  // A `defines` clique is exactly that shape, and a few of them built an
+  // extension host heap of 1.8 GB that spent its life in GC while every
+  // other extension stopped answering keystrokes.
+  const small = deep(200);
+  const big = deep(800);
+  const t0 = Date.now();
+  const outSmall = pretty(small, 60);
+  const mid = Date.now();
+  const outBig = pretty(big, 60);
+  const t1 = Date.now();
+  check(
+    outBig.length / big.length < 6,
+    `layout stays proportional to the term (${(outBig.length / big.length).toFixed(1)}x)`
+  );
+  // Four times the input must not be sixteen times the work. Generous
+  // against a loaded machine; the failure it guards against was 20x.
+  const growth = (t1 - mid + 1) / (mid - t0 + 1);
+  check(growth < 10, `and the time with it (${growth.toFixed(1)}x for 4x the input)`);
+  check(
+    pretty('(and (natp x) (natp y))', 60).split('\n').length === 2,
+    'while a small conjunction still breaks as before'
+  );
+}
+
 if (bad) {
   console.error(`webview: ${bad} failing`);
   process.exit(1);

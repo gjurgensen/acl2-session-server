@@ -38,6 +38,15 @@ const BREAK_HEADS = new Set(['implies', 'and', 'or', 'iff', 'cond', 'case']);
 /** Longer heads stop earning an aligned column; their arguments go under. */
 const ALIGN_LIMIT = 12;
 
+/**
+ * How far right an argument may be indented, whatever its nesting depth.
+ *
+ * The bound that keeps layout linear in the size of the term; see `render`.
+ * Comfortably past anything read at a normal pane width, so ordinary terms
+ * never reach it and look exactly as they did.
+ */
+const INDENT_LIMIT = 40;
+
 export function pretty(term: string, cols: number): string {
   const node = parse(term);
   if (node === undefined) {
@@ -144,8 +153,28 @@ function lex(src: string): string[] | undefined {
 // ---- Laying out --------------------------------------------------------
 
 /** The one-line form, ignoring width. */
+/**
+ * Cached per node, because `render` asks every node whether it fits -- and
+ * answering meant re-flattening everything beneath it. One walk per node
+ * over its whole subtree is quadratic in the size of the term, and on a
+ * deeply nested one it is worse: 43 KB took 0.7 s to lay out and 88 KB took
+ * 13.5 s. Nodes are the arrays built by `parse` and are not mutated, so
+ * caching against identity is sound; a `WeakMap` keeps it from holding
+ * anything alive.
+ */
+const flatCache = new WeakMap<object, string>();
+
 function flat(n: Node): string {
-  return typeof n === 'string' ? n : `(${n.map(flat).join(' ')})`;
+  if (typeof n === 'string') {
+    return n;
+  }
+  const hit = flatCache.get(n);
+  if (hit !== undefined) {
+    return hit;
+  }
+  const out = `(${n.map(flat).join(' ')})`;
+  flatCache.set(n, out);
+  return out;
 }
 
 /**
@@ -155,7 +184,24 @@ function flat(n: Node): string {
  * result is a broken conjunction sitting inside an unbroken parent, which
  * reads worse than either.
  */
+const breakCache = new WeakMap<object, boolean>();
+
 function mustBreak(n: Node): boolean {
+  if (typeof n === 'string') {
+    return false;
+  }
+  // Cached for the same reason `flat` is: `render` asks this of every node,
+  // and answering walks the whole subtree beneath it.
+  const hit = breakCache.get(n);
+  if (hit !== undefined) {
+    return hit;
+  }
+  const out = breaks(n);
+  breakCache.set(n, out);
+  return out;
+}
+
+function breaks(n: Node): boolean {
   if (typeof n === 'string') {
     return false;
   }
@@ -192,7 +238,22 @@ function render(n: Node, col: number, cols: number): string {
   // column so far right that the arguments have no room, so those indent by
   // one instead.
   const aligned = typeof head === 'string' && headText.length <= ALIGN_LIMIT;
-  const argCol = aligned ? col + headText.length + 2 : col + 1;
+  // Indentation stops growing past a point, and that is what keeps this
+  // linear. Aligning every level under its head is what makes a term
+  // readable, but it also means a deeply nested one indents every line below
+  // it: lines grow with depth while their number grows with size, so the
+  // output is quadratic in the input. Measured on nested conjunctions --
+  // 5 KB in gave 84 KB out, 21 KB gave 1.2 MB, 43 KB gave 4.9 MB in 680 ms.
+  // A `defines` clique produces exactly that shape, and a few such terms
+  // built an extension host heap of 1.8 GB that spent its life in GC while
+  // every other extension's keystrokes went unanswered.
+  //
+  // Past the cap, arguments still break onto their own lines; they just stop
+  // marching rightwards. Nothing is lost that a reader could have used: an
+  // argument indented two hundred columns is off the side of the pane
+  // anyway.
+  const want = aligned ? col + headText.length + 2 : col + 1;
+  const argCol = Math.min(want, INDENT_LIMIT);
   if (args.length === 0) {
     return `(${headText})`;
   }
