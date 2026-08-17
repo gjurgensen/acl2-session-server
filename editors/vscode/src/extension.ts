@@ -1407,6 +1407,9 @@ function onUnit(p: UnitEvent): void {
   }
 }
 
+/** Guards the live output read: at most one request outstanding. */
+let outputInFlight = false;
+
 function onTail(p: TailEvent): void {
   const s = byId.get(p.book);
   if (!s) {
@@ -1425,7 +1428,17 @@ function onTail(p: TailEvent): void {
       // the event carries: the handle reads live, so there is no reason to
       // watch forty lines of a proof printing thousands.
       if (p.output_ref) {
-        void showUnitOutput(s, p.unit);
+        // One at a time. Firing this on every tick without waiting for the
+        // previous reply put a request and a 400-line answer on the wire
+        // twice a second for as long as a form ran, which is what pushed the
+        // daemon's stdout past what the client was draining. A view showing
+        // the newest tail does not need the ones it skipped.
+        if (!outputInFlight) {
+          outputInFlight = true;
+          void showUnitOutput(s, p.unit).finally(() => {
+            outputInFlight = false;
+          });
+        }
       } else {
         outputView.set(s.id, p.unit, p.text);
       }

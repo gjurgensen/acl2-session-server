@@ -26,24 +26,123 @@ use serde_json::{json, Value};
 
 use driver::{Cmd, Driver};
 
+/// How many frames may be waiting to go out before stale ones are dropped.
+///
+/// Reached only when the client has stopped reading, which is the condition
+/// this whole queue exists to survive; a client keeping up never sees it.
+const OUT_BACKLOG: usize = 256;
+
 /// The shared stdout, one frame at a time, writable from any thread.
+///
+/// Frames are queued and written by a thread of their own, and this is not
+/// tidiness -- writing under the lock deadlocks the daemon. The old shape
+/// took a mutex on stdout and then wrote *while holding it*. stdout is a
+/// socket to the client, with a fixed buffer; when the client stopped
+/// draining it, the write blocked in the kernel with the mutex held, and the
+/// main loop -- the only thread reading stdin -- blocked trying to take that
+/// same mutex to send a reply. Nothing recovered. Every book went dead at
+/// once, new sessions could not be opened, and the process sat alive and
+/// silent. Observed in the field, and confirmed by its thread states:
+///
+///   main    S futex_wait_queue        (waiting for the stdout mutex)
+///   driver  S sock_alloc_send_pskb    (blocked writing, holding it)
+///
+/// So the writer thread holds no lock while it writes, and the queue is
+/// bounded rather than unbounded: a client that never reads again must not
+/// turn into a daemon that grows without limit. When the backlog is full,
+/// `tail` frames are dropped oldest-first -- they are display, and a newer
+/// one supersedes them -- and everything else is kept, because a dropped
+/// reply is a client waiting for ever.
 #[derive(Clone)]
-pub struct Out(Arc<Mutex<io::Stdout>>);
+pub struct Out(Arc<OutQueue>);
+
+struct OutQueue {
+    frames: Mutex<std::collections::VecDeque<(bool, Vec<u8>)>>,
+    ready: std::sync::Condvar,
+}
 
 impl Out {
+    /// Start the writer thread that owns stdout.
+    fn new() -> Out {
+        let q = Arc::new(OutQueue {
+            frames: Mutex::new(std::collections::VecDeque::new()),
+            ready: std::sync::Condvar::new(),
+        });
+        let mine = q.clone();
+        std::thread::Builder::new()
+            .name("acl2-session-out".into())
+            .spawn(move || {
+                let mut w = io::stdout();
+                loop {
+                    let frame = {
+                        let mut g = mine.frames.lock().expect("out queue");
+                        while g.is_empty() {
+                            g = mine.ready.wait(g).expect("out queue");
+                        }
+                        g.pop_front().expect("non-empty")
+                    };
+                    // Outside the lock, on purpose: this is the call that
+                    // blocks when the client stops reading.
+                    if w.write_all(&frame.1).is_err() || w.flush().is_err() {
+                        return;
+                    }
+                }
+            })
+            .expect("spawn stdout writer");
+        Out(q)
+    }
+
     fn send(&self, v: &Value) {
+        self.push(v, false);
+    }
+
+    /// Queue a frame. `droppable` marks one that may be discarded under
+    /// backlog rather than held.
+    fn push(&self, v: &Value, droppable: bool) {
         let s = v.to_string();
-        let mut w = self.0.lock().expect("stdout lock");
-        let _ = write!(w, "Content-Length: {}\r\n\r\n{s}", s.len());
-        let _ = w.flush();
+        let frame = format!("Content-Length: {}\r\n\r\n{s}", s.len()).into_bytes();
+        let mut g = self.0.frames.lock().expect("out queue");
+        if g.len() >= OUT_BACKLOG {
+            // Drop the oldest droppable frame to make room. If there is none,
+            // the backlog is all replies and events that matter, so the frame
+            // is queued anyway: growing is bad, but lying to the client about
+            // what its session did is worse.
+            if let Some(i) = g.iter().position(|(d, _)| *d) {
+                g.remove(i);
+            }
+        }
+        g.push_back((droppable, frame));
+        self.0.ready.notify_one();
     }
 
     pub fn notify(&self, method: &str, params: &impl serde::Serialize) {
-        self.send(&json!({
+        // A `tail` is the newest slice of a running form's output. If the
+        // client is too far behind to have read the last one, it has no use
+        // for it at all -- the next carries the same ground.
+        let droppable = method == "tail" || method == "cert_tail";
+        self.push(&json!({
             "jsonrpc": "2.0",
             "method": method,
             "params": serde_json::to_value(params).expect("serialize params"),
-        }));
+        }), droppable);
+    }
+
+    /// Wait, briefly, for queued frames to reach the client.
+    ///
+    /// Writes used to complete before `send` returned, so anything the daemon
+    /// said on its way out had been said by the time it exited. Queuing broke
+    /// that: without this, the last `settled` of a shutdown can still be in
+    /// the queue when the process ends, and the client is left waiting for an
+    /// answer that was written but never flushed. Bounded, because a client
+    /// that has stopped reading is exactly why we might be shutting down.
+    pub fn drain(&self, limit: std::time::Duration) {
+        let until = std::time::Instant::now() + limit;
+        while std::time::Instant::now() < until {
+            if self.0.frames.lock().expect("out queue").is_empty() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
 
     pub fn reply(&self, id: &Value, result: Value) {
@@ -475,7 +574,7 @@ fn main() {
         registry: Mutex::new(Registry::new(policy)),
         books: Mutex::new(HashMap::new()),
         closing: Mutex::new(Vec::new()),
-        out: Out(Arc::new(Mutex::new(io::stdout()))),
+        out: Out::new(),
     };
     let stdin = io::stdin();
     let mut r = io::BufReader::new(stdin.lock());
@@ -548,4 +647,7 @@ fn main() {
     for h in closing {
         let _ = h.join();
     }
+    // Everything the drivers said as they wound up is still queued; give the
+    // writer a moment to get it out before the process ends.
+    daemon.out.drain(std::time::Duration::from_secs(2));
 }

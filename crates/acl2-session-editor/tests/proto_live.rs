@@ -45,6 +45,30 @@ impl Daemon {
         Daemon { child, r, w: Some(w), next_id: 0, pending: Vec::new() }
     }
 
+    /// Send a request and do not wait for -- or read -- the reply.
+    fn send_only(&mut self, method: &str, params: Value) {
+        self.next_id += 1;
+        let id = self.next_id;
+        self.frame(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
+    }
+
+    /// Drop our end of the daemon's stdin, which is its EOF.
+    fn close_stdin(&mut self) {
+        self.w = None;
+    }
+
+    /// Whether the daemon exits within `limit`.
+    fn wait_for_exit(&mut self, limit: std::time::Duration) -> bool {
+        let until = std::time::Instant::now() + limit;
+        while std::time::Instant::now() < until {
+            if matches!(self.child.try_wait(), Ok(Some(_))) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        false
+    }
+
     fn frame(&mut self, v: Value) {
         let s = v.to_string();
         let w = self.w.as_mut().expect("stdin");
@@ -880,4 +904,72 @@ fn an_unbalanced_buffer_settles_on_the_line_that_broke_it() {
     let last = &after.last().expect("settled").1;
     assert_eq!(last["reason"], "reached_target", "events: {after:?}");
     assert!(last.get("line").is_none(), "and carries no position: {last}");
+}
+
+/// A client that stops reading must not wedge the daemon.
+///
+/// The failure this pins down: `Out::send` took the stdout mutex and then
+/// wrote *while holding it*. stdout is a socket with a fixed buffer, so once
+/// the client stopped draining, the write blocked in the kernel with the
+/// mutex held -- and the main loop, the only thread reading stdin, blocked on
+/// that same mutex to send its reply. Every book went dead at once, including
+/// books doing nothing, and the process sat alive and silent.
+///
+/// Asserted through *exit*, which is the one consequence that separates the
+/// two shapes cleanly. Closing stdin ends a healthy daemon in milliseconds. A
+/// wedged one never sees the EOF at all, because the thread that would read
+/// it is waiting on a lock the blocked writer holds -- so it hangs for ever
+/// rather than merely being slow.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_client_that_stops_reading_does_not_wedge_the_daemon() {
+    let Some(acl2) = acl2() else {
+        eprintln!("ACL2 not set; skipping");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("acl2-editord-backp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let book: PathBuf = dir.join("noisy.lisp");
+    // Gag mode off so the proof narrates: the point is a log big enough that
+    // a few `all` slices of it overflow a pipe buffer.
+    std::fs::write(&book, concat!(
+        "(in-package \"ACL2\")\n",
+        "(set-gag-mode nil)\n",
+        "(defun bp-app (x y) (if (endp x) y (cons (car x) (bp-app (cdr x) y))))\n",
+        "(defthm bp-assoc (equal (bp-app (bp-app a b) c) (bp-app a (bp-app b c))))\n",
+    )).expect("write book");
+
+    let mut d = Daemon::start(&acl2);
+    let opened = d.request("open", json!({ "path": book.to_str().unwrap() }));
+    let id = opened["book"].as_str().expect("book id").to_string();
+    let text = std::fs::read_to_string(&book).unwrap();
+    d.notify("update", json!({ "book": id, "text": text, "revision": 1 }));
+
+    // Read normally until it settles, collecting a handle to a real log.
+    let events = d.events_until_settled();
+    let refs: Vec<String> = events
+        .iter()
+        .filter(|(m, _)| m == "unit")
+        .filter_map(|(_, v)| v["output_ref"].as_str().map(str::to_string))
+        .collect();
+    let r = refs.last().expect("some unit reported a log").clone();
+
+    // Now stop reading, and ask for whole logs. Each reply is far larger than
+    // it needs to be; a handful of them bury a 64K buffer.
+    for _ in 0..40 {
+        d.send_only("output", json!({ "book": id, "output_ref": r, "mode": "all" }));
+    }
+    std::thread::sleep(std::time::Duration::from_secs(1));
+
+    // Close stdin without ever draining, and require the daemon to notice.
+    let t0 = std::time::Instant::now();
+    d.close_stdin();
+    let exited = d.wait_for_exit(std::time::Duration::from_secs(20));
+    assert!(
+        exited,
+        "the daemon saw EOF and exited while the client was {} behind; it hung instead",
+        "40 whole logs"
+    );
+    eprintln!("exited {:?} after stdin closed with the client far behind", t0.elapsed());
 }
