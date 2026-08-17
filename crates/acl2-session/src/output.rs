@@ -212,9 +212,60 @@ impl OutputStore {
             io::Error::new(io::ErrorKind::NotFound, format!("unknown output ref {}", r.0))
         })?;
         let body = std::fs::read_to_string(&e.path)?;
+        Ok(OutputSlice {
+            text: slice_text(&body, slice),
+            total_lines: e.lines,
+            superseded: e.superseded,
+        })
+    }
+}
+
+/// Count lines the way `lines()` does: separators, plus a trailing partial.
+///
+/// Public because a live read has no `Entry` to take the count from -- the
+/// form is still printing, so nothing has been recorded for it anywhere.
+pub fn count_lines(body: &str) -> usize {
+    if body.is_empty() { 0 } else { body.lines().count() }
+}
+
+/// The last `n` lines of `body`, without walking the rest of it.
+///
+/// A live view asks for a tail twice a second, and the buffer it is asking
+/// about is the whole of a running proof's output -- which is exactly the
+/// case where `lines().collect()` over the entire thing is the wrong shape.
+/// Scanning back from the end costs the tail, not the log.
+pub fn tail_bytes(body: &[u8], n: usize) -> &[u8] {
+    if n == 0 {
+        return &[];
+    }
+    let mut seen = 0;
+    let mut i = body.len();
+    // A trailing newline ends the last line rather than starting an empty one.
+    if i > 0 && body[i - 1] == b'\n' {
+        i -= 1;
+    }
+    while i > 0 {
+        if body[i - 1] == b'\n' {
+            seen += 1;
+            if seen == n {
+                return &body[i..];
+            }
+        }
+        i -= 1;
+    }
+    body
+}
+
+/// Every slice mode, over text from wherever it came.
+///
+/// Split out from `get` because the file is only ever the *source*: none of
+/// this cares where the bytes were, and a form still running has its bytes in
+/// memory rather than on disk. One implementation means a live read and a
+/// finished read cannot answer the same question differently.
+pub fn slice_text(body: &str, slice: Slice) -> String {
         let all: Vec<&str> = body.lines().collect();
-        let text = match slice {
-            Slice::All => body.clone(),
+        match slice {
+            Slice::All => body.to_string(),
             Slice::Head(n) => all.iter().take(n).cloned().collect::<Vec<_>>().join("\n"),
             Slice::Tail(n) => {
                 let skip = all.len().saturating_sub(n);
@@ -269,9 +320,7 @@ impl OutputStore {
                 }
                 out.join("\n")
             }
-        };
-        Ok(OutputSlice { text, total_lines: e.lines, superseded: e.superseded })
-    }
+        }
 }
 
 impl Drop for OutputStore {

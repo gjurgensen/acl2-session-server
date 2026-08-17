@@ -1361,9 +1361,12 @@ impl Driver {
                     return Flow::Continue;
                 }
                 Ok(Some(Resumed::StillRunning { .. })) => {
-                    let p = {
+                    let (p, r) = {
                         let mut book = self.book.lock().expect("book lock");
-                        book.progress(TAIL_LINES)
+                        // Both under one lock: a handle without its tail, or
+                        // a tail whose handle arrives a tick later, would
+                        // have the client asking about the wrong form.
+                        (book.progress(TAIL_LINES), book.in_flight_ref())
                     };
                     if let Ok(Some(p)) = p {
                         self.out.notify("tail", &wire::TailEvent {
@@ -1371,6 +1374,7 @@ impl Driver {
                             unit: running,
                             elapsed_ms: p.elapsed.as_millis(),
                             text: p.tail,
+                            output_ref: r.map(|r| r.to_string()),
                         });
                     }
                 }

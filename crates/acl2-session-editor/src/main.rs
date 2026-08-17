@@ -323,14 +323,21 @@ impl Daemon {
     }
 
     fn output(&self, p: wire::OutputParams) -> Result<Value, String> {
-        let outputs = self.handle_of(&p.book, |h| h.outputs.clone())?;
+        let (outputs, control) =
+            self.handle_of(&p.book, |h| (h.outputs.clone(), h.control.clone()))?;
         let slice = wire::slice_from(&p)?;
         let r = OutputRef::from(p.output_ref.as_str());
-        let s = outputs
-            .lock()
-            .expect("outputs lock")
-            .get(&r, slice)
-            .map_err(|e| e.to_string())?;
+        // A form still running has printed into memory, not into its file.
+        // Neither lookup touches the book, so this answers while a proof is
+        // in flight -- which is the only time the live branch is taken.
+        let s = match control.live_slice(&p.output_ref, slice.clone()) {
+            Some(live) => live,
+            None => outputs
+                .lock()
+                .expect("outputs lock")
+                .get(&r, slice)
+                .map_err(|e| e.to_string())?,
+        };
         Ok(serde_json::to_value(wire::OutputReply {
             text: s.text,
             total_lines: s.total_lines,

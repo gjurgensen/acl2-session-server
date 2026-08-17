@@ -104,6 +104,12 @@ export interface TailEvent {
   unit: number | null;
   elapsed_ms: number;
   text: string;
+  /**
+   * The running form's log handle, once it has one. Readable while the form
+   * runs, so a view wanting more than the tail carried here asks for it by
+   * handle instead of waiting for the form to land.
+   */
+  output_ref?: string;
 }
 
 export interface SettledEvent {

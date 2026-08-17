@@ -58,6 +58,16 @@ interface BookSession {
   /** Latest envelope per unit index, for diagnostics, panel and output view. */
   unitEvents: Map<number, UnitEvent>;
   /**
+   * The unit currently printing, and the handle its log is readable under.
+   *
+   * A running form has no entry in `unitEvents` -- that arrives when it
+   * lands -- so this is the only way to read it, and it reads *live*. Both
+   * are cleared the moment the form lands or the book settles, so a stale
+   * handle can never be mistaken for a running one.
+   */
+  runningUnit?: number;
+  runningRef?: string;
+  /**
    * What each unit introduced, once asked for.
    *
    * Cached because the panel follows the *cursor*: `followPanel` runs on
@@ -1380,6 +1390,12 @@ function onUnit(p: UnitEvent): void {
     return;
   }
   s.unitEvents.set(p.index, p);
+  if (s.runningUnit === p.index) {
+    // It has landed: its log is on disk under the handle this event carries,
+    // and nothing is in flight under the old one.
+    s.runningUnit = undefined;
+    s.runningRef = undefined;
+  }
   // Re-admitted: whatever it introduced may be different now.
   s.rulesByUnit.delete(p.index);
   if (outputView.shownBook === s.id && outputView.shownUnit === p.index) {
@@ -1402,8 +1418,17 @@ function onTail(p: TailEvent): void {
   if (p.unit === null) {
     s.console?.tail(p.elapsed_ms, p.text);
   } else {
+    s.runningUnit = p.unit;
+    s.runningRef = p.output_ref;
     if (outputView.shownBook === s.id && outputView.shownUnit === p.unit) {
-      outputView.set(s.id, p.unit, p.text);
+      // Ask for the depth this view shows rather than settling for the tail
+      // the event carries: the handle reads live, so there is no reason to
+      // watch forty lines of a proof printing thousands.
+      if (p.output_ref) {
+        void showUnitOutput(s, p.unit);
+      } else {
+        outputView.set(s.id, p.unit, p.text);
+      }
     }
     panel.tail(p.book, p.unit, p.elapsed_ms, p.text);
   }
@@ -1416,6 +1441,8 @@ function onSettled(p: SettledEvent): void {
   if (!s) {
     return;
   }
+  s.runningUnit = undefined;
+  s.runningRef = undefined;
   updateStatusBar(s);
   // The outline carries each unit's status as its detail, and those are only
   // as fresh as the last time VSCode asked -- but renew only when they have
@@ -1497,15 +1524,19 @@ async function followOutputView(s: BookSession, force: boolean): Promise<void> {
 }
 
 async function showUnitOutput(s: BookSession, index: number): Promise<void> {
-  const e = s.unitEvents.get(index);
-  if (!e) {
-    outputView.set(s.id, index, 'Not checked yet.');
+  // A finished form has a unit event carrying its handle; one still running
+  // has no event yet, but its handle arrives on the tail and is readable as
+  // the proof goes. Prefer the running one -- if this form is the one in
+  // flight, the live log is what the reader wants to see.
+  const ref = (s.runningUnit === index ? s.runningRef : undefined) ?? s.unitEvents.get(index)?.output_ref;
+  if (!ref) {
+    outputView.set(s.id, index, s.runningUnit === index ? 'Running...' : 'Not checked yet.');
     return;
   }
   try {
     const r = await client?.request('output', {
       book: s.id,
-      output_ref: e.output_ref,
+      output_ref: ref,
       mode: 'tail',
       lines: 400,
     });

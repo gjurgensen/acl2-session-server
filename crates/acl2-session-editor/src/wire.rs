@@ -646,6 +646,15 @@ pub struct TailEvent {
     pub unit: Option<usize>,
     pub elapsed_ms: u128,
     pub text: String,
+    /// The handle this form's log will be filed under, once it has one.
+    ///
+    /// Present so a client can ask for more than the tail carried here: the
+    /// handle is readable *while the form runs*, so a view wanting four
+    /// hundred lines requests them rather than waiting for the form to land.
+    /// Absent for the first tick or so, before the form has outrun a deadline
+    /// and been given a handle at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_ref: Option<String>,
 }
 
 /// Books the world rests on whose sources have changed underneath it.

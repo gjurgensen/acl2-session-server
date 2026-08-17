@@ -22,6 +22,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use crate::output::OutputSlice;
 use crate::pty::{become_session_leader, set_no_echo, wait_readable, Pty};
 
 /// How long to wait between escalating interrupts before giving up on a
@@ -137,11 +138,21 @@ struct Shared {
     unit: Option<usize>,
     /// Absolute offset where the in-flight form's output begins.
     form_start: u64,
+    /// The output handle the running form's log will land under, once it has
+    /// one. Kept beside the stream rather than on the `Book` so that a reader
+    /// can recognise an in-flight handle without the book lock -- which is
+    /// the whole reason reading a log works while the prover is busy.
+    in_flight: Option<String>,
     /// A certification in progress: when it started and for which book.
     /// Belongs to the *book*, not the session -- `adopt` leaves it alone,
     /// since a rebuild does not touch a running build.
     build: Option<(Instant, PathBuf)>,
 }
+
+/// How much of a live buffer a tail read looks at: enough lines to survive
+/// stripping, and a hard byte cap so one enormous line cannot defeat it.
+const TAIL_WINDOW_LINES: usize = 4000;
+const TAIL_WINDOW_BYTES: usize = 512 * 1024;
 
 /// Why a wait ended.
 enum WaitEnd {
@@ -167,6 +178,7 @@ impl SessionControl {
                 started: None,
                 unit: None,
                 form_start: 0,
+                in_flight: None,
                 build: None,
             }),
             cond: Condvar::new(),
@@ -192,6 +204,86 @@ impl SessionControl {
     /// Name the file unit about to run, for lock-free status readers.
     pub fn set_unit(&self, unit: Option<usize>) {
         self.lock().unit = unit;
+    }
+
+    /// Name the handle the running form's output will be filed under.
+    pub fn set_in_flight(&self, r: Option<String>) {
+        self.lock().in_flight = r;
+    }
+
+    /// A slice of the running form's log, if `r` is its handle.
+    ///
+    /// The reason a log can be read while the prover is busy: this takes the
+    /// stream mutex, which the reader thread holds only long enough to append,
+    /// and never the book lock, which a proof holds for as long as it runs.
+    ///
+    /// Bytes are copied under the lock and decoded outside it. Decoding a
+    /// ten-megabyte log takes long enough to matter, and doing it under the
+    /// lock would stall the very reader that is filling the buffer. A tail --
+    /// what a live view actually asks for, twice a second -- copies only the
+    /// tail, so the common case touches neither.
+    pub fn live_slice(&self, r: &str, slice: crate::output::Slice) -> Option<OutputSlice> {
+        use crate::output::Slice as S;
+        let (bytes, _raw_len) = {
+            let g = self.lock();
+            if !g.running || g.in_flight.as_deref() != Some(r) {
+                return None;
+            }
+            let from = (g.form_start.max(g.base) - g.base) as usize;
+            let form = &g.buf[from.min(g.buf.len())..];
+            // Counted over raw bytes: a newline is a newline in UTF-8, so
+            // this needs no decode, and the caller is told how much it is not
+            // being shown even when it asked for forty lines of a hundred
+            // thousand.
+            match &slice {
+                // A generous raw window, then stripped, then cut to n lines:
+                // stripping removes lines, so taking exactly n raw lines
+                // would come up short. The window is bounded so that a tail
+                // twice a second stays cheap on a log of any size.
+                S::Tail(n) => {
+                    let want = (*n * 3 + 64).min(TAIL_WINDOW_LINES);
+                    let bytes = crate::output::tail_bytes(form, want);
+                    let cap = bytes.len().min(TAIL_WINDOW_BYTES);
+                    (bytes[bytes.len() - cap..].to_vec(), form.len())
+                }
+                _ => (form.to_vec(), form.len()),
+            }
+        };
+        let shown = display_of(&String::from_utf8_lossy(&bytes));
+        // Counted on the stripped text, so it agrees with what the finished
+        // log will say rather than with the raw stream. For a bounded tail it
+        // is what that window holds, which is the honest answer available
+        // without walking the whole buffer.
+        let total_lines = crate::output::count_lines(&shown);
+        let text = match slice {
+            S::Tail(n) => {
+                let lines: Vec<&str> = shown.lines().collect();
+                lines[lines.len().saturating_sub(n)..].join("\n")
+            }
+            other => crate::output::slice_text(&shown, other),
+        };
+        // A form still running has not been rolled back; it has not finished
+        // going in.
+        Some(OutputSlice { text, total_lines, superseded: false })
+    }
+
+    /// Everything the running form has printed, if `r` is its handle.
+    ///
+    /// `None` when nothing is running, or when `r` names some other form's
+    /// log -- in which case the caller should read the file, which is
+    /// finished and will not change again.
+    ///
+    /// Returns bytes rather than a `String` because the tail of a live buffer
+    /// can end mid-character: the reader thread has half a UTF-8 sequence and
+    /// the rest is still in the pty. Decoding is the caller's, once it knows
+    /// how much it wants.
+    pub fn live_form(&self, r: &str) -> Option<Vec<u8>> {
+        let g = self.lock();
+        if !g.running || g.in_flight.as_deref() != Some(r) {
+            return None;
+        }
+        let from = (g.form_start.max(g.base) - g.base) as usize;
+        Some(g.buf[from.min(g.buf.len())..].to_vec())
     }
 
     /// Progress of the form in flight, or `None` when nothing is.
@@ -1091,6 +1183,27 @@ fn is_completion_marker(l: &str) -> bool {
 /// What a capture separates into: the display text, the one-line `ASS-DATA`
 /// pairs, and the `ASS-BEGIN`/`ASS-END` blocks.
 type Stripped = (String, Vec<(String, String)>, Vec<(String, String)>);
+
+/// Just the display half of `strip_sentinels`, for a capture still being
+/// written.
+///
+/// A live read has to strip exactly what a finished one strips, or the log a
+/// form is watched through and the log it leaves behind are different
+/// documents. They diverge the moment the form ends: ACL2 runs our probes
+/// before anything consumes the stream, so a reader watching at that instant
+/// sees `<<<ASS-BEGIN evd>>>` and our planted labels, and then watches them
+/// vanish. Measured: 77 raw lines against the 45 the same form filed.
+pub(crate) fn display_of(raw: &str) -> String {
+    // Stop at this form's completion marker. Everything past it is the prompt
+    // for whatever comes next, which a finished capture never carries because
+    // consumption cuts exactly there -- so without this the live view shows
+    // an `ACL2 !>` that disappears the moment the form is filed.
+    let upto: String = match raw.lines().position(is_completion_marker) {
+        Some(i) => raw.lines().take(i).collect::<Vec<_>>().join("\n"),
+        None => raw.to_string(),
+    };
+    strip_sentinels(&upto).0
+}
 
 /// Remove our own markers, returning what ACL2 printed plus any structured
 /// values reported via `<<<ASS-DATA key value>>>`.

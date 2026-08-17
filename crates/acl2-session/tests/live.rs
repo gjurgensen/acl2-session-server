@@ -2142,3 +2142,102 @@ fn the_induction_narrative_still_parses() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A form's log is readable while the form is still printing it.
+///
+/// The point of the exercise: the handle a timed-out call hands back used to
+/// name an empty file until the form landed, so "watch this proof" meant
+/// waiting for it to finish. It now reads the buffer the form is filling.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_running_forms_output_can_be_read_before_it_finishes() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("live-output");
+    let file = dir.join("slow.lisp");
+    // Slow by arithmetic rather than by library size, so it does not depend
+    // on what is certified here: proving `natp` of a naive Fibonacci at 30
+    // forces the prover to evaluate it -- a naive Fibonacci at 40 is upwards
+    // of a hundred million calls, which takes seconds even compiled. Gag mode off so it narrates while it works -- there has to
+    // be something to read, not just something to wait for.
+    write(&file, &[
+        "(in-package \"ACL2\")",
+        "(set-gag-mode nil)",
+        "(defun lo-nfib (n) (if (zp n) 1 (if (equal n 1) 1 \
+           (+ (lo-nfib (- n 1)) (lo-nfib (- n 2))))))",
+        // One unit: a `progn` is a single form, so the whole of this is in
+        // flight together. The first conjecture is where the seconds go --
+        // evaluating a naive Fibonacci at 40 -- and the second is where the
+        // output comes from, narrating an induction with gag mode off. So the
+        // log is still growing well after the deadline expires, which is the
+        // thing being tested.
+        "(progn (defthm lo-slow (equal (lo-nfib 40) 165580141)) \
+                (defthm lo-noisy (implies (natp n) (natp (lo-nfib n)))))",
+    ]);
+    let mut b = Book::open(&acl2, &file).unwrap();
+
+    // A deadline short enough that the form outruns it: that is what mints
+    // the in-flight handle in the first place.
+    let o = b.sync(None, Duration::from_millis(250)).unwrap();
+    let still = o.failed.as_ref().filter(|f| f.still_running);
+    let Some(r) = still.map(|f| f.output_ref.clone()) else {
+        panic!("nothing in flight: admitted={} failed={:?} skipped={} conditional={:?}",
+               o.admitted.len(), o.failed.as_ref().map(|f| f.index), o.skipped.len(), o.conditional_from);
+    };
+
+    // Read it repeatedly while it runs. Total lines must not go backwards,
+    // and the handle must answer every time rather than erroring.
+    // Poll until the log grows rather than assuming when it will. How long the
+    // arithmetic takes before the narrating half starts is a property of the
+    // machine, not of the feature, and a fixed window makes that flakiness.
+    let first = b.output(&r, Slice::Tail(20)).expect("live read").total_lines;
+    let mut seen = vec![first];
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        let s = b.output(&r, Slice::Tail(20)).expect("live read");
+        assert!(!s.superseded, "a running form has not been rolled back");
+        assert!(
+            s.total_lines >= *seen.last().unwrap(),
+            "a log only grows while it is being written: {seen:?} then {}",
+            s.total_lines
+        );
+        seen.push(s.total_lines);
+        if s.total_lines > first {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(first > 0, "the form printed before the deadline expired: {first}");
+    assert!(
+        seen.last().copied().unwrap_or(0) > first,
+        "and the log grew while it was being read: {seen:?}"
+    );
+
+    // Every mode works on it, not just a tail -- this is the thing a bare
+    // pushed tail could never do.
+    let live_text = b.output(&r, Slice::Tail(200)).expect("live read").text;
+    let found = b.output(&r, Slice::Find {
+        needle: "Goal".to_string(),
+        context: 1,
+        ignore_case: false,
+    });
+    assert!(found.is_ok(), "find works on a running form: {found:?}");
+
+    // Let it land, then confirm the same handle now serves the finished log
+    // and that it is at least as long as the last live reading.
+    let _ = b.resume(Duration::from_secs(300));
+    let done = b.output(&r, Slice::All).expect("finished read");
+    assert!(
+        done.total_lines >= seen.last().copied().unwrap_or(0),
+        "the filed log is not shorter than the live one: {} vs {seen:?}",
+        done.total_lines
+    );
+    // The live view and the filed log are the same document: our probe
+    // scaffolding is stripped from both, so nothing a reader watched
+    // disappears when the form lands.
+    for marker in ["<<<ASS-BEGIN", "<<<ASS-END", "<<<ASS-DATA", "ACL2-SESSION-MARK-"] {
+        assert!(
+            !live_text.contains(marker),
+            "live output carries no bookkeeping ({marker}): {live_text:.400}"
+        );
+    }
+}

@@ -2943,6 +2943,10 @@ impl Book {
                 Some(r) => r,
                 None => {
                     let fresh = self.outs().put("")?;
+                    // The control is told too: it is what a reader consults
+                    // to decide whether a handle names a form still printing,
+                    // and it must know before the handle is handed out.
+                    self.control.set_in_flight(Some(fresh.to_string()));
                     self.in_flight_output = Some(fresh.clone());
                     fresh
                 }
@@ -2952,6 +2956,7 @@ impl Book {
         match self.in_flight_output.take() {
             Some(r) => {
                 self.outs().fill(&r, &sub.output)?;
+                self.control.set_in_flight(None);
                 Ok(r)
             }
             None => Ok(self.outs().put(&sub.output)?),
@@ -3329,6 +3334,7 @@ impl Book {
         if let Some(r) = self.in_flight_output.take() {
             // It describes a form that was abandoned rather than the world
             // as it now stands, which is what `superseded` is for.
+            self.control.set_in_flight(None);
             self.outs().mark_superseded(&r);
         }
         if !was_running {
@@ -3741,7 +3747,26 @@ impl Book {
     }
 
     /// Read part of a captured output.
+    /// The handle the running form's log will be filed under, if it has one.
+    ///
+    /// A form only gets a handle once it has outrun a deadline, which is also
+    /// when it becomes worth watching. Readable while it runs -- see
+    /// `output` -- so a client that wants more than a pushed tail asks for it
+    /// by this handle.
+    pub fn in_flight_ref(&self) -> Option<OutputRef> {
+        self.in_flight_output.clone()
+    }
+
+    /// Read part of a captured output -- including one still being written.
+    ///
+    /// A form that is still running has its log in memory, not on disk, so
+    /// the control is asked first. It answers only for the handle of the form
+    /// actually in flight; every other handle names a file that has stopped
+    /// changing, and is read from disk as before.
     pub fn output(&self, r: &OutputRef, slice: Slice) -> io::Result<OutputSlice> {
+        if let Some(live) = self.control.live_slice(r.as_str(), slice.clone()) {
+            return Ok(live);
+        }
         self.outs().get(r, slice)
     }
 

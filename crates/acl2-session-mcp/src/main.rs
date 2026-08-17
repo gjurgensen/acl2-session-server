@@ -685,7 +685,10 @@ impl Acl2Mcp {
         structured results are a projection: per-goal rewriting detail and \
         macro output exist only here. For why a proof inducted, prefer \
         acl2_induction, which reads this same log and returns it as fields. \
-        Works immediately even while a sync or eval is blocked on the session.")]
+        Works immediately even while a sync or eval is blocked on the session, \
+        and works on the form still running: a handle from in_flight reads the \
+        proof as it goes, with every mode, and total_lines grows between \
+        calls.")]
     async fn acl2_output(
         &self,
         Parameters(a): Parameters<OutputArgs>,
@@ -718,12 +721,25 @@ impl Acl2Mcp {
             },
             other => return Err(fail(format!("unknown mode {other:?}"))),
         };
+        // A form still running has printed into memory rather than into its
+        // file, so ask the control first. Like the store, it is reachable
+        // without the book, so this stays answerable mid-proof -- which is
+        // the only moment it has anything different to say.
+        let control = self
+            .registry
+            .lock()
+            .map_err(fail)?
+            .control_of(&SessionId::from(a.session_id.as_str()));
+        let live = control.and_then(|c| c.live_slice(&a.output_ref, slice.clone()));
         let r = acl2_session::OutputRef::from(a.output_ref.as_str());
-        let out = blocking!({
-            let store = outputs.lock().map_err(|e| e.to_string())?;
-            store.get(&r, slice).map_err(|e| e.to_string())
-        })
-        .map_err(fail)?;
+        let out = match live {
+            Some(live) => live,
+            None => blocking!({
+                let store = outputs.lock().map_err(|e| e.to_string())?;
+                store.get(&r, slice).map_err(|e| e.to_string())
+            })
+            .map_err(fail)?,
+        };
         json(wire::OutputReply {
             text: out.text,
             total_lines: out.total_lines,

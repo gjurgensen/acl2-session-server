@@ -398,8 +398,13 @@ pub fn stale_include(s: &core::StaleInclude) -> StaleInclude {
 pub struct InFlight {
     pub line_start: usize,
     pub line_end: usize,
-    /// Handle to this form's output. It fills in when the form finishes; until
-    /// then it is there so you can hold on to it, not because it has content.
+    /// Handle to this form's output, readable **while the form runs**.
+    ///
+    /// Pass it to `acl2_output` to watch a long proof as it goes: every mode
+    /// works, so `mode:"find" text:"Subgoal"` follows the waterfall and
+    /// `mode:"goal"` pulls one checkpoint out of a proof that has not
+    /// finished. `total_lines` grows between calls; the same handle keeps
+    /// working, and holds the finished log afterwards.
     pub output_ref: String,
 }
 
