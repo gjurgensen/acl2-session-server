@@ -1407,6 +1407,15 @@ function onUnit(p: UnitEvent): void {
   }
 }
 
+/**
+ * How many of a form's introduced names get their detail fetched and drawn.
+ *
+ * Bounds synchronous work on the shared extension host thread; see
+ * `followRules`. Generous next to what anyone scrolls through, and far below
+ * what a macro-heavy form records.
+ */
+const RULES_EXPLAINED = 40;
+
 /** Guards the live output read: at most one request outstanding. */
 let outputInFlight = false;
 
@@ -1605,9 +1614,28 @@ async function followRules(s: BookSession, index: number): Promise<void> {
     return;
   }
   const e = s.unitEvents.get(index);
-  const names = (e?.inner ?? []).map((i) => i.name).filter((n) => n);
-  if (!names.length) {
+  const all = (e?.inner ?? []).map((i) => i.name).filter((n) => n);
+  if (!all.length) {
     return;
+  }
+  // Explain the first few, not all of them. Everything downstream of this is
+  // synchronous and runs on the extension host thread, which every extension
+  // shares: each name is pretty-printed (guard, measure, statement, and every
+  // rune field) and then tokenised through a TextMate grammar. The `defines`
+  // in kestrel/c/syntax/validator.lisp records 620 names, and doing that work
+  // for all of them froze the host -- our panel kept rendering, because
+  // webviews have their own process, while vim's keybindings stopped
+  // responding in the same instant. That is the symptom to remember: when
+  // *other* extensions die with ours, the host thread is blocked.
+  //
+  // A cap rather than a faster tokeniser: 620 expandable entries is not
+  // something a person reads, so the work was never worth doing.
+  const names = all.slice(0, RULES_EXPLAINED);
+  const omitted = all.length - names.length;
+  if (omitted > 0) {
+    channel.appendLine(
+      `form ${index + 1}: explaining ${names.length} of ${all.length} names introduced`
+    );
   }
   try {
     // One request for the whole list. Asking per name meant `Promise.all`
