@@ -479,7 +479,25 @@ fn main() {
     };
     let stdin = io::stdin();
     let mut r = io::BufReader::new(stdin.lock());
-    while let Ok(Some(frame)) = read_frame(&mut r) {
+    // Say why the loop ends. `while let Ok(Some(_))` treated three different
+    // endings -- the client closing stdin, a read error, and a malformed
+    // frame -- as one silent exit, so a daemon that went away left nothing
+    // behind but the client's guess about what had happened. An afternoon of
+    // it: the session was reported dead, and the process had left no word at
+    // all about whether it was told to stop or fell over. stderr is the right
+    // channel because the editor already pipes it to its log.
+    loop {
+        let frame = match read_frame(&mut r) {
+            Ok(Some(f)) => f,
+            Ok(None) => {
+                eprintln!("acl2-session-editor: stdin closed; shutting down");
+                break;
+            }
+            Err(e) => {
+                eprintln!("acl2-session-editor: cannot read stdin ({e}); shutting down");
+                break;
+            }
+        };
         let v: Value = match serde_json::from_slice(&frame) {
             Ok(v) => v,
             Err(e) => {
