@@ -385,7 +385,7 @@ impl Driver {
                         // the new one does not lex: hold still and say why.
                         self.have_snapshot = false;
                         self.parked = true;
-                        self.settle("split_error", Some(e.to_string()));
+                        self.settle_split_error(&e);
                     }
                 }
                 Flow::Continue
@@ -1496,6 +1496,28 @@ impl Driver {
             revision: self.revision,
             reason,
             message,
+            line: None,
+        });
+    }
+
+    /// Settle on a buffer that will not lex, saying where it stopped.
+    ///
+    /// The only settle with a position, and the position is worth having:
+    /// `SplitError` reports an unterminated list at the *opening* paren
+    /// rather than at end of file, so this is the first line the reader could
+    /// not get past, not the last line of the file. Everything from there
+    /// down is unreadable, which is what the client paints.
+    ///
+    /// The message loses its `line N:` prefix on the way out -- `Display`
+    /// adds that for humans, and repeating it beside the field would only
+    /// give the two ways to drift apart.
+    fn settle_split_error(&self, e: &acl2_session::SplitError) {
+        self.out.notify("settled", &wire::SettledEvent {
+            book: self.id.clone(),
+            revision: self.revision,
+            reason: "split_error",
+            message: Some(e.message.clone()),
+            line: Some(e.line),
         });
     }
 }

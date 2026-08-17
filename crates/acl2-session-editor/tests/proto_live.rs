@@ -820,3 +820,64 @@ fn certify_runs_outside_the_session_and_reports_what_failed() {
     d.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A buffer that will not lex says *where*, not just that it did not.
+///
+/// The client paints from that line to the end of the file, so the number has
+/// to be the opening paren of the form that never closes -- not end of file,
+/// which is where a reader naturally notices the problem. Everything below
+/// the opening paren is unread, and saying so is the whole point.
+#[test]
+#[ignore = "needs ACL2"]
+fn an_unbalanced_buffer_settles_on_the_line_that_broke_it() {
+    let Some(acl2) = acl2() else {
+        eprintln!("ACL2 not set; skipping");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("acl2-editord-split-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let book_path: PathBuf = dir.join("unbalanced.lisp");
+    let good = "(in-package \"ACL2\")\n\n(defun sp-a (x) x)\n";
+    std::fs::write(&book_path, good).expect("write book");
+
+    let mut d = Daemon::start(&acl2);
+    let opened = d.request("open", json!({ "path": book_path.to_str().unwrap() }));
+    let book = opened["book"].as_str().expect("book id").to_string();
+    d.notify("update", json!({ "book": book, "text": good, "revision": 1 }));
+    assert_eq!(
+        d.events_until_settled().last().expect("settled").1["reason"],
+        "reached_target"
+    );
+
+    // Line 5 opens a form that never closes. Lines 6 and 7 are inside it and
+    // so are unread, however well-formed they look on their own.
+    let broken = "(in-package \"ACL2\")\n\n\
+                  (defun sp-a (x) x)\n\n\
+                  (defthm sp-open (equal (sp-a x) x)\n\
+                  (defun sp-b (y) y)\n\
+                  (defun sp-c (z) z)\n";
+    d.notify("update", json!({ "book": book, "text": broken, "revision": 2 }));
+    let events = d.events_until_settled();
+    let settled = &events.last().expect("settled").1;
+    assert_eq!(settled["reason"], "split_error", "events: {events:?}");
+    assert_eq!(settled["line"], 5, "the unclosed paren's own line: {settled}");
+    assert!(
+        settled["message"].as_str().unwrap_or("").contains("unterminated"),
+        "and says what went wrong: {settled}"
+    );
+    // The line travels as a field, so the client never reads it back out of
+    // the prose -- which is why the prose no longer repeats it.
+    assert!(
+        !settled["message"].as_str().unwrap_or("").contains("line 5"),
+        "the position is a field, not a substring: {settled}"
+    );
+
+    // Balancing it again clears the condition rather than latching.
+    let fixed = broken.replace("(defthm sp-open (equal (sp-a x) x)\n", "(defthm sp-open (equal (sp-a x) x))\n");
+    d.notify("update", json!({ "book": book, "text": fixed, "revision": 3 }));
+    let after = d.events_until_settled();
+    let last = &after.last().expect("settled").1;
+    assert_eq!(last["reason"], "reached_target", "events: {after:?}");
+    assert!(last.get("line").is_none(), "and carries no position: {last}");
+}

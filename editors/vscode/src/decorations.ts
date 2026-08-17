@@ -62,6 +62,7 @@ export class Decorations {
   private condBar: vscode.TextEditorDecorationType;
   private redBar: vscode.TextEditorDecorationType;
   private target: vscode.TextEditorDecorationType;
+  private unreadable: vscode.TextEditorDecorationType;
 
   constructor(context: vscode.ExtensionContext) {
     for (const [status, c] of Object.entries(WASH_COLORS)) {
@@ -96,6 +97,41 @@ export class Decorations {
     this.target = vscode.window.createTextEditorDecorationType({
       after: { contentText: ' □', color: '#fabd2f', fontWeight: 'bold' },
     });
+    // The unreadable tail, from the paren that never closes to end of file.
+    // Deliberately the same red as a failure: both mean "none of this is
+    // going in". The hover says which, because the remedies are nothing
+    // alike -- one wants a proof, the other wants a bracket.
+    this.unreadable = vscode.window.createTextEditorDecorationType({
+      isWholeLine: true,
+      overviewRulerLane: vscode.OverviewRulerLane.Left,
+      overviewRulerColor: 'rgba(220, 60, 60, 0.6)',
+      light: { backgroundColor: WASH_COLORS.failed.light },
+      dark: { backgroundColor: WASH_COLORS.failed.dark },
+    });
+  }
+
+  /**
+   * Paint from `line` to the end of the buffer as unreadable, or clear it
+   * with `null`.
+   *
+   * The whole tail rather than the one line, because that is what is true:
+   * the reader stopped at that paren, so nothing below it has been seen, and
+   * marking only the opening line would suggest the rest is merely waiting.
+   */
+  applyUnreadable(editor: vscode.TextEditor, line: number | null, why?: string): void {
+    if (line === null) {
+      editor.setDecorations(this.unreadable, []);
+      return;
+    }
+    const doc = editor.document;
+    const from = Math.max(0, Math.min(line, doc.lineCount) - 1);
+    const last = Math.max(from, doc.lineCount - 1);
+    editor.setDecorations(this.unreadable, [
+      {
+        range: new vscode.Range(from, 0, last, doc.lineAt(last).range.end.character),
+        hoverMessage: `ACL2: ${why ?? 'the file cannot be read from here'} \u2014 nothing below this point has been checked.`,
+      },
+    ]);
   }
 
   apply(editor: vscode.TextEditor, units: UnitState[], opts: DecorationOptions): void {
@@ -160,6 +196,7 @@ export class Decorations {
     for (const t of this.bars()) {
       editor.setDecorations(t, []);
     }
+    editor.setDecorations(this.unreadable, []);
   }
 
   dispose(): void {
@@ -169,6 +206,7 @@ export class Decorations {
     for (const t of this.bars()) {
       t.dispose();
     }
+    this.unreadable.dispose();
   }
 
   private bars(): vscode.TextEditorDecorationType[] {

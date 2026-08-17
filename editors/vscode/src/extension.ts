@@ -1431,6 +1431,20 @@ function onSettled(p: SettledEvent): void {
       channel.appendLine(`${p.reason}: ${p.message}`);
     }
   }
+  // A buffer that will not lex is the one settle with a position. Paint from
+  // it to the end of the file, and take the paint off again on any settle
+  // that is not a split error -- which is how it clears the moment the
+  // bracket is typed, without waiting for anything to be admitted.
+  markUnreadable(s, p.reason === 'split_error' ? (p.line ?? null) : null, p.message);
+}
+
+/** Paint (or clear) the tail of a buffer the reader could not get through. */
+function markUnreadable(s: BookSession, line: number | null, why?: string): void {
+  for (const editor of vscode.window.visibleTextEditors) {
+    if (editor.document === s.doc) {
+      decorations.applyUnreadable(editor, line, why);
+    }
+  }
 }
 
 function paint(s: BookSession): void {

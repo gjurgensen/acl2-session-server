@@ -111,6 +111,12 @@ export interface SettledEvent {
   revision: number;
   reason: string;
   message?: string;
+  /**
+   * Where the trouble starts, 1-based. Only `split_error` carries one: the
+   * line of the `(` that is never closed, so everything from there to the end
+   * of the buffer is unread rather than merely unchecked.
+   */
+  line?: number;
 }
 
 interface Pending {

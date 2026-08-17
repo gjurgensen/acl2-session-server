@@ -803,6 +803,15 @@ pub struct SettledEvent {
     pub reason: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// Where in the buffer the trouble starts, 1-based. Only `split_error`
+    /// has one: the line of the `(` that is never closed, which is where the
+    /// file stops being readable and every line after it is in doubt.
+    ///
+    /// A field rather than something to read back out of `message`, because
+    /// the client paints with it. Prose is for people; this wire carries
+    /// positions as numbers everywhere else and should here too.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
 }
 
 // ---- Builders ---------------------------------------------------------------
