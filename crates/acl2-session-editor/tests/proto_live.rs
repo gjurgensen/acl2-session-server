@@ -173,6 +173,12 @@ fn statuses(state: &Value) -> Vec<String> {
         .collect()
 }
 
+/// The one-name case, now that `rules` answers a list.
+fn first_rule(d: &mut Daemon, book: &str, name: &str) -> Value {
+    let batch = d.request("rules", json!({ "book": book, "names": [name] }));
+    batch["rules"][0].clone()
+}
+
 #[test]
 #[ignore = "needs ACL2"]
 fn the_daemon_triages_a_book_and_holds_a_retraction() {
@@ -664,7 +670,7 @@ fn rules_answer_while_the_session_is_busy() {
         asked_while_busy = true;
 
         // A function: its derived runes, the body deliberately absent.
-        let f = d.request("rules", json!({ "book": book, "name": "ru-app" }));
+        let f = first_rule(&mut d, &book, "ru-app");
         assert_eq!(f["found"], true, "answered mid-proof, not declined: {f}");
         assert_eq!(f["symbol_class"], ":ideal", "guards are not verified here: {f}");
         assert!(f["measure"].as_str().unwrap_or("").contains("acl2-count"),
@@ -685,7 +691,7 @@ fn rules_answer_while_the_session_is_busy() {
         assert!(keys.contains(&":clique"), "but the rest of the rule is: {keys:?}");
 
         // A theorem: the rewrite rule ACL2 derived from it.
-        let t = d.request("rules", json!({ "book": book, "name": "true-listp-of-ru-app" }));
+        let t = first_rule(&mut d, &book, "true-listp-of-ru-app");
         let rw = t["runes"].as_array().expect("runes").iter()
             .find(|r| r["class"] == ":rewrite").expect("a rewrite rune");
         let lhs = rw["fields"].as_array().unwrap().iter()
@@ -693,7 +699,7 @@ fn rules_answer_while_the_session_is_busy() {
         assert!(lhs.contains("true-listp (ru-app"), "the derived lhs: {lhs}");
 
         // A forward-chaining rule: its trigger term.
-        let fc = d.request("rules", json!({ "book": book, "name": "ru-fc" }));
+        let fc = first_rule(&mut d, &book, "ru-fc");
         let r = fc["runes"].as_array().expect("runes").iter()
             .find(|r| r["class"] == ":forward-chaining").expect("an fc rune");
         let trig = r["fields"].as_array().unwrap().iter()
@@ -701,7 +707,7 @@ fn rules_answer_while_the_session_is_busy() {
         assert!(trig.contains("consp"), "the trigger term: {trig}");
 
         // A name this file never introduced is simply not found.
-        let none = d.request("rules", json!({ "book": book, "name": "binary-append" }));
+        let none = first_rule(&mut d, &book, "binary-append");
         assert_eq!(none["found"], false, "not ours to explain: {none}");
         break;
     }
@@ -972,4 +978,57 @@ fn a_client_that_stops_reading_does_not_wedge_the_daemon() {
         "40 whole logs"
     );
     eprintln!("exited {:?} after stdin closed with the client far behind", t0.elapsed());
+}
+
+/// Everything a form introduced is explained in one exchange.
+///
+/// The panel asks about every name a unit's events recorded, and for
+/// macro-generated code that is far more than the buffer shows -- a `defines`
+/// in kestrel/c/syntax/validator.lisp records 620. Asked one at a time, that
+/// was 620 requests fired at once the moment the form landed, 620 commands
+/// queued to the thread that also runs proofs, and 620 replies onto a socket
+/// the client was too busy to drain. This pins the shape that cannot do that.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_forms_names_are_explained_in_one_request() {
+    let Some(acl2) = acl2() else {
+        eprintln!("ACL2 not set; skipping");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("acl2-editord-batch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let book_path: PathBuf = dir.join("b.lisp");
+    let text = concat!(
+        "(in-package \"ACL2\")\n",
+        "(defun ba-app (x y) (if (endp x) y (cons (car x) (ba-app (cdr x) y))))\n",
+        "(defthm ba-assoc (equal (ba-app (ba-app a b) c) (ba-app a (ba-app b c))))\n",
+    );
+    std::fs::write(&book_path, text).expect("write book");
+
+    let mut d = Daemon::start(&acl2);
+    let opened = d.request("open", json!({ "path": book_path.to_str().unwrap() }));
+    let book = opened["book"].as_str().expect("book id").to_string();
+    d.notify("update", json!({ "book": book, "text": text, "revision": 1 }));
+    let _ = d.events_until_settled();
+
+    // Several names, one exchange, answers in the order asked -- the client
+    // pairs them positionally, so order is part of the contract.
+    let asked = ["ba-app", "ba-assoc", "no-such-name-at-all"];
+    let batch = d.request("rules", json!({ "book": book, "names": asked }));
+    let got = batch["rules"].as_array().expect("a list of answers");
+    assert_eq!(got.len(), asked.len(), "one answer per name asked: {batch}");
+    for (i, name) in asked.iter().enumerate() {
+        assert_eq!(got[i]["name"].as_str(), Some(*name), "in the order asked: {batch}");
+    }
+    assert_eq!(got[0]["found"], true, "a name this file defined is known: {batch}");
+    assert_eq!(got[1]["found"], true, "and so is its theorem: {batch}");
+    // A name that does not exist is reported, not omitted: dropping it would
+    // shift every later answer out of step with the list the client sent.
+    assert_eq!(got[2]["found"], false, "and an unknown one is still answered: {batch}");
+
+    // An empty list is legal and cheap -- the panel asks whenever a form
+    // lands, including forms that introduced nothing at all.
+    let none = d.request("rules", json!({ "book": book, "names": Vec::<String>::new() }));
+    assert_eq!(none["rules"].as_array().map(|a| a.len()), Some(0), "{none}");
 }

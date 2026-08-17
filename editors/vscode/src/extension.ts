@@ -1610,9 +1610,12 @@ async function followRules(s: BookSession, index: number): Promise<void> {
     return;
   }
   try {
-    const replies = await Promise.all(
-      names.map((n) => client?.request('rules', { book: s.id, name: n }))
-    );
+    // One request for the whole list. Asking per name meant `Promise.all`
+    // over everything a form recorded, which for a `defines` of 620 events
+    // was 620 requests fired at once the instant it landed -- and 620 replies
+    // back onto a socket the renderer was too busy to drain.
+    const batch = await client?.request('rules', { book: s.id, names });
+    const replies: RulesReply[] = (batch?.rules as RulesReply[]) ?? [];
     const entries: PanelNameRules[] = replies
       .filter((r): r is RulesReply => !!r && r.found)
       .map((r) => ({

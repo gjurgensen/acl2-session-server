@@ -295,7 +295,7 @@ impl Daemon {
                 let p: wire::RulesParams = args(params)?;
                 let id = id.clone();
                 self.handle_of(&p.book, |h| {
-                    h.tx.send(Cmd::Rules { id, name: p.name }).map_err(|e| e.to_string())
+                    h.tx.send(Cmd::Rules { id, names: p.names }).map_err(|e| e.to_string())
                 })
                 .map_err(fail)?
                 .map_err(fail)?;

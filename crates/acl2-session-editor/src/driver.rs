@@ -46,7 +46,7 @@ pub enum Cmd {
     /// What did this form introduce -- rule classes, trigger terms, derived
     /// runes? Served from the scrape taken as the form was admitted, so it
     /// needs no session and is never declined. See [`Driver::rules`].
-    Rules { id: Value, name: String },
+    Rules { id: Value, names: Vec<String> },
     /// One topic's documentation. See [`Driver::doc`].
     Doc { id: Value, name: String },
     /// Certify the book on disk. See [`Driver::certify`].
@@ -443,8 +443,8 @@ impl Driver {
                 self.symbols(&id);
                 Flow::Continue
             }
-            Cmd::Rules { id, name } => {
-                self.rules(&id, &name);
+            Cmd::Rules { id, names } => {
+                self.rules(&id, &names);
                 Flow::Continue
             }
             Cmd::Doc { id, name } => {
@@ -506,13 +506,20 @@ impl Driver {
     /// when the form was admitted precisely so that the answer would not
     /// depend on the prover being free, and reading what an earlier form
     /// defined while a later one grinds is the case it exists for.
-    fn rules(&mut self, id: &Value, name: &str) {
-        let found = {
+    /// Explain every name in one pass, under one lock.
+    ///
+    /// The lock is taken once for the whole list rather than once per name:
+    /// this runs on the driver thread, which is also the thread a proof runs
+    /// on, so each acquisition is a chance to queue behind one.
+    fn rules(&mut self, id: &Value, names: &[String]) {
+        let out = {
             let book = self.book.lock().expect("book lock");
-            book.rules_for(name).map(|r| wire::rules_reply(name, Some(r)))
+            names
+                .iter()
+                .map(|n| wire::rules_reply(n, book.rules_for(n)))
+                .collect::<Vec<_>>()
         };
-        let r = found.unwrap_or_else(|| wire::rules_reply(name, None));
-        self.out.reply(id, to_value(r));
+        self.out.reply(id, to_value(wire::RulesBatchReply { rules: out }));
     }
 
     fn describe(&mut self, id: &Value, name: &str) {

@@ -704,8 +704,17 @@ pub fn stale_deps(book: &str, revision: u64, stale: &[acl2_session::StaleInclude
 #[derive(Debug, Deserialize)]
 pub struct RulesParams {
     pub book: String,
-    /// The name to explain, as the client read it out of the buffer.
-    pub name: String,
+    /// The names to explain, as the client read them out of the buffer or out
+    /// of a unit's events.
+    ///
+    /// A list rather than one name because the caller almost never wants one:
+    /// the panel explains everything a form introduced, and macro-generated
+    /// code records far more than the buffer shows. Asked one at a time, a
+    /// `defines` of 620 recorded events became 620 requests fired at once,
+    /// 620 commands queued to the driver thread that also runs proofs, and
+    /// 620 replies onto a socket the client was too busy to drain. One
+    /// request, one book lock, one reply.
+    pub names: Vec<String>,
 }
 
 /// One rune the name introduced.
@@ -741,6 +750,11 @@ pub struct RuneField {
 /// likely to be looking at an earlier form. `found: false` means this
 /// session's file never introduced the name; there is no "ask again" here,
 /// because nothing is ever waited for.
+#[derive(Debug, Serialize)]
+pub struct RulesBatchReply {
+    pub rules: Vec<RulesReply>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct RulesReply {
     pub found: bool,
