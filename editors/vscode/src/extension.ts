@@ -1410,6 +1410,7 @@ function onUnit(p: UnitEvent): void {
 /** Guards the live output read: at most one request outstanding. */
 let outputInFlight = false;
 
+
 function onTail(p: TailEvent): void {
   const s = byId.get(p.book);
   if (!s) {
@@ -1427,12 +1428,14 @@ function onTail(p: TailEvent): void {
       // Ask for the depth this view shows rather than settling for the tail
       // the event carries: the handle reads live, so there is no reason to
       // watch forty lines of a proof printing thousands.
-      if (p.output_ref) {
-        // One at a time. Firing this on every tick without waiting for the
-        // previous reply put a request and a 400-line answer on the wire
-        // twice a second for as long as a form ran, which is what pushed the
-        // daemon's stdout past what the client was draining. A view showing
-        // the newest tail does not need the ones it skipped.
+      // Read the deeper slice only when someone can actually see it, and no
+      // faster than the renderer can take. Otherwise fall back to the tail
+      // the event already carries, which costs nothing extra.
+      // Only when someone can see it: refreshing a virtual document
+      // re-tokenises it in the renderer, and doing that for a view nobody has
+      // open is pure waste. One request outstanding at a time -- a view
+      // showing the newest tail has no use for the ones it skipped.
+      if (p.output_ref && outputView.visible) {
         if (!outputInFlight) {
           outputInFlight = true;
           void showUnitOutput(s, p.unit).finally(() => {
