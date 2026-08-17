@@ -35,6 +35,14 @@ export interface PanelInnerEvent {
   proverSteps?: number;
   rules?: string[];
   abortCauses?: string;
+  /**
+   * What this event left in the world, if it is known.
+   *
+   * Never set here: it arrives in its own message a round trip after the
+   * model, and the page joins the two by name at render time. Declared all
+   * the same, because `envelope()` reads it.
+   */
+  detail?: PanelNameRules;
 }
 
 /**
@@ -81,11 +89,16 @@ export interface PanelRune {
  * forward-chaining rule waits for, the four runes a `defun` quietly adds.
  * The definition rune's body is deliberately absent -- that part *is* in the
  * file, a few lines above.
+ *
+ * It hangs off the event that introduced it, under "inside this form": these
+ * are facts about one `defun` or one `defthm`, and a `define` that writes
+ * four of them wants them beside their own names rather than pooled.
  */
 export interface PanelNameRules {
   name: string;
   symbolClass?: string;
-  justification?: string;
+  measure?: string;
+  relation?: string;
   formals?: string;
   guard?: string;
   statement?: string;
@@ -137,6 +150,8 @@ export function rulesStrings(entries: PanelNameRules[]): string[] {
   return entries.flatMap((e) => [
     ...(e.formals === undefined ? [] : [e.formals]),
     ...(e.guard === undefined ? [] : [e.guard]),
+    ...(e.measure === undefined ? [] : [e.measure]),
+    ...(e.relation === undefined ? [] : [e.relation]),
     ...(e.statement === undefined ? [] : [e.statement]),
     ...e.runes.flatMap((r) => [r.rune, ...r.fields.map((f) => f.value)]),
   ]);
@@ -313,6 +328,8 @@ export class Panel {
     const cols = this.layoutCols();
     return entries.map((e) => ({
       ...e,
+      guard: e.guard === undefined ? undefined : pretty(e.guard, cols),
+      measure: e.measure === undefined ? undefined : pretty(e.measure, cols),
       statement: e.statement === undefined ? undefined : pretty(e.statement, cols),
       runes: e.runes.map((u) => ({
         ...u,
@@ -557,58 +574,22 @@ function inductionHtml() {
 }
 
 /**
- * What the form introduced, per name.
+ * Hang what each name turned out to be on the event that introduced it.
  *
- * Worth the space because almost none of it is in the buffer: the left-hand
- * side ACL2 derived, the trigger a forward-chaining rule waits for, the
- * runes a defun added without being asked. Fields come in ACL2's own order
- * and keep its keys, so nothing here has to know what a rule class carries.
+ * The two arrive separately -- the envelope with the model, the scrape a
+ * round trip later -- and are joined here rather than in the extension so
+ * that either can land first. Case-insensitively and through a Map: the
+ * names are ACL2 symbols, so one of them being spelled "constructor" is a
+ * question of which book is open, not a hypothetical.
  */
-function rulesHtml() {
-  if (!ruleEntries.length) { return ''; }
-  const row = (label, value) =>
-    '<tr><td class="meta">' + esc(label) + '</td><td>' + value + '</td></tr>';
-  // A term goes in a pre when it has to wrap; short ones read better inline.
-  const term = (t) =>
-    String(t).includes('\\n')
-      ? '<pre>' + hl(t) + '</pre>'
-      : '<code class="lisp">' + hl(t) + '</code>';
-  const rune = (u) => {
-    let h = '<div class="cp">';
-    // The enabled flag first: a rule that exists but is off explains a proof
-    // that does not fire far more often than any of its other fields.
-    const off = u.enabled === false ? ' <span class="status failed">disabled</span>' : '';
-    h += '<div><code class="lisp">' + hl(u.rune) + '</code>' + off + '</div>';
-    const rows = (u.fields || [])
-      .map((f) => row(f.key.replace(/^:/, ''), term(f.value)))
-      .join('');
-    if (rows) { h += '<table class="inner">' + rows + '</table>'; }
-    return h + '</div>';
-  };
-  const one = (e) => {
-    let h = '<div class="cp"><div><code class="lisp">' + hl(e.name) + '</code>';
-    if (e.formals) { h += ' <code class="lisp">' + hl(e.formals) + '</code>'; }
-    // Guard verification is the fact a reader cannot see in the source at
-    // all, and the one most likely to matter later.
-    if (e.symbolClass === ':common-lisp-compliant') {
-      h += ' <span class="meta">guards verified</span>';
-    } else if (e.symbolClass === ':ideal') {
-      h += ' <span class="meta">guards not verified</span>';
-    } else if (e.symbolClass === ':program') {
-      h += ' <span class="meta">program mode</span>';
-    }
-    h += '</div>';
-    let rows = '';
-    if (e.guard) { rows += row('guard', term(e.guard)); }
-    if (e.justification) { rows += row('measure', term(e.justification)); }
-    if (e.statement) { rows += row('statement', term(e.statement)); }
-    if (rows) { h += '<table class="inner">' + rows + '</table>'; }
-    h += (e.runes || []).map(rune).join('');
-    return h + '</div>';
-  };
-  const n = ruleEntries.reduce((a, e) => a + (e.runes || []).length, 0);
-  return '<details><summary><h3>Introduced (' + n + ' rune' + (n === 1 ? '' : 's') +
-    ')</h3></summary>' + ruleEntries.map(one).join('') + '</details>';
+function withDetail(m) {
+  const inner = m.inner || [];
+  if (!ruleEntries.length || !inner.length) { return m; }
+  const by = new Map(ruleEntries.map((e) => [String(e.name).toLowerCase(), e]));
+  return { ...m, inner: inner.map((e) => {
+    const d = by.get(String(e.name).toLowerCase());
+    return d ? { ...e, detail: d } : e;
+  }) };
 }
 
 function render() {
@@ -637,12 +618,11 @@ function render() {
     h += '<p class="meta">Not processed yet.</p>';
   }
   h += envelope(
-    { ...m, failed: m.status === 'skipped' || m.status === 'failed' },
+    withDetail({ ...m, failed: m.status === 'skipped' || m.status === 'failed' }),
     'goal-',
     'goal'
   );
   h += inductionHtml();
-  h += rulesHtml();
   // No actions row. Retracting and holding the target are editor verbs with
   // their own keybindings, and the full log has one too; a panel that follows
   // the cursor is a poor place to put a button whose effect is elsewhere.

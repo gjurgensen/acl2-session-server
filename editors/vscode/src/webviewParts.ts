@@ -48,6 +48,11 @@ details > summary h3 { display: inline; }
 table.inner { border-collapse: collapse; font-size: 12px; }
 table.inner td { padding: 1px 10px 1px 0; vertical-align: baseline; }
 .failtag { color: var(--vscode-terminal-ansiRed, #cc6666); font-weight: 600; }
+/* The second-level row under an event: indented under its own name, and
+   given room to breathe, because what is in it is paragraphs rather than a
+   cell. */
+td.detail { padding: 0 0 6px 12px; }
+td.detail table.inner { margin: 2px 0; }
 `;
 
 /**
@@ -132,6 +137,53 @@ function proveSecs(t) {
   return vals ? fmtSecs(vals[0]) : '';
 }
 
+// A symbol-class is ACL2's word for a fact the source does not show: whether
+// this function's guards were verified. Worth spelling out, since ":ideal"
+// tells a reader nothing and is the case they most need to notice.
+function guardNote(c) {
+  if (c === ':common-lisp-compliant') { return 'guards verified'; }
+  if (c === ':ideal') { return 'guards not verified'; }
+  if (c === ':program') { return 'program mode'; }
+  return '';
+}
+
+/**
+ * What one name a form introduced actually is, in the world.
+ *
+ * Almost none of it is in the buffer: the guard and measure ACL2 worked out,
+ * the left-hand side a rewrite rule will match, the trigger a
+ * forward-chaining rule waits for, the four runes a defun adds without being
+ * asked. Fields arrive in ACL2's own order and keep its keys, so nothing
+ * here has to know what a given rule class carries. The definition rune's
+ * body is deliberately absent -- that part *is* in the buffer, a few lines
+ * above.
+ */
+function nameDetail(d) {
+  const row = (label, value) =>
+    '<tr><td class="meta">' + esc(label) + '</td><td>' + value + '</td></tr>';
+  // A term goes in a pre when it has to wrap; short ones read better inline.
+  const term = (t) =>
+    String(t).includes('\\n')
+      ? '<pre>' + hl(t) + '</pre>'
+      : '<code class="lisp">' + hl(t) + '</code>';
+  let rows = '';
+  if (d.guard) { rows += row('guard', term(d.guard)); }
+  if (d.measure) { rows += row('measure', term(d.measure)); }
+  if (d.relation) { rows += row('decreasing under', term(d.relation)); }
+  if (d.statement) { rows += row('statement', term(d.statement)); }
+  let h = rows ? '<table class="inner">' + rows + '</table>' : '';
+  h += (d.runes || []).map((u) => {
+    // The enabled flag first: a rule that exists but is off explains a proof
+    // that does not fire far more often than any of its other fields.
+    const off = u.enabled === false ? ' <span class="status failed">disabled</span>' : '';
+    const fs = (u.fields || [])
+      .map((f) => row(f.key.replace(/^:/, ''), term(f.value))).join('');
+    return '<div class="cp"><div><code class="lisp">' + hl(u.rune) + '</code>' + off + '</div>' +
+      (fs ? '<table class="inner">' + fs + '</table>' : '') + '</div>';
+  }).join('');
+  return h;
+}
+
 /**
  * What ACL2 had to say about one form: why it failed, what it warned about,
  * what fired, what it used, and what was inside it. A file's form and an
@@ -203,28 +255,47 @@ function envelope(m, p, on) {
         // never entered the prover, and this event's detail was never read.
         // A probed event has *something* -- kind, time, rules -- so a dash
         // can say "no steps" where blank keeps meaning "not looked at".
-        const probed = !!(e.kind || e.time || (e.rules || []).length || e.proverSteps != null);
+        const probed = !!(e.kind || e.time || (e.rules || []).length ||
+                          e.proverSteps != null || e.detail);
         const steps = e.proverSteps != null
           ? e.proverSteps + ' steps'
           : (probed ? '<span title="the prover was not entered">&mdash;</span>' : '');
+        const d = e.detail;
+        // The formals sit beside the name because together they are the
+        // signature, which is what a reader is looking for when they look up
+        // a function at all -- and for a macro-generated one there is nothing
+        // in the buffer to read it off.
+        const sig = '<code>' + esc(e.name) + '</code>' +
+          (d && d.formals ? ' <code class="lisp">' + hl(d.formals) + '</code>' : '');
         let row = '<tr><td>' + esc(e.kind || '') + '</td>' +
-          '<td><code>' + esc(e.name) + '</code></td>' +
+          '<td>' + sig + '</td>' +
           '<td class="meta">' + proveSecs(e.time) + '</td>' +
           '<td class="meta">' + steps + '</td>' +
           '<td>' + causes(e.abortCauses || '')
             .map((c) => '<span class="failtag">' + esc(c) + '</span>').join(', ') + '</td></tr>';
-        if ((e.rules || []).length) {
-          // Second-level detail, folded: the count keeps it visible that the
-          // rules are there without a wall of chips between one event's row
-          // and the next.
-          row += '<tr><td></td><td colspan="4" class="innerrules">' +
-            '<details><summary class="meta">rules (' + e.rules.length + ')</summary>' +
-            codes(e.rules) + '</details></td></tr>';
+        // Second-level detail, folded: what this event introduced, then what
+        // its proof consumed. The summary carries the two facts worth having
+        // without opening it -- whether the guards were verified, and how
+        // many runes came with the event -- because a wall of terms between
+        // one row and the next is what the fold is there to prevent.
+        const bits = [];
+        const note = d ? guardNote(d.symbolClass) : '';
+        if (note) { bits.push(note); }
+        const nr = d ? (d.runes || []).length : 0;
+        if (nr) { bits.push(nr + ' rune' + (nr === 1 ? '' : 's')); }
+        const used = (e.rules || []).length;
+        if (used) { bits.push(used + ' rule' + (used === 1 ? '' : 's') + ' used'); }
+        const body = (d ? nameDetail(d) : '') +
+          (used ? '<div class="meta">rules the proof used</div>' + codes(e.rules) : '');
+        if (body || bits.length) {
+          row += '<tr><td></td><td colspan="4" class="detail">' +
+            '<details><summary class="meta">' + (bits.join(' \\u00b7 ') || 'detail') +
+            '</summary>' + body + '</details></td></tr>';
         }
         return row;
       }).join('') + '</table>';
     const detailed = inner.filter(
-      (e) => e.kind || e.time || e.proverSteps != null || (e.rules || []).length
+      (e) => e.kind || e.time || e.proverSteps != null || (e.rules || []).length || e.detail
     ).length;
     if (detailed < inner.length) {
       h += '<p class="meta">detail (kind, time, steps, rules) is probed for the first ' +

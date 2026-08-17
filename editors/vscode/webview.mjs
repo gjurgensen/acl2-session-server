@@ -161,6 +161,69 @@ check(
 );
 check(spans([[{ t: 'a', c: '' }], [{ t: 'b', c: '' }]]) === 'a\nb', 'and joins lines with newlines');
 
+// ---- `envelope`: what a form left behind, per event ----
+//
+// The scrape hangs off the events under "inside this form", which is the
+// only place a macro-generated name has a row of its own. Rendered from the
+// shape the daemon actually sends: a guard-verified function with derived
+// runes, and a theorem whose left-hand side is nowhere in the buffer.
+
+globalThis.toks = {};
+const envelope = lift('esc', 'strip', 'causes', 'spans', 'hl', 'codes', 'rat',
+                      'fmtSecs', 'timeParts', 'proveSecs', 'guardNote', 'nameDetail',
+                      'envelope');
+{
+  const fn = {
+    name: 'dfn-app', symbolClass: ':common-lisp-compliant', formals: '(x y)',
+    guard: '(if (true-listp x) (true-listp y) (quote nil))',
+    measure: '(acl2-count x)', relation: 'l<',
+    runes: [
+      { rune: '(:definition dfn-app)', fields: [{ key: ':clique', value: '(dfn-app)' }] },
+      { rune: '(:type-prescription dfn-app)', enabled: false, fields: [] },
+    ],
+  };
+  const thm = {
+    name: 'true-listp-of-dfn-app', statement: '(true-listp (dfn-app x y))',
+    runes: [{ rune: '(:rewrite true-listp-of-dfn-app)',
+              fields: [{ key: ':lhs', value: '(true-listp (dfn-app x y))' }] }],
+  };
+  const h = envelope({
+    checkpoints: [], rules: [], inner: [
+      { name: 'dfn-app', kind: 'defun', detail: fn },
+      { name: 'true-listp-of-dfn-app', kind: 'defthm', proverSteps: 12,
+        rules: ['(:definition dfn-app)'], detail: thm },
+      { name: 'undetailed' },
+    ],
+  }, 'g-', 'goal');
+
+  check(h.includes('<code>dfn-app</code> <code class="lisp">(x y)</code>'),
+        'a function shows its formals beside its name, as a signature');
+  check(h.includes('guards verified · 2 runes'),
+        'and says in the fold summary that its guards were verified');
+  check(h.includes('guards not verified') === false,
+        'and does not claim otherwise');
+  check(/guard<\/td><td><code[^>]*>\(if \(true-listp x\)/.test(h),
+        'the guard is a labelled row');
+  check(h.includes('(:type-prescription dfn-app)') && h.includes('>disabled<'),
+        'a rune that exists but is off says so');
+  check(h.includes('clique</td>'), 'and a rune field keeps ACL2’s own key');
+  check(/measure<\/td><td><code[^>]*>\(acl2-count x\)/.test(h),
+        'the measure is the term, not the justification record around it');
+  check(/decreasing under<\/td><td><code[^>]*>l&lt;/.test(h),
+        'and a relation that is not o< is named, since it was chosen');
+  check(h.includes('1 rune · 1 rule used'),
+        'a theorem counts what it introduced apart from what its proof used');
+  check(h.includes('rules the proof used'), 'and the two are labelled apart');
+  check(/lhs<\/td><td><code[^>]*>\(true-listp \(dfn-app x y\)\)/.test(h),
+        'the left-hand side a rewrite rule will match is shown');
+  check((h.match(/<summary class="meta">/g) || []).length === 2,
+        'an event with nothing to show gets no fold');
+  check(h.includes('detail (kind, time, steps, rules) is probed for the first 2'),
+        'and is counted as unprobed, so a truncated probe still says so');
+}
+check(!pages[1][1].includes('Introduced ('),
+      'the panel has no second, pooled copy of what the form introduced');
+
 // The link range, which is where a coordinate bug would hide: the daemon
 // sends no columns, so the client places them by finding the quoted name on
 // the line. Non-ASCII before the include is the case that would break a
