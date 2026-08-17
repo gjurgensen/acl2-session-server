@@ -124,8 +124,16 @@ covers checkouts cloned under the root *after* you granted it, and an inner
 checkout wins over the one above it — so trust a directory whose contents you
 control.
 
-Twelve tools: `session_open`, `session_close`, `sessions`, `images`, `sync`,
-`eval`, `certify`, `resume`, `status`, `interrupt`, `health`, `output`.
+Thirteen tools: `session_open`, `session_close`, `sessions`, `images`, `sync`,
+`eval`, `certify`, `resume`, `status`, `interrupt`, `health`, `output`,
+`induction`.
+
+`induction` answers why a proof inducted: the scheme, the term that suggested
+it, the rule credited, and how many subgoals it produced. Call it for a form
+whose `rules` carry an `:induction` rune. Alone among these it is a *parse of
+ACL2's prose* — the scheme is printed and recorded nowhere, not in
+`get-event-data` and not in `gag-state` — so it is best effort: fields go
+missing rather than wrong, and a reworded ACL2 returns nothing at all.
 
 `certify` runs `cert.pl` on the session's book, with the same ACL2 image the
 session runs and the `cert.pl` from that image's own checkout. It runs outside

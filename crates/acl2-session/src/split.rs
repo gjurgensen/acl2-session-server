@@ -34,6 +34,14 @@ pub struct Form {
     /// Hash of the *normalised* text (see [`normalize`]). Reformatting and
     /// comment-only edits leave this unchanged, so they cost no re-proving.
     pub hash: u64,
+    /// The names this form introduces, as written, in the order they appear.
+    ///
+    /// Lexical, from the same scan [`definer_sites`] performs: these are the
+    /// names in the *text*, not the ones ACL2 ends up with. A `define`
+    /// introduces a dozen names in the world and writes exactly one, and the
+    /// written one is what a reader means by "that form". Empty for
+    /// `include-book`, `in-theory` and anything else that defines nothing.
+    pub names: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,7 +72,30 @@ impl std::error::Error for SplitError {}
 /// boundaries being exactly right, so a construct we cannot lex must be an
 /// error, never a best-effort split.
 pub fn split(text: &[u8]) -> Result<Vec<Form>, SplitError> {
-    Splitter { s: text }.forms()
+    let mut forms = Splitter { s: text }.forms()?;
+    attach_names(text, &mut forms);
+    Ok(forms)
+}
+
+/// Bucket the definer sites into the forms that contain them.
+///
+/// One extra linear pass rather than a scan per form: `definer_sites` is
+/// already a single pass that never re-lexes a subtree, and both it and the
+/// forms come out in offset order, so this walks the two in step. A
+/// per-form scan would re-lex the whole file once per form, which is the
+/// cost `definer_sites` was written to avoid.
+fn attach_names(text: &[u8], forms: &mut [Form]) {
+    let sites = definer_sites(text);
+    let mut at = 0;
+    for f in forms.iter_mut() {
+        while at < sites.len() && sites[at].offset < f.start {
+            at += 1; // between forms: whitespace or a comment
+        }
+        while at < sites.len() && sites[at].offset < f.end {
+            f.names.push(sites[at].name.clone());
+            at += 1;
+        }
+    }
 }
 
 /// Convenience wrapper for callers that already hold a `&str`.
@@ -96,9 +127,15 @@ pub struct DefinerSite {
 /// It over-matches slightly -- `default-…` starts with `def` too -- and that
 /// is the right direction to err. The cost is an unused entry in an index;
 /// the cost of under-matching is a name that cannot be jumped to at all.
+///
+/// The first three *bytes* are compared, not the first three characters: a
+/// head carrying a raw high byte reaches here as replacement characters (the
+/// caller builds it with `from_utf8_lossy`), and slicing a `str` at 3 would
+/// land inside one and panic. This runs on every buffer change, so a panic
+/// here takes the editor daemon down rather than costing an index entry.
 fn is_definer(head: &str) -> bool {
     let bare = head.rsplit("::").next().unwrap_or(head);
-    bare.len() >= 3 && bare[..3].eq_ignore_ascii_case("def")
+    bare.len() >= 3 && bare.as_bytes()[..3].eq_ignore_ascii_case(b"def")
 }
 
 /// Every `(<definer> <name> …)` in `text`, at any depth.
@@ -117,6 +154,89 @@ fn is_definer(head: &str) -> bool {
 pub fn definer_sites(text: &[u8]) -> Vec<DefinerSite> {
     let sp = Splitter { s: text };
     let mut out = Vec::new();
+    let mut lines = LineCursor::new();
+    let mut i = 0usize;
+    // One linear pass: every byte is lexed once. The obvious shape -- read a
+    // form, then recurse into it -- re-lexes each subtree at every level it
+    // is nested under, so a token at depth d costs d times. That is invisible
+    // on a tree of small books and ruinous on ACL2's own sources, which are a
+    // few very large files of deeply nested forms: measured at 23 s for 14 MB
+    // before this, against about a second after.
+    //
+    // The trick is that descending into a list costs nothing -- step past the
+    // paren and keep scanning -- so `datum` is only ever called on an *atom*,
+    // to skip it. Everything that is not a paren goes through `datum`, which
+    // is what keeps `"a(b"`, `#\(` and `|a(b|` from being counted as lists.
+    while i < text.len() {
+        let Ok(j) = sp.skip_ws(i) else { return out };
+        if j >= text.len() {
+            return out;
+        }
+        match text[j] {
+            b'(' => {
+                if let Some(site) = sp.definer_at(j, &mut lines) {
+                    out.push(site);
+                }
+                i = j + 1;
+            }
+            b')' => i = j + 1,
+            _ => match sp.datum(j) {
+                Ok(k) => i = k,
+                Err(_) => return out,
+            },
+        }
+    }
+    out
+}
+
+/// The head symbol of the first form in `text`, as written.
+///
+/// `(mutual-recursion (defun f …) …)` yields `mutual-recursion`. Needed
+/// because a form that introduces nothing itself still has to be *named* in
+/// an outline, and its definers are its children rather than its identity.
+/// `None` when the text does not start with a list, or the head is itself a
+/// list.
+pub fn head_of(text: &[u8]) -> Option<String> {
+    let sp = Splitter { s: text };
+    let start = sp.skip_ws(0).ok()?;
+    if !sp.at(start, b'(') {
+        return None;
+    }
+    let h0 = sp.skip_ws(start + 1).ok()?;
+    if h0 >= text.len() || text[h0] == b'(' || text[h0] == b')' {
+        return None;
+    }
+    let h1 = sp.datum(h0).ok()?;
+    Some(String::from_utf8_lossy(&text[h0..h1]).into_owned())
+}
+
+/// One `(include-book "…" …)` found in a book's text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncludeSite {
+    /// The book as written, without the quotes and without `.lisp`:
+    /// `std/util/bstar`.
+    pub book: String,
+    /// The `:dir` argument as written -- `:system`, or a project alias --
+    /// when one was given.
+    pub dir: Option<String>,
+    /// 1-based line of the opening paren.
+    pub line: usize,
+}
+
+/// Every `(include-book …)` in `text`, at any depth.
+///
+/// At any depth because they are routinely wrapped: `(local (include-book
+/// …))` is the common case, and `encapsulate` bodies hold more. Reusing the
+/// reader means a book name inside a string or a commented-out include is not
+/// mistaken for a real one -- and, less obviously, that `#+skip` and friends
+/// do not confuse it, since the walk is over data rather than lines.
+///
+/// The `:dir` value is returned as written rather than resolved: only the
+/// caller knows the session's books directory, and only ACL2 knows a
+/// project's own `:dir` aliases.
+pub fn include_sites(text: &[u8]) -> Vec<IncludeSite> {
+    let sp = Splitter { s: text };
+    let mut out = Vec::new();
     let mut i = 0;
     loop {
         let Ok(j) = sp.skip_ws(i) else { return out };
@@ -124,7 +244,7 @@ pub fn definer_sites(text: &[u8]) -> Vec<DefinerSite> {
             return out;
         }
         let Ok(end) = sp.datum(j) else { return out };
-        sp.definers_in(j, end, &mut out);
+        sp.includes_in(j, end, &mut out);
         i = end;
     }
 }
@@ -166,6 +286,7 @@ impl<'a> Splitter<'a> {
                 line_start,
                 line_end,
                 hash: fnv1a(&normalize(&self.s[i..j])),
+                names: Vec::new(), // filled by `attach_names`
             });
             i = j;
         }
@@ -211,52 +332,95 @@ impl<'a> Splitter<'a> {
         i < self.s.len() && self.s[i] == c
     }
 
-    /// Record the definer sites in the datum spanning `[start, end)`, then
-    /// recurse into every sublist. See [`definer_sites`].
-    fn definers_in(&self, start: usize, end: usize, out: &mut Vec<DefinerSite>) {
+    /// The elements of the list spanning `[start, end)`, head included.
+    fn elements(&self, start: usize, end: usize) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        let mut i = start + 1;
+        loop {
+            let Ok(j) = self.skip_ws(i) else { return out };
+            if j >= end || self.s[j] == b')' {
+                return out;
+            }
+            let Ok(k) = self.datum(j) else { return out };
+            if k > end {
+                return out;
+            }
+            out.push((j, k));
+            i = k;
+        }
+    }
+
+    fn text_at(&self, r: (usize, usize)) -> String {
+        String::from_utf8_lossy(&self.s[r.0..r.1]).into_owned()
+    }
+
+    /// Record the `include-book` calls in `[start, end)`, then recurse.
+    /// See [`include_sites`].
+    fn includes_in(&self, start: usize, end: usize, out: &mut Vec<IncludeSite>) {
         if !self.at(start, b'(') {
             return;
         }
-        // The head and the datum after it, if both are plain atoms. A head
-        // that is itself a list -- `((lambda …) x)` -- introduces nothing.
-        let Ok(h0) = self.skip_ws(start + 1) else { return };
-        if h0 >= end || self.s[h0] == b'(' {
-            return;
-        }
-        if let Ok(h1) = self.datum(h0)
-            && h1 <= end
-            && let Ok(n0) = self.skip_ws(h1)
-            && n0 < end
-            && self.s[n0] != b'('
-            && let Ok(n1) = self.datum(n0)
-            && n1 <= end
-        {
-            let head = String::from_utf8_lossy(&self.s[h0..h1]).into_owned();
-            let name = String::from_utf8_lossy(&self.s[n0..n1]).into_owned();
-            if is_definer(&head) && !name.is_empty() {
-                out.push(DefinerSite {
-                    head,
-                    name,
-                    offset: start,
+        let els = self.elements(start, end);
+        if let Some(head) = els.first() {
+            let h = self.text_at(*head);
+            let bare = h.rsplit("::").next().unwrap_or(&h).to_ascii_lowercase();
+            if bare == "include-book"
+                && let Some(name) = els.get(1)
+                && self.at(name.0, b'"')
+            {
+                // The `:dir` value is the datum after the keyword, wherever
+                // in the argument list it sits.
+                let dir = els.iter().skip(2).position(|r| {
+                    self.text_at(*r).eq_ignore_ascii_case(":dir")
+                }).and_then(|k| els.get(k + 3).map(|r| self.text_at(*r)));
+                out.push(IncludeSite {
+                    book: self.text_at(*name).trim_matches('"').to_string(),
+                    dir,
                     line: line_of(self.s, start),
                 });
             }
         }
-        // Every element, so a definer nested inside `encapsulate`, `defines`
-        // or `mutual-recursion` is found too.
-        let mut i = start + 1;
-        loop {
-            let Ok(j) = self.skip_ws(i) else { return };
-            if j >= end || self.s[j] == b')' {
-                return;
-            }
-            let Ok(k) = self.datum(j) else { return };
-            if k > end {
-                return;
-            }
-            self.definers_in(j, k, out);
-            i = k;
+        for e in els {
+            self.includes_in(e.0, e.1, out);
         }
+    }
+
+    /// The definer site opening at `at`, if this form introduces a name.
+    ///
+    /// Reads only the head and the datum after it -- both atoms, so both
+    /// cheap. Nothing here descends: [`definer_sites`] walks into every list
+    /// itself, which is what keeps the whole scan linear.
+    ///
+    /// A head that is itself a list -- `((lambda …) x)` -- introduces
+    /// nothing, and neither does a form whose second element is a list.
+    fn definer_at(&self, at: usize, lines: &mut LineCursor) -> Option<DefinerSite> {
+        let h0 = self.skip_ws(at + 1).ok()?;
+        if h0 >= self.s.len() || self.s[h0] == b'(' || self.s[h0] == b')' {
+            return None;
+        }
+        let h1 = self.datum(h0).ok()?;
+        let n0 = self.skip_ws(h1).ok()?;
+        if n0 >= self.s.len() || self.s[n0] == b'(' || self.s[n0] == b')' {
+            return None;
+        }
+        let n1 = self.datum(n0).ok()?;
+        let head = String::from_utf8_lossy(&self.s[h0..h1]).into_owned();
+        if !is_definer(&head) {
+            return None;
+        }
+        let name = String::from_utf8_lossy(&self.s[n0..n1]).into_owned();
+        // A keyword is never an introduced name, and `def…` forms do put one
+        // in the name slot: `(std::defredundant :names (f g))` would index
+        // itself as `:names`. Cheap to rule out and impossible to get right
+        // later, since nothing downstream can tell a keyword from a symbol
+        // that merely looks odd.
+        if name.is_empty() || name.starts_with(':') {
+            return None;
+        }
+        // The cursor only moves forward, and the scan visits opening parens
+        // in increasing order, so counting newlines stays linear too --
+        // `line_of` from scratch per site would put the quadratic cost back.
+        Some(DefinerSite { head, name, offset: at, line: lines.advance(self.s, at) })
     }
 
     /// Return the offset just past the datum starting at or after `i`.
@@ -584,6 +748,51 @@ pub fn fnv1a(bytes: &[u8]) -> u64 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_form_carries_the_names_it_writes() {
+        let f = split_str("(defthm foo (equal x x))\n").unwrap();
+        assert_eq!(f[0].names, ["foo"]);
+    }
+
+    #[test]
+    fn a_form_that_defines_nothing_carries_no_names() {
+        let f = split_str("(include-book \"std/lists/top\" :dir :system)\n").unwrap();
+        assert!(f[0].names.is_empty(), "got {:?}", f[0].names);
+    }
+
+    /// The plural case the cap exists for -- and the reason names are a label
+    /// rather than a key.
+    #[test]
+    fn a_compound_form_carries_every_name_in_it() {
+        let f = split_str(
+            "(encapsulate ()\n  (defun a (x) x)\n  (defthm b (equal (a x) x)))\n",
+        )
+        .unwrap();
+        assert_eq!(f.len(), 1, "one top-level form");
+        assert_eq!(f[0].names, ["a", "b"]);
+    }
+
+    /// A `define` writes one name however many it introduces in the world.
+    /// This is what makes the feared macro explosion a non-problem.
+    #[test]
+    fn a_definer_macro_writes_one_name() {
+        let f = split_str("(define seg-fix ((x seg-p)) :returns (y seg-p) x)\n").unwrap();
+        assert_eq!(f[0].names, ["seg-fix"]);
+    }
+
+    /// Names must land in the form that contains them, not the one before:
+    /// a comment between two forms is not part of either.
+    #[test]
+    fn names_land_in_the_right_form() {
+        let f = split_str(
+            "(defun a (x) x)\n\n; a comment mentioning defthm nothing\n\n(defthm b (equal (a x) x))\n",
+        )
+        .unwrap();
+        assert_eq!(f.len(), 2);
+        assert_eq!(f[0].names, ["a"]);
+        assert_eq!(f[1].names, ["b"]);
+    }
+
     fn counts(s: &str) -> usize {
         split_str(s).expect("split failed").len()
     }
@@ -759,6 +968,42 @@ mod tests {
                    "only the two genuine definers, got {found:?}");
     }
 
+    /// Includes are routinely wrapped in `local`, and a commented-out or
+    /// stringified one is not an include at all.
+    #[test]
+    fn includes_are_found_wherever_they_sit() {
+        let src = "(include-book \"std/util/bstar\" :dir :system)\n\
+                   (local (include-book \"arithmetic/top\"))\n\
+                   ; (include-book \"commented/out\")\n\
+                   (defconst *s* \"(include-book \\\"in/a/string\\\")\")\n\
+                   (encapsulate ()\n\
+                     (local (include-book \"deep/one\" :dir :teachpacks)))\n";
+        let got: Vec<(String, Option<String>, usize)> = super::include_sites(src.as_bytes())
+            .into_iter()
+            .map(|i| (i.book, i.dir, i.line))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("std/util/bstar".into(), Some(":system".into()), 1),
+                ("arithmetic/top".into(), None, 2),
+                ("deep/one".into(), Some(":teachpacks".into()), 6),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_forms_head_is_its_name_when_it_defines_nothing() {
+        assert_eq!(super::head_of(b"(mutual-recursion (defun f (x) x))").as_deref(),
+                   Some("mutual-recursion"));
+        assert_eq!(super::head_of(b"  ; a comment\n(encapsulate () x)").as_deref(),
+                   Some("encapsulate"));
+        assert_eq!(super::head_of(b"(std::define f (x) x)").as_deref(), Some("std::define"));
+        assert_eq!(super::head_of(b"((lambda (x) x) 1)"), None, "a list head names nothing");
+        assert_eq!(super::head_of(b"bare-atom"), None);
+        assert_eq!(super::head_of(b"()"), None);
+    }
+
     /// The head may be a list, and the name may be absent entirely; neither
     /// should be mistaken for a definition or panic the walk.
     #[test]
@@ -767,8 +1012,35 @@ mod tests {
         assert!(sites("(defun)").is_empty(), "a definer with no name");
         assert!(sites("(defun (x) x)").is_empty(), "nor a list where a name goes");
         assert!(sites("(not-a-definer foo)").is_empty());
-        // Unlexable text yields what was found before the trouble.
+        // An unterminated form still names what it was going to introduce.
+        // The scan reads only the head and the name, so it never has to
+        // reach the missing paren -- which is the behaviour worth having,
+        // because a half-typed form is exactly when its name is wanted. (The
+        // earlier recursive walk lexed the whole form and so lost it; `split`
+        // remains the strict reader that refuses such text outright.)
         assert_eq!(sites("(defun good (x) x)\n(defun bad (x"),
-                   vec![("good".to_string(), 1)]);
+                   vec![("good".to_string(), 1), ("bad".to_string(), 2)]);
+    }
+
+    /// Community books carry raw bytes 0x80-0xFF (see the module docs), which
+    /// `from_utf8_lossy` turns into three-byte replacement characters. A head
+    /// whose first three bytes straddle one must not panic the walk.
+    #[test]
+    fn a_non_ascii_head_does_not_panic_the_walk() {
+        // One raw high byte after `a`: lossy-decoded it becomes a three-byte
+        // replacement character, so byte 3 falls inside it. Only `definer_sites`
+        // can carry this -- the `sites` helper takes a `str`.
+        let found = super::definer_sites(b"(a\xe9bc foo)\n(defun good (x) x)");
+        assert_eq!(found.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["good"]);
+
+        // The same boundary, reached through characters that are genuinely
+        // multi-byte rather than through lossy decoding.
+        assert_eq!(sites("(ééx foo)\n(defun good (x) x)"),
+                   vec![("good".to_string(), 2)]);
+
+        // Shorter than the three bytes `def` needs, but not shorter than three
+        // bytes -- the length guard alone would have let this through.
+        assert!(sites("(é foo)").is_empty());
+        assert!(sites("(éé foo)").is_empty());
     }
 }

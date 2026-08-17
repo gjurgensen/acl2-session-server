@@ -135,6 +135,29 @@ check(
   check(!isLisp(r[1]), 'a block never survives past the first unindented line');
 }
 
+// ---- Our own status messages ----------------------------------------------
+//
+// The output views show these when there is no log, and they are highlighted
+// by the same grammar. `(not checked yet)` is shaped exactly like a term --
+// opens at column zero, closes at end of line -- so it came out coloured,
+// `not` and all. They are prose now; these mirror the literals in
+// extension.ts and outputView.ts, and exist so nobody puts the parens back.
+
+for (const msg of [
+  'No form under the cursor has been checked yet.',
+  'Nothing evaluated yet.',
+  'Not checked yet.',
+  'Output unavailable: Error: connection closed',
+]) {
+  const r = scopeLines(msg + '\n');
+  check(!isLisp(r[0]), `the status message ${JSON.stringify(msg)} stays prose`);
+}
+// The shape that bit us, kept as the reason the wording matters.
+check(
+  isLisp(scopeLines('(not checked yet)\n')[0]),
+  'and a parenthesized one would not have -- which is why they are prose'
+);
+
 // ---- The containment cases ------------------------------------------------
 //
 // Each opens something inside an island and never closes it. The assertion

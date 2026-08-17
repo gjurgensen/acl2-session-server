@@ -17,7 +17,9 @@ instead.
 **ACL2: Show Panel** opens a structured view beside the editor that follows
 the cursor: the form's status and timings, a failure's checkpoints as terms
 with the prover's per-goal output one click away, the rules an admitted
-proof used, and a live tail while the form proves.
+proof used, and a live tail while the form proves. It renders and nothing
+else -- retracting, holding the target and opening the full log are editor
+verbs with their own keys, not buttons in a window that follows the cursor.
 
 ## The console
 
@@ -207,6 +209,12 @@ code .   # then F5 ("Run Extension") -> a new [Extension Development Host] windo
 Install the daemon first (`cargo install --path crates/acl2-session-editor`),
 or point `acl2-session.daemonPath` at a built binary.
 
+After a change to the core or the daemon, run `cargo build` before reloading.
+Neither `cargo test` nor `cargo clippy` produces the binary the extension
+spawns, so a green test run says nothing about what the editor is about to
+talk to -- a core fix has been "verified" and still absent from the editor
+more than once because of exactly this.
+
 To use it day to day without F5, load it as an unpacked extension:
 
 ```sh
@@ -231,9 +239,62 @@ panel too -- there is no moment where you want the session but not the place
 its failures explain themselves. The panel opens without taking the cursor.
 Clicking the status bar brings it back if you close it.
 
-The rest: Stop Live Checking, Interrupt, Show Panel, Show Console, Evaluate
-Selection, Retract to Cursor, Target at Cursor, Clear Target, Show Output for
-Form at Cursor, Go to Frontier.
+Everything else has a key too, `cmd+alt` on a Mac. `n` and `u` advance and
+retract; the rest are first letters.
+
+| key | command |
+| --- | --- |
+| `ctrl+alt+a` | Start Live Checking (and open the panel) |
+| `ctrl+alt+i` | Interrupt |
+| `ctrl+alt+n` | Target at Cursor — check up to here |
+| `ctrl+alt+u` | Retract to Cursor |
+| `ctrl+alt+b` | Clear Target — check the whole book |
+| `ctrl+alt+p` | Show Panel |
+| `ctrl+alt+c` | Show Console |
+| `ctrl+alt+e` | Evaluate Selection |
+| `ctrl+alt+o` | Show Output for Form at Cursor |
+| `ctrl+alt+g` | Go to Next Attention Point — the reds, then the frontier |
+| `ctrl+alt+r` | Go to Frontier |
+
+All are scoped to `editorLangId == acl2`, so they are inert everywhere else.
+Stop Live Checking has no key: the title-bar button covers it, and it is not
+something you want a keystroke away.
+
+Deliberately avoided: `ctrl+alt+t`, `ctrl+alt+l` and `ctrl+alt+d` (GNOME's
+terminal, lock and show-desktop), `ctrl+alt+<arrows>` (workspace switching),
+`alt+left`/`alt+right` (VSCode's own navigate back/forward), and
+`ctrl+alt+f`, which the Claude Code extension binds without a language
+scope. vsrocq also uses `ctrl+alt+a/c/p`, but scoped to `editorLangId ==
+rocq`, so those and these never both match.
+
+One caveat for Windows users: there `ctrl+alt` is AltGr, so these can shadow
+character input on layouts that use it -- rebind if so.
+
+The authoritative conflict check is VSCode's own: `ctrl+k ctrl+s`, then type
+a chord into the search box. It lists every rule bound to it, defaults
+included, which no amount of reading `package.json` files can replace.
+
+**Go to Next Attention Point** cycles through what needs attention: every
+red form in file order, then exactly one
+machine target -- the running form if a check is live, otherwise the end of
+the book. Reds first and topmost first, because a skipped false claim can
+poison every proof below it, so working downward is the wrong direction.
+Standing on an attention point advances to the next, wrapping; standing
+anywhere else goes to the *first*, since "where should I look" has a
+top-down answer that should not depend on where the cursor happens to be.
+
+Landing on the running form does not start *following* it, so that the
+cursor tracks the frontier as it advances: that would be a mode, not a jump.
+
+Go to Frontier stays separate for going straight there without walking the
+reds. It has to: continue-past-failure is on by default, so a red is admitted
+under `skip-proofs` and checking carries on past it -- the reds sit *behind*
+the frontier. Minimal mode emits no diagnostics either, so `F8` has nothing to
+walk.
+
+`g` is the attention point rather than the frontier, because it is the one
+you go looking for. Frontier took the key it vacated, since the obvious
+`ctrl+alt+f` belongs to another extension.
 
 The target is Proof-General-shaped: auto-admission goes only as far as the
 target, retraction moves the world back and *holds* it there, and clearing

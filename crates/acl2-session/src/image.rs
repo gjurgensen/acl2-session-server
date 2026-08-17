@@ -138,13 +138,23 @@ impl ImagePolicy {
         if let Some(checkout) = find_checkout(book)
             && self.is_trusted(&checkout)
         {
-            let image = checkout.join(IMAGE_NAME);
-            if image.is_file() {
-                return Ok(image);
+            let image = normalise(checkout.join(IMAGE_NAME));
+            if !image.is_file() {
+                // Trusted but unbuilt. Falling back here would run the book
+                // against a different checkout's world.
+                return Err(ImageError::Unbuilt { checkout });
             }
-            // Trusted but unbuilt. Falling back here would run the book
-            // against a different checkout's world.
-            return Err(ImageError::Unbuilt { checkout });
+            // Trusting the directory does not trust everything reachable
+            // through it: `saved_acl2` can be a symlink pointing out of the
+            // tree, and the file that runs is the target. Re-check what the
+            // path actually resolves to, which is what `resolve_explicit`
+            // does -- otherwise naming an image is checked more strictly than
+            // finding one, and the weaker door is the one an untrusted
+            // checkout can open.
+            if !self.is_trusted(&image) {
+                return Err(ImageError::NotTrusted { image });
+            }
+            return Ok(image);
         }
         self.default
             .clone()
@@ -285,6 +295,45 @@ mod tests {
                    "falls back to the declared image, never the hostile one");
         assert!(!p.is_trusted(&hostile.join(IMAGE_NAME)));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Trust is granted to a directory, but what runs is a file — and a
+    /// symlink inside a trusted checkout resolves to one that need not be
+    /// under any trusted root. Deriving an image must apply the same check
+    /// naming one does, or the forward-open grant (a checkout cloned under a
+    /// trusted root later) becomes a way to run an arbitrary binary.
+    #[test]
+    fn a_symlinked_image_is_checked_where_it_points() {
+        let root = scratch("symlink");
+        let outside = scratch("symlink-outside");
+        let evil = outside.join("evil");
+        std::fs::write(&evil, "#!/bin/sh\n").unwrap();
+
+        // A checkout that is trusted, whose image points out of the tree.
+        let wt = checkout(&root, "wt", false);
+        std::os::unix::fs::symlink(&evil, wt.join(IMAGE_NAME)).unwrap();
+        let book = wt.join("books/kestrel/foo.lisp");
+        std::fs::write(&book, "").unwrap();
+
+        let p = ImagePolicy::new().trust(&root);
+        assert_eq!(p.resolve(&book), Err(ImageError::NotTrusted { image: evil.clone() }),
+                   "the target is what runs, so the target is what is checked");
+        // The same path named explicitly was already refused; the two doors
+        // now agree.
+        assert_eq!(p.resolve_explicit(&wt.join(IMAGE_NAME)),
+                   Err(ImageError::NotTrusted { image: evil }));
+
+        // A symlink landing back inside the trusted root is still fine: it is
+        // the destination that matters, not the indirection.
+        let real = checkout(&root, "real", true);
+        let wt2 = checkout(&root, "wt2", false);
+        std::os::unix::fs::symlink(real.join(IMAGE_NAME), wt2.join(IMAGE_NAME)).unwrap();
+        let book2 = wt2.join("books/kestrel/foo.lisp");
+        std::fs::write(&book2, "").unwrap();
+        assert_eq!(p.resolve(&book2).unwrap(), real.join(IMAGE_NAME));
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 
     /// An explicit request must not bypass the allowlist.

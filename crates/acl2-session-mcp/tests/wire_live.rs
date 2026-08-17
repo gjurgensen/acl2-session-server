@@ -8,7 +8,8 @@
 //! the fixes (compact admitted records, `prove_ms`) are shapes a refactor
 //! could silently regrow without any core test noticing. These pin them.
 //!
-//! Ignored by default because they need a real ACL2. Run with:
+//! Ignored by default because they need a real ACL2 -- all but the handshake
+//! test, which never opens a session and so runs in CI. Run with:
 //!
 //! ```text
 //! ACL2=/path/to/saved_acl2 cargo test -p acl2-session-mcp --test wire_live \
@@ -183,14 +184,31 @@ fn clean_admitted_records_are_compact_and_unease_surfaces() {
     let admitted = o["admitted"].as_array().expect("admitted array");
     assert_eq!(admitted.len(), 4, "{o}");
 
-    let base = ["index", "line_start", "line_end", "elapsed_ms", "output_ref", "output_lines"];
-    for rec in &admitted[..3] {
-        let keys: Vec<&str> = rec.as_object().unwrap().keys().map(String::as_str).collect();
-        let mut sorted = keys.clone();
+    // `in-package` writes nothing, so `names` is absent from it and present
+    // on the two definers: the same omit-when-empty rule the unease fields
+    // follow, which is what keeps a preamble of include-books cheap.
+    let want: [&[&str]; 3] = [
+        &["line_start", "output_ref"],
+        &["line_start", "names", "output_ref"],
+        &["line_start", "names", "output_ref"],
+    ];
+    for (rec, want) in admitted[..3].iter().zip(want) {
+        let mut sorted: Vec<&str> =
+            rec.as_object().unwrap().keys().map(String::as_str).collect();
         sorted.sort_unstable();
-        let mut want = base.to_vec();
-        want.sort_unstable();
-        assert_eq!(sorted, want, "a clean record is exactly the six fields: {rec}");
+        assert_eq!(sorted, want, "a clean record carries only what it has: {rec}");
+    }
+    assert_eq!(admitted[1]["names"][0].as_str(), Some("w-app"), "{}", admitted[1]);
+    assert_eq!(
+        admitted[2]["names"][0].as_str(),
+        Some("w-app-assoc"),
+        "the name is read from the source, not the world: {}",
+        admitted[2]
+    );
+    // These forms run in single-digit milliseconds, so the threshold holds
+    // them back; a book slow enough to notice is what turns it on.
+    for rec in &admitted[..3] {
+        assert!(rec.get("elapsed_ms").is_none(), "a fast form reports no time: {rec}");
     }
     let hinted = &admitted[3];
     assert_eq!(
@@ -207,6 +225,9 @@ fn clean_admitted_records_are_compact_and_unease_surfaces() {
     for rec in admitted {
         assert!(rec.get("inner").is_none(), "inner must not regrow: {rec}");
         assert!(rec.get("time").is_none(), "nor raw time tuples: {rec}");
+        assert!(rec.get("index").is_none(), "nor the form index: {rec}");
+        assert!(rec.get("output_lines").is_none(), "nor the log's length: {rec}");
+        assert!(rec.get("line_end").is_none(), "nor the closing line: {rec}");
         assert!(rec.get("output_ref").is_some(), "every record keeps its handle");
     }
     s.tool("acl2_session_close", json!({"session_id": sid}));
@@ -462,7 +483,10 @@ fn a_changed_dependency_reaches_the_wire() {
     let stale = o["stale_includes"].as_array().expect("named on the wire");
     assert_eq!(stale.len(), 1, "{o}");
     assert!(stale[0]["path"].as_str().unwrap_or("").ends_with("wd.lisp"), "{o}");
-    assert_eq!(stale[0]["unit"].as_u64(), Some(1), "attributed to the include: {o}");
+    // Line 2 is the `include-book`, and a line is what `through_line` takes:
+    // the reply hands back the number you would act on.
+    assert_eq!(stale[0]["line"].as_u64(), Some(2), "attributed to the include: {o}");
+    assert!(stale[0].get("unit").is_none(), "and not as a form index: {o}");
     assert_eq!(o["rolled_back"].as_u64(), Some(0), "and nothing undone: {o}");
 
     // By default it folds into the diff.
@@ -578,4 +602,47 @@ fn a_failed_evals_envelope_arrives_on_the_wire() {
     assert_eq!(r["outcome"].as_str(), Some("ok"), "{r}");
     assert!(r.get("failed").is_none(), "success carries no envelope: {r}");
     s.tool("acl2_session_close", json!({"session_id": sid}));
+}
+
+/// The handshake identifies *this* server.
+///
+/// `ServerInfo::default()` fills `server_info` from rmcp's own build
+/// environment -- its `env!`s expand inside that crate -- so leaving the field
+/// alone introduces us to every client as "rmcp <its version>". The handshake
+/// is where a client records what it is talking to, which is the question the
+/// build stamp exists to answer, and nothing else in this suite looks at it.
+///
+/// Needs no ACL2: the image is validated as a path and no session is opened.
+#[test]
+fn the_handshake_names_this_server() {
+    let dir = scratch("handshake");
+    let image = dir.join("saved_acl2");
+    std::fs::write(&image, "").expect("dummy image");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_acl2-session-mcp"))
+        .args(["--default", image.to_str().expect("utf-8 image path")])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn server");
+    let mut stdin = child.stdin.take().expect("child stdin");
+    let mut out = BufReader::new(child.stdout.take().expect("child stdout"));
+    let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                     "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                                "clientInfo": {"name": "wire-live", "version": "0"}}});
+    writeln!(stdin, "{msg}").expect("write initialize");
+    stdin.flush().expect("flush");
+
+    let mut line = String::new();
+    out.read_line(&mut line).expect("initialize reply");
+    let v: Value = serde_json::from_str(&line).expect("json reply");
+    let info = &v["result"]["serverInfo"];
+    assert_eq!(info["name"].as_str(), Some(env!("CARGO_PKG_NAME")),
+               "rmcp's identity, not ours: {v}");
+    assert!(info["version"].as_str().is_some_and(|s| s.starts_with(env!("CARGO_PKG_VERSION"))),
+            "the version carries our build stamp: {v}");
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
 }

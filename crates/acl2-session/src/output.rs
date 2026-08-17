@@ -105,11 +105,26 @@ fn is_goal_header(line: &str) -> bool {
     if t.is_empty() || t.len() > 40 {
         return false;
     }
-    let lower = t.to_ascii_lowercase();
+    // A forcing round prefixes the name -- `[1]Goal`, `[2]Subgoal *1/3'`. That
+    // bracket is part of what `tilde-@-clause-id-phrase` prints, so it is part
+    // of the `goal` a checkpoint hands the caller, and a slice that did not
+    // accept it returned nothing for exactly the name it had just supplied.
+    let bare = match t.strip_prefix('[') {
+        None => t,
+        Some(rest) => match rest.split_once(']') {
+            Some((round, after))
+                if !round.is_empty() && round.bytes().all(|b| b.is_ascii_digit()) =>
+            {
+                after
+            }
+            _ => return false,
+        },
+    };
+    let lower = bare.to_ascii_lowercase();
     if !(lower.starts_with("goal") || lower.starts_with("subgoal")) {
         return false;
     }
-    t.chars()
+    bare.chars()
         .all(|c| c.is_ascii_alphanumeric() || " *'/.".contains(c))
 }
 
@@ -393,6 +408,35 @@ Q.E.D.";
         assert!(!is_goal_header("Goal of NIL, see :DOC nil-goal"));
         assert!(!is_goal_header("(implies (not (consp x)) (not x))"));
         assert!(!is_goal_header(""));
+    }
+
+    /// Forcing produces rounds, and their goals carry the round in brackets.
+    /// These names reach a caller through a checkpoint's `goal`, so failing to
+    /// match them makes `mode:"goal"` empty for the name the envelope gave.
+    #[test]
+    fn a_forcing_round_goal_is_a_header() {
+        assert!(is_goal_header("[1]Goal"));
+        assert!(is_goal_header("[1]Subgoal *1/3''"));
+        assert!(is_goal_header("[12]Subgoal 1.2"));
+        // Still strict: a bracket is only a round when it holds digits and
+        // what follows is itself a goal name.
+        assert!(!is_goal_header("[1]Nonsense"));
+        assert!(!is_goal_header("[a]Goal"));
+        assert!(!is_goal_header("[]Goal"));
+        assert!(!is_goal_header("[1Goal"));
+        assert!(!is_goal_header("[1]A goal of NIL, has been generated!"));
+    }
+
+    #[test]
+    fn a_forcing_round_goal_slices() {
+        let mut s = store();
+        let r = s
+            .put("[1]Goal\n(equal (na x) x)\n\n[1]Subgoal *1/2\n(consp x)\nQ.E.D.\n")
+            .unwrap();
+        let got = s.get(&r, Slice::Goal { name: "[1]Goal".into() }).unwrap();
+        assert_eq!(got.text, "[1]Goal\n(equal (na x) x)");
+        let got = s.get(&r, Slice::Goal { name: "[1]Subgoal *1/2".into() }).unwrap();
+        assert!(got.text.ends_with("Q.E.D."));
     }
 
     /// Two stores must share neither a key space nor a directory: one session

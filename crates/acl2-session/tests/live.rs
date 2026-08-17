@@ -19,7 +19,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use acl2_session::{SyncOptions,
-    Book, Budget, Health, NameKind, Resumed, Session, SessionControl, Slice, Status, SyncMode,
+    Book, Budget, Health, NameKind, Origin, Resumed, Session, SessionControl, Slice, Status,
+    SyncMode,
     WorldChange,
 };
 
@@ -590,6 +591,19 @@ fn describe_answers_about_names_and_says_where_they_came_from() {
     let p = m.book_path.expect("and it resolves to a file");
     assert!(p.is_file(), "which exists on disk: {}", p.display());
 
+    // Origins, which the book alone cannot distinguish. `symbolp` has no
+    // book, exactly like `alpha` -- and reading that as "defined in this
+    // file" is what hover did until this was measured, while go-to-definition
+    // correctly found nothing. The two must agree.
+    assert_eq!(f.origin, Origin::File, "alpha came from this file");
+    assert_eq!(t.origin, Origin::File);
+    assert_eq!(m.origin, Origin::Book, "b* came from an included book");
+    let s = b.describe("symbolp", D).expect("query").expect("symbolp is known");
+    assert_eq!(s.origin, Origin::Builtin, "symbolp is ACL2's, not this file's");
+    assert!(s.book.is_none(), "and like a local name, it reports no book");
+    let ba = b.describe("binary-append", D).expect("query").expect("known");
+    assert_eq!(ba.origin, Origin::Builtin);
+
     // Every hover over a variable or a comment word lands here.
     assert!(b.describe("no-such-name-at-all", D).expect("query").is_none());
     assert!(b.describe("(", D).expect("query").is_none(), "and unsafe tokens too");
@@ -599,6 +613,63 @@ fn describe_answers_about_names_and_says_where_they_came_from() {
     let o = b.sync(None, D).expect("resync");
     assert_eq!((o.reused, o.admitted.len()), (4, 0), "the prefix is untouched");
     assert_eq!(b.health(D), Health::Ready);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The census: every name in the world, attributed to the book that defines it.
+///
+/// The assertion that matters is the attribution, not the count. A name from
+/// an included book must carry that book, a name this file introduced must
+/// carry none, and ACL2's own must carry none either -- and getting the
+/// marker orientation backwards would put bstar's contents under whatever was
+/// included before it, which on a small book is invisible unless checked.
+#[test]
+#[ignore = "needs ACL2"]
+fn the_census_attributes_every_name_to_its_book() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("census");
+    let book = dir.join("c.lisp");
+    write(&book, &[
+        "(in-package \"ACL2\")",
+        "(include-book \"std/util/bstar\" :dir :system)",
+        ALPHA,
+        "(defthm alpha-of-nil (equal (alpha nil) nil))",
+    ]);
+    let mut b = Book::open(&acl2, &book).expect("open");
+    assert!(b.sync(None, D).expect("sync").failed.is_none());
+
+    let c = b.census(D).expect("census");
+    assert!(c.len() > 5_000, "a real world holds thousands of names, got {}", c.len());
+
+    let find = |n: &str| c.iter().find(|e| e.name == n);
+
+    // This file's own: known, and attributed to no book.
+    let a = find("alpha").expect("alpha is in the census");
+    assert_eq!(a.kind, NameKind::Function);
+    assert!(a.book.is_none(), "a name from this file has no book: {:?}", a.book);
+    assert_eq!(find("alpha-of-nil").expect("the theorem too").kind, NameKind::Theorem);
+
+    // From the included book, with that book named -- the orientation check.
+    let m = find("b*").expect("b* is in the census");
+    assert_eq!(m.kind, NameKind::Macro);
+    let bk = m.book.as_deref().expect("b* carries its book");
+    assert!(bk.contains("bstar.lisp"), "attributed to bstar, got {bk}");
+
+    // A generated name from that book -- the tier-4 case the census exists
+    // for. It is in no source text, and still lands in the right book.
+    let g = find("patbind-unless-casematch").expect("a generated name is censused");
+    assert!(g.book.as_deref().is_some_and(|b| b.contains("bstar.lisp")),
+            "a generated name belongs to the book that generated it: {:?}", g.book);
+
+    // ACL2's own: present, and attributed to nothing.
+    let ba = find("binary-append").expect("built-ins are censused");
+    assert!(ba.book.is_none(), "ACL2's own names have no book: {:?}", ba.book);
+
+    // Every book named must be one we can actually resolve to a file, or the
+    // attribution is decorative.
+    let with_books = c.iter().filter(|e| e.book.is_some()).count();
+    assert!(with_books > 100, "the included book contributes many names, got {with_books}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1079,6 +1150,99 @@ fn inner_names_are_complete_and_the_failing_event_carries_detail() {
     }
 }
 
+/// What a form is called, against the two sources that could say.
+///
+/// Pins the trade-off rather than one side of it. The obvious question --
+/// why read the source when ACL2 knows what it admitted? -- has a real
+/// answer in both directions, and only measurement settles which case is
+/// which, so the cases are measured here.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_forms_name_is_acl2s_record_read_through_the_source() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("names");
+    let file = dir.join("n.lisp");
+    let book = concat!(
+        "(in-package \"ACL2\")\n",
+        "(include-book \"std/util/top\" :dir :system)\n",
+        "(defun p-plain (x) (if (consp x) (p-plain (cdr x)) 0))\n",
+        "(defun-inline p-inl (x) (nfix x))\n",
+        "(define p-define ((x natp)) :returns (r natp) (nfix x))\n",
+        "(defmacro p-mac (x) x)\n",
+        "(defconst *p-const* 17)\n",
+        "(std::defredundant :names (p-plain))\n",
+        "(make-event '(defthm p-me (equal (car (cons a b)) a)))\n",
+        "(mutual-recursion\n",
+        "  (defun p-f (x) (if (consp x) (p-g (cdr x)) 0))\n",
+        "  (defun p-g (x) (if (consp x) (p-f (cdr x)) 1)))\n",
+        "(make-event '(mutual-recursion\n",
+        "  (defun p-mf (x) (if (consp x) (p-mg (cdr x)) 0))\n",
+        "  (defun p-mg (x) (if (consp x) (p-mf (cdr x)) 1))))\n",
+        "(std::deflist p-natlist (x) (natp x) :true-listp t :elementp-of-nil nil)\n",
+    );
+    std::fs::write(&file, book).unwrap();
+    let mut b = Book::open(&acl2, &file).unwrap();
+    let o = b.sync(None, Duration::from_secs(600)).unwrap();
+    assert!(o.failed.is_none(), "{:?}", o.failed);
+    let at = |n: usize| {
+        o.admitted.iter().find(|u| u.line_start == n).unwrap_or_else(|| panic!("no form at {n}"))
+    };
+
+    // Both sources agree, and either would have done.
+    assert_eq!(at(3).display_names(), ["p-plain"]);
+
+    // ACL2 vetoes the scan, case one: the written name is not the admitted
+    // one. `defun-inline` writes `p-inl` and admits `p-inl$inline`.
+    let u = at(4);
+    assert_eq!(u.names, ["p-inl"]);
+    assert_eq!(u.display_names(), ["p-inl$inline"]);
+
+    // ACL2 vetoes the scan, case two: `defredundant` puts a keyword where
+    // every other definer puts a name, so the scan has nothing to offer and
+    // must not be believed. (The keyword itself is refused at the scan.)
+    let u = at(8);
+    assert!(u.names.is_empty(), "a keyword is never a name: {:?}", u.names);
+    assert_eq!(u.display_names(), ["p-plain"]);
+
+    // The scan says nothing at all, and ACL2 is naming rather than
+    // generating: its record is the answer.
+    let u = at(9);
+    assert!(u.names.is_empty());
+    assert_eq!(u.display_names(), ["p-me"]);
+
+    // ACL2 records a `mutual-recursion` as a single event, so the second
+    // half of the clique is nowhere in the event data. The world has it.
+    let u = at(10);
+    assert_eq!(u.inner_total, 1, "one event for the pair: {:?}", u.inner);
+    assert_eq!(u.clique, ["p-g"], "the world supplies the half ACL2 did not");
+    assert_eq!(u.display_names(), ["p-f", "p-g"]);
+
+    // Which is what makes a clique the *text* cannot see reportable: nothing
+    // lexical survives a quote, so this form is named from the world alone.
+    let u = at(13);
+    assert!(u.names.is_empty(), "the defuns are inside a quote: {:?}", u.names);
+    assert_eq!(u.inner_total, 1);
+    assert_eq!(u.display_names(), ["p-mf", "p-mg"]);
+
+    // A singly-recursive function's clique is itself, which `inner` already
+    // named, so an ordinary book carries nothing here.
+    assert!(at(3).clique.is_empty(), "nothing to add: {:?}", at(3).clique);
+
+    // ACL2 tracks no event data for these kinds at all, so an empty record
+    // means "not tracked", never "defined nothing".
+    assert_eq!(at(6).inner_total, 0);
+    assert_eq!(at(6).display_names(), ["p-mac"]);
+    assert_eq!(at(7).display_names(), ["*p-const*"]);
+
+    // And the written name wins on a generator, where ACL2's list is both
+    // huge and ordered newest-first -- `p-natlist` lands 34th of 36, so a
+    // budget spent on that list would never reach it.
+    let u = at(16);
+    assert!(u.inner_total > 20, "a generator: {} events", u.inner_total);
+    assert_eq!(u.display_names(), ["p-natlist"]);
+    assert_eq!(at(5).display_names(), ["p-define"], "nor the returns-lemma");
+}
+
 /// A failed eval carries the same envelope a sync failure does.
 ///
 /// The experimental `thm` is what eval exists for, and a failed experiment
@@ -1429,6 +1593,86 @@ fn skip_proofs_admits_without_proving_and_says_so() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A form's names are scraped as it is admitted, in full `:pr` detail.
+///
+/// Eagerly, and that is the point: a session serialises on one ACL2, so a
+/// question asked during a proof cannot reach the prover -- which is exactly
+/// when an editor wants to describe an earlier form. The scrape is taken
+/// while the form is in hand and served from memory afterwards.
+#[test]
+#[ignore = "needs ACL2"]
+fn admitting_a_form_scrapes_what_the_world_knows() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("rules");
+    let file = dir.join("r.lisp");
+    write(&file, &["(in-package \"ACL2\")",
+                   "(defun sc-app (x y) (if (endp x) y (cons (car x) (sc-app (cdr x) y))))",
+                   "(defthm true-listp-of-sc-app\n  (implies (true-listp y) (true-listp (sc-app x y))))",
+                   "(defthm sc-fc\n  (implies (consp x) (not (equal x nil)))\n  :rule-classes ((:forward-chaining :trigger-terms ((consp x)))))"]);
+    let mut b = Book::open(&acl2, &file).unwrap();
+    let o = b.sync(None, D).expect("sync");
+    assert!(o.failed.is_none(), "{:?}", o.failed.as_ref().map(|f| &f.error_line));
+
+    // A function: its derived runes, with the definition body deliberately
+    // absent and the type-prescription's corollary present.
+    let f = b.rules_for("sc-app").expect("the function was scraped");
+    assert_eq!(f.symbol_class.as_deref(), Some(":ideal"), "{f:?}");
+    assert!(f.justification.as_deref().unwrap_or("").contains("acl2-count"),
+            "the measure is recorded: {:?}", f.justification);
+    assert!(f.formals.as_deref().unwrap_or("").contains('x'), "{:?}", f.formals);
+    let classes: Vec<&str> = f.runes.iter().filter_map(|r| r.class()).collect();
+    for want in [":definition", ":type-prescription", ":executable-counterpart", ":induction"] {
+        assert!(classes.contains(&want), "every rune is listed, got {classes:?}");
+    }
+    let def = f.runes.iter().find(|r| r.class() == Some(":definition")).unwrap();
+    assert_eq!(def.enabled, Some(true));
+    assert!(def.field(":rhs").is_none(), "the body is not stored: {def:?}");
+    assert!(def.field(":clique").is_some(), "but the rest of the rule is: {def:?}");
+    let tp = f.runes.iter().find(|r| r.class() == Some(":type-prescription")).unwrap();
+    assert!(tp.field(":corollary").unwrap_or("").contains("sc-app"),
+            "the corollary the user never wrote: {tp:?}");
+
+    // A plain theorem: the derived rewrite rule, which is the interesting part.
+    let t = b.rules_for("true-listp-of-sc-app").expect("scraped");
+    let rw = t.runes.iter().find(|r| r.class() == Some(":rewrite")).expect("a rewrite rune");
+    assert!(rw.field(":lhs").unwrap_or("").contains("true-listp (sc-app"),
+            "the derived lhs: {rw:?}");
+    assert_eq!(rw.field(":subclass"), Some("backchain"), "{rw:?}");
+
+    // A forward-chaining rule: its trigger terms.
+    let fc = b.rules_for("sc-fc").expect("scraped");
+    let r = fc.runes.iter().find(|r| r.class() == Some(":forward-chaining")).expect("fc rune");
+    assert!(r.field(":trigger").unwrap_or("").contains("consp"), "{r:?}");
+
+    // The whole point of scraping eagerly: this answers while ACL2 is busy.
+    // Start a proof that will not finish inside the deadline, leave it
+    // running, and ask anyway.
+    write(&file, &["(in-package \"ACL2\")",
+                   "(defun sc-app (x y) (if (endp x) y (cons (car x) (sc-app (cdr x) y))))",
+                   "(defthm true-listp-of-sc-app\n  (implies (true-listp y) (true-listp (sc-app x y))))",
+                   "(defthm sc-fc\n  (implies (consp x) (not (equal x nil)))\n  :rule-classes ((:forward-chaining :trigger-terms ((consp x)))))",
+                   FIB,
+                   "(thm (equal (fib 44) 701408733))"]);
+    let o = b.sync(None, Duration::from_secs(3)).expect("slow sync");
+    assert!(o.failed.as_ref().is_some_and(|f| f.still_running),
+            "the grind must still be running for this to test anything");
+    assert!(b.session().is_running(), "ACL2 is busy");
+    let f = b.rules_for("sc-app").expect("served from memory while ACL2 proves");
+    assert!(f.runes.iter().any(|r| r.class() == Some(":definition")), "{f:?}");
+    let d = b.describe("sc-app", Duration::from_secs(2))
+        .expect("describe must not need the prover")
+        .expect("and must find it");
+    assert!(d.formals.is_some(), "hover answers mid-proof: {d:?}");
+    assert!(b.interrupt().expect("interrupt").ok);
+
+    // Rolling the forms back takes their names with them.
+    write(&file, &["(in-package \"ACL2\")"]);
+    b.sync(None, D).expect("truncating sync");
+    assert!(b.rules_for("sc-app").is_none(), "a rolled-back name is forgotten");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A crashed ACL2 must read as dead, not busy forever.
 ///
 /// `is_running` is bookkeeping; a child that dies mid-form leaves it set. The
@@ -1713,6 +1957,185 @@ fn the_deadline_bounds_the_whole_call() {
     let o = b.sync(None, D).expect("continue");
     assert!(o.failed.is_none());
     assert_eq!(o.reused + o.admitted.len(), 501, "the book completes across calls");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The doc index: every topic's name and one-line summary, from the world.
+///
+/// The assertion that matters is the *shape of what comes back*: a summary is
+/// raw xdoc markup, complete with `@(see …)` and `@('…')` directives, because
+/// the machinery that would expand it is not in the world.
+/// A renderer resolves those; shipping them unrendered is the design.
+#[test]
+#[ignore = "needs ACL2"]
+fn the_doc_index_carries_raw_markup() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("docs");
+    let book = dir.join("d.lisp");
+    write(&book, &[
+        "(in-package \"ACL2\")",
+        "(include-book \"std/util/bstar\" :dir :system)",
+        ALPHA,
+    ]);
+    let mut b = Book::open(&acl2, &book).expect("open");
+    assert!(b.sync(None, D).expect("sync").failed.is_none());
+
+    let topics = b.doc_index(D).expect("doc index");
+    assert!(topics.len() > 5, "an included book brings topics, got {}", topics.len());
+
+    let m = topics
+        .iter()
+        .find(|t| t.name == "patbind-unless-casematch")
+        .expect("a topic from the included book");
+    assert!(m.short.contains("binder"), "its summary: {:?}", m.short);
+    assert!(
+        m.short.contains("@(see") || m.short.contains("@('"),
+        "and it arrives as raw markup, unexpanded: {:?}",
+        m.short
+    );
+    assert!(!m.short.contains('\n'), "wrapped summaries are rejoined: {:?}", m.short);
+    assert!(!m.short.starts_with('"'), "and unquoted: {:?}", m.short);
+
+    // Names with no summary are dropped rather than carried as "nil".
+    assert!(topics.iter().all(|t| t.short.to_lowercase() != "nil"));
+
+    // The full topic, transported verbatim. The assertion that matters is
+    // that the *line structure survives*: xdoc code blocks depend on it, and
+    // the markup contains `~x0` and `~%`, which fmt would have eaten as its
+    // own directives. princ$ is what makes that true.
+    let long = b
+        .doc_topic("patbind-unless-casematch", D)
+        .expect("query")
+        .expect("this topic is documented");
+    assert!(long.contains("@({"), "it has a code block: {long}");
+    assert!(long.lines().count() > 3, "whose lines are preserved: {long}");
+    assert!(long.contains("~x0"), "and fmt directives inside it survive verbatim");
+    assert!(long.contains("<p>"), "along with its block tags");
+
+    // Case and package are the caller's problem, not the world's.
+    assert!(b.doc_topic("PATBIND-UNLESS-CASEMATCH", D).expect("query").is_some());
+    assert!(b.doc_topic("acl2::patbind-unless-casematch", D).expect("query").is_some());
+    assert!(b.doc_topic("no-such-topic-at-all", D).expect("query").is_none());
+    assert!(b.doc_topic("(", D).expect("query").is_none(), "and unsafe tokens too");
+
+    // A query must leave the prefix exactly as it was.
+    let o = b.sync(None, D).expect("resync");
+    assert_eq!((o.reused, o.admitted.len()), (3, 0), "the prefix is untouched");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A replacement that fails to start must not leave the session it was
+/// replacing in place.
+///
+/// `Session::start` adopts the stream -- bumping the epoch that tags every
+/// reader -- before its last two failure paths, so a failure there orphans
+/// the reader of the session still held. That ACL2 stays alive and goes on
+/// printing into a stream nothing reads: permanently mute, and indisting-
+/// uishable from merely slow. Kept, `health` would spend its whole deadline
+/// to report a healthy ACL2 unresponsive for our own bookkeeping.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_failed_rebuild_does_not_keep_a_deaf_session() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("failed-rebuild");
+
+    // A wrapper we can break underneath the book. Both versions spawn, so
+    // the failure lands past the adopt rather than at `spawn`, which is the
+    // only interesting case -- `spawn` fails before anything is claimed.
+    let wrapper = dir.join("acl2-wrapper");
+    let good = format!("#!/bin/sh\nexec {} \"$@\"\n", acl2.display());
+    std::fs::write(&wrapper, &good).expect("write wrapper");
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    let book = dir.join("demo.lisp");
+    write(&book, &["(in-package \"ACL2\")", ALPHA]);
+    let mut b = Book::open(&wrapper, &book).expect("open");
+    b.sync(None, D).expect("sync");
+    assert_eq!(b.health(D), Health::Ready, "the wrapper runs a real ACL2");
+
+    // Now the image exits the instant it starts: the spawn still succeeds, so
+    // `start` gets as far as adopting the stream and then fails.
+    std::fs::write(&wrapper, "#!/bin/sh\nexit 1\n").expect("break wrapper");
+    let bytes = std::fs::read(&book).expect("read book");
+    let e = b
+        .rebuild(&bytes, 0, &Budget::new(D))
+        .expect_err("a replacement that exits at once cannot start");
+    eprintln!("rebuild failed as expected: {e}");
+
+    // Dead, not Unresponsive: the distinction is the whole point, since the
+    // first is true and the second blames ACL2. And reported without waiting,
+    // where an orphaned-but-alive session costs a full ping deadline.
+    let t = std::time::Instant::now();
+    assert_eq!(b.health(Duration::from_secs(30)), Health::Dead,
+               "a session whose stream was adopted away is gone, not slow");
+    assert!(t.elapsed() < Duration::from_secs(5),
+            "answered from process state, not by waiting: {:?}", t.elapsed());
+
+    // The book recovers on its own: the failed rebuild recorded that it needs
+    // one, so the next sync starts a fresh session once the image works again
+    // -- even though nothing in the file changed.
+    std::fs::write(&wrapper, &good).expect("restore wrapper");
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    b.sync(None, D).expect("a working image brings the book back");
+    assert_eq!(b.health(D), Health::Ready);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The canary for the one extraction that reads ACL2's prose.
+///
+/// `induction.rs` parses the printed narrative because there is nowhere else
+/// to read a scheme from -- it is computed inside a printing function and
+/// dropped. It is written to degrade quietly: a reworded ACL2 yields an empty
+/// result rather than a wrong one. But *empty is also the ordinary answer*,
+/// since most proofs never induct, so nothing downstream can tell "did not
+/// induct" from "can no longer read". The unit tests parse a string frozen in
+/// this file and will stay green through any rewording.
+///
+/// So this is the only thing that would notice. Induction is *forced* with a
+/// hint rather than left to the heuristics, which keeps the test about the
+/// parse rather than about which scheme ACL2 picks today.
+#[test]
+#[ignore = "needs ACL2"]
+fn the_induction_narrative_still_parses() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("induction-canary");
+    let book = dir.join("demo.lisp");
+    write(&book, &["(in-package \"ACL2\")", ALPHA,
+                   "(defthm alpha-is-nil (equal (alpha x) nil) \
+                      :hints ((\"Goal\" :induct (alpha x))))"]);
+    let mut b = Book::open(&acl2, &book).expect("open");
+    let o = b.sync(None, D).expect("sync");
+    assert_eq!(o.admitted.len(), 3, "the hinted theorem is admitted: {o:?}");
+
+    let store = b.output_store();
+    let found = {
+        let g = store.lock().expect("output store");
+        acl2_session::induction::from_output(&g, &o.admitted[2].output_ref).expect("read log")
+    };
+    assert_eq!(found.len(), 1, "one announcement for one induction: {found:#?}");
+    let i = &found[0];
+
+    // Every field, because each one hangs off its own anchor phrase: this is
+    // six separate canaries, and a rewording usually moves only one of them.
+    // Any of these going None is the signal -- ACL2 now prints something this
+    // module cannot read, and `acl2_induction` has quietly stopped answering.
+    assert!(i.goal.is_some() && i.suggested_by.is_some() && i.attribution.is_some()
+                && i.scheme.is_some() && i.justified_by.is_some() && i.subgoals.is_some(),
+            "a field went missing -- the narrative moved: {i:#?}");
+
+    // The three that come from this book rather than from ACL2's English, so
+    // they say the parse found the *right* text and not merely some text.
+    assert_eq!(i.goal.as_deref(), Some("*1"), "{i:#?}");
+    assert_eq!(i.suggested_by.as_deref(), Some("(alpha x)"), "{i:#?}");
+    assert_eq!(i.justified_by.as_deref(), Some("alpha"), "{i:#?}");
+    // The rest are prose or layout, so only their substance is pinned; an
+    // exact match here would fail on cosmetic rewrapping that costs nothing.
+    assert!(i.attribution.as_deref().is_some_and(|a| a.contains("alpha")), "{i:#?}");
+    assert!(i.scheme.as_deref().is_some_and(|s| s.contains("(:p x)")), "{i:#?}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

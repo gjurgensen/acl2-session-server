@@ -12,6 +12,10 @@ import * as vscode from 'vscode';
 
 export const SCHEME = 'acl2-session-output';
 export const EVAL_SCHEME = 'acl2-session-eval';
+// A third: the documentation for whatever name was asked about. Like the
+// eval view it follows nothing, because a topic is something the user opened
+// deliberately and should not vanish when the cursor moves.
+export const DOC_SCHEME = 'acl2-session-doc';
 
 export class OutputView implements vscode.TextDocumentContentProvider {
   private emitter = new vscode.EventEmitter<vscode.Uri>();

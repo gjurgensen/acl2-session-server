@@ -143,8 +143,17 @@ export class DaemonClient extends EventEmitter {
     this.proc.on('error', (e: Error) => this.emit('spawn-error', e));
   }
 
+  /**
+   * `signalCode` as well as `exitCode`, because a process that died from a
+   * signal has no exit code -- `exitCode` stays null and the signal lands in
+   * `signalCode`. Without it a daemon that crashed, or that the OOM killer
+   * took, reads as alive for ever; `killed` does not cover it either, since
+   * that only records that *we* sent a signal, not that anything died. The
+   * cost of getting this wrong is `ensureClient` handing back the corpse
+   * instead of starting a new daemon.
+   */
   get alive(): boolean {
-    return this.proc.exitCode === null && !this.proc.killed;
+    return this.proc.exitCode === null && this.proc.signalCode === null && !this.proc.killed;
   }
 
   /** For last-resort cleanup by a host that is exiting. */
@@ -229,4 +238,60 @@ export class DaemonClient extends EventEmitter {
       this.emit(v.method === 'error' ? 'daemon-error' : v.method, v.params);
     }
   }
+}
+
+/**
+ * Why the prover inducted, recovered from the log.
+ *
+ * A different class of fact from the rest of this file: everything else is
+ * probed out of the world or read from `get-event-data`, and the induction
+ * scheme is *printed* by ACL2 and recorded nowhere. So every field is
+ * optional -- a reworded ACL2 drops one rather than inventing it -- and an
+ * empty list means "nothing recognised", not "no induction".
+ */
+/** One field of a rule, as ACL2 keys it: `:lhs`, `:trigger`, `:corollary`. */
+export interface RuneFieldWire {
+  key: string;
+  value: string;
+}
+
+/** One rune a name introduced, with whatever its rule class carries. */
+export interface RuneWire {
+  rune: string;
+  class?: string;
+  enabled?: boolean;
+  fields: RuneFieldWire[];
+}
+
+/**
+ * What a form actually introduced, beyond what its text says.
+ *
+ * Served from the scrape the daemon took as the form was admitted, so it
+ * needs no prover and arrives during a proof -- which is when a reader is
+ * most likely to be looking at an earlier form.
+ */
+export interface RulesReply {
+  found: boolean;
+  name: string;
+  symbol_class?: string;
+  justification?: string;
+  formals?: string;
+  guard?: string;
+  statement?: string;
+  runes: RuneWire[];
+}
+
+export interface InductionWire {
+  /** The pool name: `*1`, or `*1.1` for an induction beneath one. */
+  goal?: string;
+  /** The induction term from the conjecture, untranslated: `(append x y)`. */
+  suggested_by?: string;
+  /** Which rule suggested it: "the :induction rule binary-append". */
+  attribution?: string;
+  /** The scheme, with `:p` standing for the conjecture. */
+  scheme?: string;
+  /** The function whose admission licenses it, when one does. */
+  justified_by?: string;
+  /** ACL2's own phrasing: "two nontautological subgoals". */
+  subgoals?: string;
 }

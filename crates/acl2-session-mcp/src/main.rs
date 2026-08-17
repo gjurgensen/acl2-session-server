@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use acl2_session::{Book, Health, ImagePolicy, Registry, SessionId, Slice};
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResult, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler, ServiceExt};
 use serde::Deserialize;
 
@@ -162,9 +162,26 @@ struct StatusArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct InductionArgs {
+    session_id: String,
+    /// A handle from a previous reply's `output_ref`. Never construct one:
+    /// the `f` number counts stored submissions, not forms, so an invented
+    /// handle that happens to exist returns some *other* run's log -- an
+    /// eval's, a certification's, or an earlier attempt at the same form --
+    /// and reads as an ordinary answer. An invented one that does not exist
+    /// is rejected, which is the harmless case.
+    output_ref: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct OutputArgs {
     session_id: String,
-    /// A handle from a previous reply's `output_ref`. Never construct one.
+    /// A handle from a previous reply's `output_ref`. Never construct one:
+    /// the `f` number counts stored submissions, not forms, so an invented
+    /// handle that happens to exist returns some *other* run's log -- an
+    /// eval's, a certification's, or an earlier attempt at the same form --
+    /// and reads as an ordinary answer. An invented one that does not exist
+    /// is rejected, which is the harmless case.
     output_ref: String,
     /// `all`, `head`, `tail`, `range`, `find`, or `goal`. Defaults to `tail`.
     ///
@@ -631,9 +648,43 @@ impl Acl2Mcp {
         json(reply)
     }
 
+    #[tool(description = "Why the prover inducted, for a form whose `rules` \
+        include an `:induction` rune -- the scheme it chose, the term that \
+        suggested it, the rule credited, and how many subgoals it produced. \
+        Read from the log, because ACL2 prints the scheme and records it \
+        nowhere: expect fields to be missing rather than wrong, and nothing \
+        at all from an ACL2 that words it differently. Cheap and safe to call \
+        while the session is busy.")]
+    async fn acl2_induction(
+        &self,
+        Parameters(a): Parameters<InductionArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let outputs = self
+            .registry
+            .lock()
+            .map_err(fail)?
+            .outputs_of(&SessionId::from(a.session_id.as_str()))
+            .ok_or_else(|| {
+                fail(format!(
+                    "no session {}; it was never opened, or has been closed",
+                    a.session_id
+                ))
+            })?;
+        let r = acl2_session::OutputRef::from(a.output_ref.as_str());
+        let found = blocking!({
+            let store = outputs.lock().map_err(|e| e.to_string())?;
+            acl2_session::induction::from_output(&store, &r).map_err(|e| e.to_string())
+        })
+        .map_err(fail)?;
+        json(wire::InductionReply {
+            inductions: found.iter().map(wire::induction).collect(),
+        })
+    }
+
     #[tool(description = "Read part of a form's captured output, by handle. The \
-        structured results are a projection: the induction scheme the prover \
-        chose, per-goal rewriting detail, and macro output exist only here. \
+        structured results are a projection: per-goal rewriting detail and \
+        macro output exist only here. For why a proof inducted, prefer \
+        acl2_induction, which reads this same log and returns it as fields. \
         Works immediately even while a sync or eval is blocked on the session.")]
     async fn acl2_output(
         &self,
@@ -687,6 +738,12 @@ impl ServerHandler for Acl2Mcp {
         // `ServerInfo` is non-exhaustive, so it is filled in rather than
         // built with a struct expression.
         let mut info = ServerInfo::default();
+        // The default is `Implementation::from_build_env()`, whose `env!`s
+        // expand inside rmcp -- so leaving it introduces us to every client as
+        // "rmcp 3.1.2". The handshake is the one place a client records what
+        // it is talking to, which is precisely what the build stamp exists to
+        // answer; `OpenReply.server` should not be the only place it appears.
+        info.server_info = Implementation::new(env!("CARGO_PKG_NAME"), SERVER);
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.instructions = Some(
                 "Drives a live ACL2 session anchored to a .lisp file.\n\n\
@@ -802,7 +859,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(2);
         }
     };
-    let service = Acl2Mcp::new(policy).serve(rmcp::transport::stdio()).await?;
-    service.waiting().await?;
+    let server = Acl2Mcp::new(policy);
+    // Kept past the move into `serve`, so the sweep below can still reach the
+    // sessions once the transport is gone.
+    let registry = server.registry.clone();
+    let service = server.serve(rmcp::transport::stdio()).await?;
+    let ended = service.waiting().await;
+
+    // The client is gone and no reply will be read, but every call that can
+    // block on ACL2 runs under `spawn_blocking`, and dropping the runtime
+    // waits for those to finish. A sync parked on its deadline therefore
+    // keeps this process -- and a grinding ACL2 -- alive for the whole
+    // remainder of that deadline, working for nobody. Measured before this
+    // sweep existed: a sync given 600 seconds, disconnected 8 seconds in,
+    // still had both processes running two minutes later.
+    //
+    // Aborting is exactly what `acl2_interrupt` does to unblock a call; here
+    // it is every session at once. The waiter wakes, the blocking task ends,
+    // the runtime finishes dropping, and `Book::drop` kills each child. Taken
+    // whatever ended the transport, since a broken pipe strands a session as
+    // surely as a clean EOF. The editor daemon sweeps at EOF for the same
+    // reason its comment gives: an ACL2 abandoned mid-proof grinds and
+    // allocates unattended, which is how a machine runs out of memory.
+    let controls: Vec<_> = {
+        let reg = registry.lock().unwrap_or_else(|e| e.into_inner());
+        reg.list().into_iter().filter_map(|(id, _, _)| reg.control_of(&id)).collect()
+    };
+    for c in controls {
+        c.request_abort();
+    }
+
+    ended?;
     Ok(())
 }

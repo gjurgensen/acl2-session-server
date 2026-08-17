@@ -186,12 +186,25 @@
         "title": "ACL2: Show Output for Form at Cursor"
       },
       {
+        "command": "acl2-session.certify",
+        "title": "ACL2: Certify Book",
+        "icon": "$(verified)"
+      },
+      {
+        "command": "acl2-session.showDocs",
+        "title": "ACL2: Show Documentation for Name at Cursor"
+      },
+      {
         "command": "acl2-session.showPanel",
         "title": "ACL2: Show Panel"
       },
       {
         "command": "acl2-session.gotoFrontier",
         "title": "ACL2: Go to Frontier"
+      },
+      {
+        "command": "acl2-session.gotoAttention",
+        "title": "ACL2: Go to Next Attention Point"
       }
     ],
     "configuration": {
@@ -237,6 +250,18 @@
           "type": "boolean",
           "default": true,
           "description": "Highlight ACL2's output log: goal headers, errors and Q.E.D. as markers, and the terms inside goals, rune lists and `pe` forms as Lisp. Best effort -- the log is prose with Lisp embedded in it, so a misread is possible; off, the log is plain text."
+        },
+        "acl2-session.termWidth": {
+          "type": "number",
+          "default": 60,
+          "minimum": 20,
+          "description": "Maximum width, in characters, that terms in the panel are laid out to. The pane's own width is used when it is narrower; this is a ceiling, not a target. ACL2 prints for a 77-column terminal, so a wide pane would otherwise leave every term on one long line."
+        },
+        "acl2-session.certifyJobs": {
+          "type": "integer",
+          "default": 4,
+          "minimum": 1,
+          "description": "Parallel jobs for cert.pl (-j) when certifying."
         }
       }
     },
@@ -251,6 +276,11 @@
           "command": "acl2-session.stop",
           "when": "editorLangId == acl2 && acl2Session.active",
           "group": "navigation@1"
+        },
+        {
+          "command": "acl2-session.certify",
+          "when": "editorLangId == acl2 && acl2Session.active",
+          "group": "navigation@2"
         }
       ]
     },
@@ -260,6 +290,73 @@
         "key": "ctrl+alt+a",
         "mac": "cmd+alt+a",
         "when": "editorLangId == acl2"
+      },
+      {
+        "command": "acl2-session.interrupt",
+        "key": "ctrl+alt+i",
+        "mac": "cmd+alt+i",
+        "when": "editorLangId == acl2"
+      },
+      {
+        "command": "acl2-session.targetAtCursor",
+        "key": "ctrl+alt+n",
+        "mac": "cmd+alt+n",
+        "when": "editorLangId == acl2"
+      },
+      {
+        "command": "acl2-session.retractToCursor",
+        "key": "ctrl+alt+u",
+        "mac": "cmd+alt+u",
+        "when": "editorLangId == acl2"
+      },
+      {
+        "command": "acl2-session.clearTarget",
+        "key": "ctrl+alt+b",
+        "mac": "cmd+alt+b",
+        "when": "editorLangId == acl2"
+      },
+      {
+        "command": "acl2-session.showPanel",
+        "key": "ctrl+alt+p",
+        "mac": "cmd+alt+p",
+        "when": "editorLangId == acl2"
+      },
+      {
+        "command": "acl2-session.showConsole",
+        "key": "ctrl+alt+c",
+        "mac": "cmd+alt+c",
+        "when": "editorLangId == acl2"
+      },
+      {
+        "command": "acl2-session.evalSelection",
+        "key": "ctrl+alt+e",
+        "mac": "cmd+alt+e",
+        "when": "editorLangId == acl2"
+      },
+      {
+        "command": "acl2-session.showOutput",
+        "key": "ctrl+alt+o",
+        "mac": "cmd+alt+o",
+        "when": "editorLangId == acl2"
+      },
+      {
+        "command": "acl2-session.gotoFrontier",
+        "key": "ctrl+alt+r",
+        "mac": "cmd+alt+r",
+        "when": "editorLangId == acl2"
+      },
+      {
+        "command": "acl2-session.gotoAttention",
+        "key": "ctrl+alt+g",
+        "mac": "cmd+alt+g",
+        "when": "editorLangId == acl2"
+      }
+    ],
+    "taskDefinitions": [
+      {
+        "type": "acl2",
+        "required": [],
+        "properties": {}
       }
     ]
   },

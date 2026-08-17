@@ -209,6 +209,24 @@ assert(dhere.how === 'definer', 'reported as exact, since the name is written th
 const dnone = await c.request('definition', { book: opened.book, name: 'not-a-name-here' });
 assert(dnone.available && !dnone.found, 'an unknown token has no definition');
 
+// rules: what the form introduced, which is mostly what its author never
+// wrote. Served from the scrape taken at admission, so unlike describe it
+// has no busy case to distinguish -- it never asks the prover anything.
+const ru = await c.request('rules', { book: opened.book, name: 'alpha' });
+assert(ru.found, 'rules finds a name from this file');
+assert(ru.formals === '(x)', 'and carries its signature');
+const classes = (ru.runes ?? []).map((r) => r.class);
+assert(classes.includes(':definition'), 'a defun introduces a definition rune');
+assert(classes.includes(':induction'), 'and an induction rune it never wrote');
+const defRune = ru.runes.find((r) => r.class === ':definition');
+assert(defRune.enabled === true, 'enabled is reported, since a disabled rule explains a lot');
+const defKeys = defRune.fields.map((f) => f.key);
+assert(!defKeys.includes(':rhs'), 'the body is not carried -- it is in the buffer');
+assert(defKeys.includes(':clique'), 'but the rest of the rule is');
+
+const rnone = await c.request('rules', { book: opened.book, name: 'binary-append' });
+assert(!rnone.found, 'a name this file never introduced is not ours to explain');
+
 const closed = await c.request('close', { book: opened.book });
 assert(closed.closed === true, 'close closes');
 c.dispose();

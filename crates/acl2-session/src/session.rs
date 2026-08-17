@@ -35,6 +35,10 @@ const INTERRUPT_TRIES: usize = 4;
 /// condvar and are notified per append.
 const READER_POLL: Duration = Duration::from_millis(500);
 
+/// How long EOF waits for a dying child to be reaped before deciding what
+/// to call the death. See `await_completion`.
+const EOF_GRACE: Duration = Duration::from_millis(250);
+
 /// How much of the in-flight output a lock-free status snapshot copies.
 /// Bounds the copy, not the stream; the full text is in the capture.
 const SNAPSHOT_TAIL: usize = 16384;
@@ -516,12 +520,14 @@ impl Session {
         // Say which program failed. Bare "No such file or directory" here is
         // indistinguishable from the *book* path being wrong, which is the
         // other thing that produces it.
-        let child = cmd.spawn().map_err(|e| {
+        // Guarded from here: everything below can still fail, and until the
+        // `Session` exists nothing else would kill this child.
+        let child = SpawnedChild(Some(cmd.spawn().map_err(|e| {
             io::Error::new(
                 e.kind(),
                 format!("cannot start ACL2 at {}: {e}", acl2.display()),
             )
-        })?;
+        })?));
         // Both of these matter, and the second is easy to miss: `Command`
         // *owns* the three Stdio clones until it drops, and this function
         // does not return until the startup handshake resolves. Held here,
@@ -552,7 +558,7 @@ impl Session {
         };
 
         let mut s = Session {
-            child,
+            child: child.into_inner(),
             writer,
             cwd,
             tmpdir,
@@ -819,6 +825,16 @@ impl Session {
         let end = match self.control.wait_for_marker(done.as_bytes(), from, deadline) {
             WaitEnd::Found(end) => end,
             WaitEnd::Eof => {
+                // EOF is authoritative about the bytes; which *explanation*
+                // to give needs a moment's grace. A child killed a
+                // millisecond ago has closed its descriptors but may not be
+                // reaped yet, and reporting "the terminal closed while the
+                // process survives" for an ordinary crash is worse than
+                // waiting a few tens of milliseconds to be sure.
+                let grace = Instant::now();
+                while self.alive() && grace.elapsed() < EOF_GRACE {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
                 // No more bytes are ever coming, so the marker cannot arrive
                 // and "still running" would be a permanent lie -- reported
                 // instantly on every resume, since the EOF short-circuits the
@@ -958,8 +974,50 @@ impl Session {
     }
 }
 
-impl Drop for Session {
+/// Owns a spawned ACL2 until the [`Session`] that will kill it exists.
+///
+/// `std::process::Child` deliberately does *not* kill on drop, and `start`
+/// does fallible work between the spawn and the struct -- a temp directory,
+/// a reader thread. An early return there would leave a resident image, a
+/// few hundred megabytes of it, running with nothing reading its PTY and
+/// nobody left holding a handle: the abandoned-ACL2 shape that
+/// once took a machine down. Disarmed by `into_inner` once the `Session`
+/// takes over.
+struct SpawnedChild(Option<Child>);
+
+impl SpawnedChild {
+    fn id(&self) -> u32 {
+        self.0.as_ref().expect("armed until into_inner").id()
+    }
+
+    fn into_inner(mut self) -> Child {
+        self.0.take().expect("into_inner called once")
+    }
+}
+
+impl Drop for SpawnedChild {
     fn drop(&mut self) {
+        if let Some(mut c) = self.0.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+}
+
+impl Session {
+    /// End this session now, rather than when it drops.
+    ///
+    /// For the caller that has to abandon a session it still owns. `start`
+    /// adopts the stream before it can still fail, so a failed replacement
+    /// leaves the session being replaced holding a reader whose epoch no
+    /// longer matches: it is alive and printing, and every byte is dropped.
+    /// Kept, it would answer nothing while looking merely slow -- `alive` is
+    /// true, so `health` waits out its deadline and calls ACL2 unresponsive
+    /// for what is our own bookkeeping. Killed, `alive` is false and the
+    /// state reported is the true one.
+    ///
+    /// Idempotent, because `Drop` runs it too.
+    pub fn terminate(&mut self) {
         // Kill first: the child's death closes the slave side, which is what
         // wakes a reader blocked on the descriptor. The shutdown flag covers
         // the corner where something inherited the slave and keeps the PTY
@@ -972,6 +1030,12 @@ impl Drop for Session {
         }
         // `writer` is the last owner of the master once the reader is gone.
         let _ = std::fs::remove_dir_all(&self.tmpdir);
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.terminate();
     }
 }
 
@@ -1106,4 +1170,50 @@ fn strip_sentinels(s: &str) -> Stripped {
         out = out[i + 2..].to_string();
     }
     (out.trim_start_matches(['\n', '\r']).to_string(), data, blocks)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Whether a pid is still signalable. Reaped children are not, so this
+    /// distinguishes "killed and waited for" from "still resident".
+    fn signalable(pid: u32) -> bool {
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            // "No such process" on stderr is the answer, not a problem.
+            .stderr(Stdio::null())
+            .status()
+            .expect("run kill")
+            .success()
+    }
+
+    fn probe() -> Child {
+        Command::new("sleep").arg("300").spawn().expect("spawn sleep")
+    }
+
+    /// The guard's whole reason to exist: `start` can fail after the spawn,
+    /// and `Child` does not kill on drop, so an abandoned image would stay
+    /// resident with nothing reading its PTY and no handle left to kill it.
+    #[test]
+    fn an_abandoned_child_is_killed_and_reaped() {
+        let child = probe();
+        let pid = child.id();
+        let guard = SpawnedChild(Some(child));
+        assert!(signalable(pid), "the probe is running to begin with");
+        drop(guard);
+        assert!(!signalable(pid), "leaving early takes the child with it");
+    }
+
+    /// And once the `Session` owns it, the guard must keep its hands off --
+    /// otherwise every successful start would kill the ACL2 it just made.
+    #[test]
+    fn a_child_handed_over_is_left_running() {
+        let child = probe();
+        let pid = child.id();
+        let mut child = SpawnedChild(Some(child)).into_inner();
+        assert!(signalable(pid), "the hand-over does not disturb it");
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }

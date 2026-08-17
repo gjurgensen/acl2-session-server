@@ -7,7 +7,9 @@
 use serde::{Deserialize, Serialize};
 
 use acl2_session::sync::{Checkpoints, EvalResult, FailureReport, UnitReport};
-use acl2_session::{NameDetail, NameKind, Outcome, Slice, Status, WorldChange};
+use acl2_session::{
+    CertReport, CertStatus, NameDetail, NameKind, Origin, Outcome, Slice, Status, WorldChange,
+};
 
 #[derive(Debug, Deserialize)]
 pub struct OpenParams {
@@ -83,6 +85,10 @@ pub struct DescribeReply {
     /// `function`, `macro`, `theorem`, `constant`, `other`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<&'static str>,
+    /// `file`, `book`, or `builtin`. Absence of a `book` does not mean "this
+    /// file": ACL2's own names have no book either.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub formals: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -96,6 +102,19 @@ pub struct DescribeReply {
     /// `book` resolved to a path that can be opened.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// The topic's one-line summary, as **raw xdoc markup** -- it will
+    /// contain `@(see …)` and `@('…')`, because the machinery that expands
+    /// those is not in the world. The client renders it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub short: Option<String>,
+}
+
+pub fn origin_str(o: Origin) -> &'static str {
+    match o {
+        Origin::File => "file",
+        Origin::Book => "book",
+        Origin::Builtin => "builtin",
+    }
 }
 
 pub fn kind_str(k: NameKind) -> &'static str {
@@ -115,22 +134,26 @@ pub fn described(name: &str, d: Option<&NameDetail>) -> DescribeReply {
             found: false,
             name: name.to_string(),
             kind: None,
+            origin: None,
             formals: None,
             guard: None,
             statement: None,
             book: None,
             path: None,
+            short: None,
         },
         Some(d) => DescribeReply {
             available: true,
             found: true,
             name: d.name.clone(),
             kind: Some(kind_str(d.kind)),
+            origin: Some(origin_str(d.origin)),
             formals: d.formals.clone(),
             guard: d.guard.clone(),
             statement: d.statement.clone(),
             book: d.book.clone(),
             path: d.book_path.as_ref().map(|p| p.display().to_string()),
+            short: None,
         },
     }
 }
@@ -143,11 +166,13 @@ pub fn describe_busy(name: &str) -> DescribeReply {
         found: false,
         name: name.to_string(),
         kind: None,
+        origin: None,
         formals: None,
         guard: None,
         statement: None,
         book: None,
         path: None,
+        short: None,
     }
 }
 
@@ -191,6 +216,214 @@ pub fn definition_busy() -> DefinitionReply {
 
 pub fn definition_missing() -> DefinitionReply {
     DefinitionReply { available: true, found: false, unit: None, path: None, line: None, how: None }
+}
+
+/// Every `include-book` in the snapshot, resolved to a file where possible.
+///
+/// LSP's `DocumentLink` in payload, minus the range: the reply says *which
+/// line* and *which book name*, and the client finds the quoted name on that
+/// line itself. That keeps the standing rule that coordinates never cross
+/// this wire — a single line is UTF-16 native in TypeScript, so the byte
+/// offsets the daemon deals in never have to be translated.
+#[derive(Debug, Serialize)]
+pub struct LinksReply {
+    pub links: Vec<BookLink>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BookLink {
+    /// 1-based line of the `include-book` form.
+    pub line: usize,
+    /// The book as written, without quotes: what to look for on that line.
+    pub book: String,
+    /// The file it resolves to. Absent when it could not be resolved — a
+    /// project's own `:dir` alias, which only ACL2 knows — or when the file
+    /// is simply not there, which is worth *not* linking to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+/// The outline: one entry per unit, with the definers inside it as children.
+///
+/// LSP's `DocumentSymbol` minus its ranges. Lines only, which is all the
+/// daemon deals in and all an outline needs -- the client widens them to
+/// whole lines, the same line-granular choice the decorations made.
+/// The client also supplies the *status*, because it already holds the paint
+/// map and the daemon has no business in the painting.
+#[derive(Debug, Serialize)]
+pub struct SymbolsReply {
+    pub symbols: Vec<BookSymbol>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BookSymbol {
+    pub name: String,
+    /// `function`, `macro`, `theorem`, `constant`, `include`, `other`.
+    pub kind: &'static str,
+    /// The unit this is, for top-level entries; absent for children.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<usize>,
+    pub line_start: usize,
+    pub line_end: usize,
+    /// Definers nested inside -- an `encapsulate`'s or `mutual-recursion`'s
+    /// members, which a flat outline would hide entirely.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<BookSymbol>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CertifyParams {
+    pub book: String,
+    /// `cert.pl`'s `-j`. From the client, which owns the setting.
+    pub jobs: Option<usize>,
+}
+
+/// How a certification ended.
+///
+/// `failed_books` is the field that earns its place: certification chases
+/// dependencies, so the book that failed is usually *not* the one asked for,
+/// and saying which is the difference between a useful report and "it broke".
+#[derive(Debug, Serialize)]
+pub struct CertifyReply {
+    /// `certified` or `failed`.
+    pub status: &'static str,
+    pub book: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failed_books: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_line: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_ref: Option<String>,
+    pub output_lines: usize,
+    pub elapsed_ms: u128,
+}
+
+/// Progress while `cert.pl` runs, at the same cadence a proof's tail uses.
+#[derive(Debug, Serialize)]
+pub struct CertTailEvent {
+    pub book: String,
+    pub elapsed_ms: u128,
+    pub lines_so_far: usize,
+    pub tail: String,
+}
+
+pub fn certified(r: &CertReport) -> CertifyReply {
+    CertifyReply {
+        status: match r.status {
+            CertStatus::Certified => "certified",
+            _ => "failed",
+        },
+        book: r.book.display().to_string(),
+        failed_books: r.failed_books.iter().map(|p| p.display().to_string()).collect(),
+        error_line: r.error_line.clone(),
+        output_ref: r.output_ref.as_ref().map(|o| o.as_str().to_string()),
+        output_lines: r.output_lines,
+        elapsed_ms: r.elapsed.as_millis(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DocParams {
+    pub book: String,
+    pub name: String,
+}
+
+/// One topic's documentation, as **raw xdoc markup**.
+///
+/// Unrendered on purpose: the machinery that would expand it is not in the
+/// world, so the client renders it. `long` keeps its exact line
+/// structure, which `@({...})` blocks depend on.
+#[derive(Debug, Serialize)]
+pub struct DocReply {
+    /// False when the session was busy and nothing was cached.
+    pub available: bool,
+    pub found: bool,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub short: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub long: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CompleteParams {
+    pub book: String,
+    /// What the user has typed so far. Filtering happens here rather than in
+    /// the client because a world holds tens of thousands of names and
+    /// shipping all of them per keystroke is a megabyte a keystroke.
+    pub prefix: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CompleteReply {
+    pub items: Vec<CompletionItem>,
+    /// The list was capped, or the census is not built yet. LSP's
+    /// `isIncomplete`: the client re-asks as the user narrows, instead of
+    /// filtering a truncated set and concluding a name does not exist.
+    pub incomplete: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CompletionItem {
+    pub name: String,
+    /// `function`, `macro`, `theorem`, `constant`, `keyword`, `other`.
+    pub kind: &'static str,
+    /// The book it comes from, for the detail line. Absent for this file's
+    /// own names, ACL2's own, and the static keyword families.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub book: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InductionParams {
+    pub book: String,
+    /// A handle from a `unit` event or an `eval` reply.
+    pub output_ref: String,
+}
+
+/// What ACL2 said when it chose an induction.
+///
+/// A different class of fact from the rest of this wire: everything else is
+/// probed out of the world or the event data, and this is read out of ACL2's
+/// prose, because the scheme is printed and never recorded. Fields are
+/// individually optional for that reason -- a reworded ACL2 drops one rather
+/// than inventing it.
+#[derive(Debug, Serialize)]
+pub struct InductionWire {
+    /// The pool name: `*1`, `*1.1`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goal: Option<String>,
+    /// The term whose recursion suggested the scheme.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggested_by: Option<String>,
+    /// ACL2's own attribution phrase -- "the :induction rule binary-append".
+    /// The runes themselves are in the unit's `rules`, structurally.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<String>,
+    /// The scheme, with `:p` standing for the conjecture.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub justified_by: Option<String>,
+    /// ACL2's own phrasing -- "two nontautological subgoals".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subgoals: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InductionReply {
+    pub inductions: Vec<InductionWire>,
+}
+
+pub fn induction(i: &acl2_session::Induction) -> InductionWire {
+    InductionWire {
+        goal: i.goal.clone(),
+        suggested_by: i.suggested_by.clone(),
+        attribution: i.attribution.clone(),
+        scheme: i.scheme.clone(),
+        justified_by: i.justified_by.clone(),
+        subgoals: i.subgoals.clone(),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -456,6 +689,104 @@ pub fn stale_deps(book: &str, revision: u64, stale: &[acl2_session::StaleInclude
                 missing: s.missing,
             })
             .collect(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RulesParams {
+    pub book: String,
+    /// The name to explain, as the client read it out of the buffer.
+    pub name: String,
+}
+
+/// One rune the name introduced.
+#[derive(Debug, Serialize)]
+pub struct RuneWire {
+    /// `(:rewrite foo)`, as ACL2 writes it.
+    pub rune: String,
+    /// `:rewrite`, `:forward-chaining`, `:definition`, …
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
+    /// Whether it is enabled in the session's current theory. Absent for a
+    /// rune ACL2 records no rule for -- `:executable-counterpart`,
+    /// `:induction` -- which are listed because a reader asking what a form
+    /// introduced wants them, though `:pr` shows neither.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// The rule's own fields in ACL2's order: `:lhs`, `:hyps`, `:subclass`,
+    /// `:trigger`, `:corollary`, and whatever else its class carries. Kept
+    /// as a list rather than a struct because the set differs per class.
+    pub fields: Vec<RuneField>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RuneField {
+    pub key: String,
+    pub value: String,
+}
+
+/// What a form actually introduced, beyond what its text says.
+///
+/// Answered from the scrape taken when the form was admitted, so it needs no
+/// prover and arrives during a proof -- which is when a reader is most
+/// likely to be looking at an earlier form. `found: false` means this
+/// session's file never introduced the name; there is no "ask again" here,
+/// because nothing is ever waited for.
+#[derive(Debug, Serialize)]
+pub struct RulesReply {
+    pub found: bool,
+    pub name: String,
+    /// `:common-lisp-compliant` (guards verified), `:ideal` (logic mode,
+    /// guards not verified), or `:program`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol_class: Option<String>,
+    /// The measure and well-founded relation, for a recursive function.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub justification: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub formals: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guard: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub statement: Option<String>,
+    pub runes: Vec<RuneWire>,
+}
+
+pub fn rules_reply(name: &str, r: Option<&acl2_session::NameRules>) -> RulesReply {
+    match r {
+        None => RulesReply {
+            found: false,
+            name: name.to_string(),
+            symbol_class: None,
+            justification: None,
+            formals: None,
+            guard: None,
+            statement: None,
+            runes: Vec::new(),
+        },
+        Some(r) => RulesReply {
+            found: true,
+            name: r.name.clone(),
+            symbol_class: r.symbol_class.clone(),
+            justification: r.justification.clone(),
+            formals: r.formals.clone(),
+            guard: r.guard.clone(),
+            statement: r.statement.clone(),
+            runes: r
+                .runes
+                .iter()
+                .map(|u| RuneWire {
+                    rune: u.rune.clone(),
+                    class: u.class().map(str::to_string),
+                    enabled: u.enabled,
+                    fields: u
+                        .fields
+                        .iter()
+                        .map(|(k, v)| RuneField { key: k.clone(), value: v.clone() })
+                        .collect(),
+                })
+                .collect(),
+        },
     }
 }
 

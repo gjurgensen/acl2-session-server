@@ -85,6 +85,9 @@ pub struct StaleInclude {
     /// The unit that pulled it in, when it was one of this file's own.
     /// `None` for a book the session environment supplied.
     pub unit: Option<usize>,
+    /// That unit's first line, for callers that speak in lines rather than
+    /// indices. Tracks `unit` exactly: both are set or neither is.
+    pub line: Option<usize>,
     /// The file is gone entirely, rather than merely different.
     pub missing: bool,
 }
@@ -103,12 +106,17 @@ pub struct Budget {
     started: Instant,
 }
 
-/// The floor under bookkeeping submissions -- rollbacks and the post-failure
-/// probes. A submission sent with a zero deadline still goes in flight and
-/// instantly times out, wedging the session behind our own bookkeeping; and a
-/// genuine failure at budget exhaustion would lose its envelope. These are
-/// sub-second in practice, so the floor is the bound on how far a call can
-/// overrun its deadline, not a cost every call pays.
+/// The floor under bookkeeping submissions -- rollbacks, the post-failure
+/// probes, and the world queries behind hover, completion and the doc views.
+/// A submission sent with a zero deadline still goes in flight and instantly
+/// times out, wedging the session behind our own bookkeeping; and a genuine
+/// failure at budget exhaustion would lose its envelope. These are sub-second
+/// in practice, so the floor is the bound on how far a call can overrun its
+/// deadline, not a cost every call pays.
+///
+/// Every probe this module generates itself belongs under it. The caller
+/// asked for a name's documentation, not for a submission of ours to become
+/// the thing their next sync is blocked behind.
 const PROBE_FLOOR: Duration = Duration::from_secs(10);
 
 impl Budget {
@@ -287,6 +295,9 @@ pub struct UnitReport {
     pub index: usize,
     pub line_start: usize,
     pub line_end: usize,
+    /// The names this form writes, from the split. A label, not a key: a
+    /// compound form writes several and an `include-book` writes none.
+    pub names: Vec<String>,
     pub elapsed: Duration,
     pub event_data: EventData,
     /// Events recorded inside this unit, newest first. See `InnerEvent`.
@@ -294,11 +305,103 @@ pub struct UnitReport {
     /// Total inner events ACL2 recorded, which may exceed `inner.len()`: a
     /// fixed number of slots is read, and the count says when there were more.
     pub inner_total: usize,
+    /// The *rest* of any recursion clique these events belong to: members
+    /// the world knows about and `inner` does not name.
+    ///
+    /// Needed because ACL2 records a `mutual-recursion` as a *single* event.
+    /// Admit `(mutual-recursion (defun f …) (defun g …))` and `inner` names
+    /// `f` alone with `inner_total` 1, while `g` appears nowhere in the event
+    /// data at all -- not as thinned detail, but as a name the record simply
+    /// does not have. The world's `recursivep` property does, and answers in
+    /// microseconds against a 250k-entry world, so this is asked for on every
+    /// admission rather than reconstructed from the text.
+    ///
+    /// Empty for the overwhelming majority of forms: a singly-recursive
+    /// function's own clique is itself, which `inner` already named.
+    pub clique: Vec<String>,
     /// Handle to everything ACL2 printed for this unit. Not inlined: a single
     /// `defthm` can emit six figures of output, and a report that carried it
     /// would be the very payload this design exists to avoid.
     pub output_ref: OutputRef,
     pub output_lines: usize,
+}
+
+/// How many events a form may record and still be *naming* rather than
+/// generating.
+///
+/// Only consulted when the source gave nothing usable, which is the one case
+/// where ACL2's list stands alone and its order -- newest first -- decides
+/// what fits the budget. The gap between the two situations is enormous
+/// rather than marginal: a form that merely hid its name behind a macro
+/// records one or two events, while `std::deflist` records **36** for one
+/// line of source and `fty::defprod` **37**. Past this, no honest name can
+/// be recovered, and two arbitrary generated lemmas are worse than silence.
+const GENERATED_NAMES: usize = 3;
+
+impl UnitReport {
+    /// What to call this form, best available.
+    ///
+    /// ACL2's record is the authority and the source supplies the reading of
+    /// it. Neither alone is right, and the failures are not hypothetical --
+    /// every case below was measured against a real image.
+    ///
+    /// **ACL2 vetoes the scan.** The scan takes the second element of any
+    /// `def…` form, which is the name in nearly every definer there is but is
+    /// wrong in two ways it cannot detect: `(std::defredundant :names (f g))`
+    /// puts a keyword there, and `(defattach stub impl)` puts the name of a
+    /// function defined elsewhere. So when ACL2 recorded events for this form
+    /// and *none* of the written names is among them, the scan misread the
+    /// form and its answer is discarded.
+    ///
+    /// **The scan supplies what ACL2 does not name.** When one written name
+    /// *is* confirmed, the written list is used whole. `defines` records
+    /// `p-h` and a pile of flag machinery, and the clique's own name
+    /// `p-defines` is not an event at all -- it is an xdoc topic, and only
+    /// the text has it.
+    ///
+    /// Clique *members* are no longer among those, though: ACL2 records a
+    /// `mutual-recursion` as one event, and `UnitReport::clique` asks the
+    /// world's `recursivep` for the rest. So a clique the text cannot see --
+    /// one a macro generated -- is now named in full from the world alone.
+    ///
+    /// **And the scan is the only source for a whole class of events.**
+    /// `defmacro`, `defconst`, `deftheory`, `defabbrev` and `defxdoc` record
+    /// no event data whatever, so an empty record means "ACL2 does not track
+    /// this kind", not "this form defined nothing".
+    ///
+    /// **The written name wins on generators.** `(fty::defprod point …)`
+    /// records 37 events -- `point-fix$inline` twice, two `tmp-deftypes-…`
+    /// scaffolding lemmas -- and orders them newest first, so `point` lands
+    /// 12th and a budget spent on that list never reaches it. The thing a
+    /// reader means by that form is the word they typed.
+    ///
+    /// The one case still misreported is `defattach`, which records nothing
+    /// and so cannot be vetoed; it is labelled with the function it attaches
+    /// to rather than with nothing. `defun-inline` reports ACL2's
+    /// `p-inl$inline` rather than the written `p-inl`, the veto working as
+    /// intended on a genuine difference.
+    pub fn display_names(&self) -> Vec<String> {
+        // ACL2 records newest first, and deduped: `point-fix$inline` is
+        // recorded twice for one `defprod`. The clique members follow, since
+        // they are names of this form too -- just ones the event data never
+        // mentions.
+        let mut recorded: Vec<&str> = Vec::new();
+        for name in self.inner.iter().rev().map(|e| &e.name).chain(self.clique.iter()) {
+            if !recorded.contains(&name.as_str()) {
+                recorded.push(name);
+            }
+        }
+        if recorded.is_empty() {
+            return self.names.clone(); // ACL2 tracks nothing of this kind.
+        }
+        if self.names.iter().any(|n| recorded.contains(&n.as_str())) {
+            return self.names.clone(); // Vouched for, clique members and all.
+        }
+        if self.inner_total <= GENERATED_NAMES {
+            return recorded.into_iter().map(str::to_string).collect();
+        }
+        Vec::new()
+    }
 }
 
 /// Why a unit did not go in.
@@ -393,6 +496,12 @@ pub enum SyncMode {
 pub struct SyncOutcome {
     /// Index of the last unit the target resolved to, if any.
     pub resolved_through: Option<usize>,
+    /// The same unit's first line.
+    ///
+    /// Carried because no caller can work it out: the form a target resolves
+    /// to is usually one that was *reused*, and reused units are reported as
+    /// a count with no records to look it up in.
+    pub resolved_through_line: Option<usize>,
     /// Prefix units left untouched because their hashes still matched.
     pub reused: usize,
     /// Units undone -- because the snapshot changed beneath them, or
@@ -502,11 +611,28 @@ pub enum NameKind {
     Other,
 }
 
+/// Where a name came from.
+///
+/// The three cases a reader actually cares about, and they are not
+/// distinguishable from the book alone: ACL2's own definitions belong to no
+/// `include-book`, and neither do this file's, so both report nothing there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// Introduced by a form in this file.
+    File,
+    /// Introduced by a book this file includes.
+    Book,
+    /// Already present when the session opened: ACL2 itself, the image's own
+    /// build, or a portcullis. Not something the session can point into.
+    Builtin,
+}
+
 /// What the world knows about one name. See [`Book::describe`].
 #[derive(Debug, Clone)]
 pub struct NameDetail {
     pub name: String,
     pub kind: NameKind,
+    pub origin: Origin,
     /// Formals for a function, the argument list for a macro.
     pub formals: Option<String>,
     /// The guard term, when it is not trivially `t`.
@@ -520,6 +646,94 @@ pub struct NameDetail {
     pub book: Option<String>,
     /// `book` resolved to a path, when it could be.
     pub book_path: Option<PathBuf>,
+}
+
+/// One documented topic: its name and its one-line summary, as written.
+///
+/// The summary is *raw xdoc markup* -- it routinely contains `@(see foo)` and
+/// `@('bar')`, which a renderer resolves. Shipping it unrendered is the whole
+/// of the point: the machinery that would expand it is not in the world.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocTopic {
+    pub name: String,
+    pub short: String,
+}
+
+/// One name the world knows. See [`Book::census`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CensusEntry {
+    /// As ACL2 prints it, package prefix included where one is needed.
+    pub name: String,
+    pub kind: NameKind,
+    /// The book whose text defines it, as ACL2 names it. `None` means ACL2's
+    /// own -- or this file's, which the caller separates by its own units.
+    pub book: Option<String>,
+}
+
+/// Split a printed census into one string per entry.
+///
+/// `~*` puts each entry on its own line, so an entry starts at a line
+/// beginning with `(` in column zero and anything indented continues it.
+/// That rule, rather than a marker prefix, because a wrapped continuation
+/// could otherwise be mistaken for a new entry whose name happened to match.
+fn census_entries(body: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in body.lines() {
+        if line.starts_with('(') {
+            out.push(line.trim_end().to_string());
+        } else if let Some(last) = out.last_mut() {
+            last.push(' ');
+            last.push_str(line.trim());
+        }
+    }
+    out
+}
+
+fn census_kind(k: &str) -> Option<NameKind> {
+    match k.trim().to_ascii_lowercase().as_str() {
+        "formals" => Some(NameKind::Function),
+        "macro-args" => Some(NameKind::Macro),
+        "theorem" => Some(NameKind::Theorem),
+        "const" => Some(NameKind::Constant),
+        _ => None,
+    }
+}
+
+/// Rebuild the census from the printed interleaving.
+///
+/// Newest-first, so names are collected until the marker that governs them
+/// arrives; see [`CENSUS_PROBE`] on why that is the way round it is. Names
+/// still pending at the end belong to no book -- ACL2's own world, and this
+/// file's own forms.
+fn parse_census(body: &str) -> Vec<CensusEntry> {
+    let mut out = Vec::new();
+    let mut pending: Vec<(String, NameKind)> = Vec::new();
+    for e in census_entries(body) {
+        let inner = e.trim().trim_start_matches('(').trim_end_matches(')').trim().to_string();
+        let lower = inner.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix(":path") {
+            // `(:path)` is nil; `(:path :system . "x.lisp")` and
+            // `(:path . "/abs/x.lisp")` are the two shapes `resolve_dep`
+            // already knows, restored to the form it expects.
+            let raw = inner[":path".len()..].trim();
+            let book = if rest.trim().is_empty() {
+                None
+            } else if let Some(abs) = raw.strip_prefix('.') {
+                Some(abs.trim().to_string())
+            } else {
+                Some(format!("({raw})"))
+            };
+            for (name, kind) in pending.drain(..) {
+                out.push(CensusEntry { name, kind, book: book.clone() });
+            }
+        } else if let Some((name, kind)) = inner.rsplit_once(" . ")
+            && let Some(kind) = census_kind(kind)
+        {
+            pending.push((name.trim().to_string(), kind));
+        }
+    }
+    out.extend(pending.into_iter().map(|(name, kind)| CensusEntry { name, kind, book: None }));
+    out
 }
 
 /// The failure envelope of an eval'd form.
@@ -700,13 +914,14 @@ const CLEAR_STALE: &str = "(acl2::pprogn \
 /// leaving the ones that decide what is *provable* exactly as inherited.
 ///
 /// The session deliberately inherits the user's `acl2-customization.lsp`, so
-/// that proofs behave here exactly as they do in their own session. But a very
-/// common customization is `(quiet)`, which inhibits PROVE output -- and
-/// PROVE inhibition also silently disables output saving entirely
-/// (`prove.lisp`). Measured on one failing `defthm`: 27 captured lines with
-/// `(quiet)` against 46 without, and the missing 19 are the induction-scheme
-/// narrative and subgoal progression, which exist nowhere else -- not in
-/// `get-event-data`, not in `gag-state`.
+/// that proofs behave here exactly as they do in their own session. But a
+/// customization that puts `prove` on `inhibit-output-lst` -- a common thing
+/// to want, since it is what silences the waterfall at a terminal -- also
+/// silently disables output *saving* entirely (`prove.lisp`). Measured on one
+/// failing `defthm`: 27 captured lines with PROVE inhibited against 46
+/// without, and the missing 19 are the induction-scheme narrative and subgoal
+/// progression, which exist nowhere else -- not in `get-event-data`, not in
+/// `gag-state`.
 ///
 /// Re-enabling costs the user nothing, because prover text goes to a captured
 /// sink rather than their terminal: they never see the flood, only the
@@ -814,6 +1029,13 @@ const DEPS_PROBE: &str = r#"(acl2::prog2$
 /// fails the unit the probe is spliced into, not just the probe. Measured
 /// end to end.
 ///
+/// No `let` in a `loop$` body. The clique lookup wanted one, to name the
+/// property list it tests and returns, and the whole probe then failed with
+/// "the guard for the function" -- but only in a book whose current package
+/// is not `"ACL2"`, so the ordinary tests all passed and one `defpkg` test
+/// caught it. `if` and `and` in the same position are fine; the binding is
+/// what the lambda object cannot take. Filter in Rust instead.
+///
 /// The index iteration's `to` bound is `(len ds)`, and must never be a
 /// sentinel-huge literal: loop$'s `from`/`to` MATERIALIZES the index list
 /// (`from-to-by-ac`), so `to 1000000000` allocated a billion conses -- some
@@ -823,6 +1045,7 @@ fn inner_events_probe(limit: usize) -> String {
     format!(
         r#"(acl2::let*
   ((acl2::fal0 (acl2::true-list-fix (acl2::@ acl2::event-data-fal)))
+   (acl2::wrld (acl2::w acl2::state))
    (acl2::nn (acl2::min {limit} (acl2::len acl2::fal0)))
    (acl2::ds (acl2::loop$ acl2::for acl2::e acl2::in (acl2::take acl2::nn acl2::fal0)
                acl2::collect (acl2::car (acl2::cdr (acl2::true-list-fix acl2::e))))))
@@ -831,6 +1054,14 @@ fn inner_events_probe(limit: usize) -> String {
     (acl2::prog2$
       (acl2::cw "~*0" (acl2::list "" "iname ~x*~%" "iname ~x*~%" "iname ~x*~%"
                         (acl2::strip-cars acl2::fal0)))
+      (acl2::prog2$
+        (acl2::cw "~*0" (acl2::list "" "iclq ~x*~%" "iclq ~x*~%" "iclq ~x*~%"
+          (acl2::loop$ acl2::for acl2::nm acl2::in (acl2::strip-cars acl2::fal0)
+            acl2::append
+              (acl2::true-list-fix
+                (acl2::and (acl2::symbolp acl2::nm)
+                           (acl2::getpropc acl2::nm 'acl2::recursivep
+                                           'nil acl2::wrld))))))
       (acl2::prog2$
         (acl2::cw "~*0" (acl2::list "" "ik ~x*~%" "ik ~x*~%" "ik ~x*~%"
           (acl2::loop$ acl2::for acl2::d acl2::in acl2::ds acl2::collect
@@ -874,7 +1105,7 @@ fn inner_events_probe(limit: usize) -> String {
                           acl2::collect (acl2::cons acl2::i acl2::r)))))
                   (acl2::prog2$
                     (acl2::cw "<<<ASS-END inner>>>~%")
-                    (acl2::value :invisible)))))))))))"#
+                    (acl2::value :invisible))))))))))))"#
     )
 }
 
@@ -962,14 +1193,48 @@ fn items_positional(pairs: &[(String, String)], key: &str) -> Vec<Option<String>
         .collect()
 }
 
-fn parse_inner(sub: &crate::session::Submission) -> (Vec<InnerEvent>, usize) {
-    let Some(body) = sub.block("inner") else { return (Vec::new(), 0) };
-    let pairs = keyed_block(body, &["iname", "ik", "ia", "inx", "it", "is", "irune"]);
+/// Just the names a unit's events introduced, without the rest of the parse.
+///
+/// The scrape wants names and nothing else, and runs on every admitted unit;
+/// `parse_inner` builds the whole report and is the caller's business.
+/// Clique members come along because a `mutual-recursion` is one event whose
+/// siblings appear nowhere in `iname` -- and they are exactly the names a
+/// reader will ask about.
+fn inner_names(sub: &crate::session::Submission) -> Vec<String> {
+    let Some(body) = sub.block("inner") else { return Vec::new() };
+    // Every key the block carries, not just the two wanted: `keyed_block`
+    // treats an unrecognised line as a continuation of the previous value,
+    // so naming a subset silently glues the other fields onto the names.
+    let pairs =
+        keyed_block(body, &["iname", "iclq", "ik", "ia", "inx", "it", "is", "irune"]);
+    let mut names = items(&pairs, "iname");
+    for c in items(&pairs, "iclq") {
+        if !names.contains(&c) {
+            names.push(c);
+        }
+    }
+    names
+}
+
+fn parse_inner(sub: &crate::session::Submission) -> (Vec<InnerEvent>, usize, Vec<String>) {
+    let Some(body) = sub.block("inner") else { return (Vec::new(), 0, Vec::new()) };
+    let pairs =
+        keyed_block(body, &["iname", "iclq", "ik", "ia", "inx", "it", "is", "irune"]);
     // Every name, not a sample of them. A `defines` clique introduces far more
     // than three events, and a list of three that looks complete is worse than
     // a long one: the reporter found two of a clique's own functions in the
     // world and absent from this list, with nothing to say it was truncated.
     let names = items(&pairs, "iname");
+    // Members of any recursion clique these events belong to, flat and
+    // unordered. ACL2 records a `mutual-recursion` as *one* event, so the
+    // other members are nowhere in `iname`; asking the world for
+    // `recursivep` is the only way to learn they exist. Emitted only for
+    // cliques of more than one, so an ordinary book carries an empty stream.
+    // Only the names the events did not already carry: the probe emits a
+    // `recursivep` list for every recursive function, which for the ordinary
+    // singly-recursive one is just its own name back.
+    let clique: Vec<String> =
+        items(&pairs, "iclq").into_iter().filter(|c| !names.contains(c)).collect();
     // The per-event fields are positional: the probe's loop$ collects visit
     // the same (limited) prefix of the fal in the same order the names walk
     // it, and print one line per event, `nil` included. `event-data-fal` is
@@ -1016,7 +1281,7 @@ fn parse_inner(sub: &crate::session::Submission) -> (Vec<InnerEvent>, usize) {
         });
     }
     let total = out.len();
-    (out, total)
+    (out, total, clique)
 }
 
 /// Report what ACL2 recorded about the event just executed.
@@ -1218,7 +1483,119 @@ fn is_safe_symbol(name: &str) -> bool {
         })
 }
 
+/// Every name in the world, with its kind and the book that defines it.
+///
+/// **The key is property triples, not event landmarks.**
+/// `access-event-tuple-namex` and friends are unbadged `:logic` functions, so
+/// ACL2 rejects any `loop$` that mentions them, and inlining bottoms out in
+/// more unbadged functions. The world is a list of `(symbol key . value)`
+/// triples, so the name is `(car tr)` and the kind is `(cadr tr)` -- pure
+/// `car`/`cdr`/`eq`, all badged. Four keys carry the names worth having.
+///
+/// Attribution rides the same walk: `include-book-path` global-value triples
+/// are interleaved in the world exactly as `pe` relies on. **Their
+/// orientation is the trap.** The world is newest-first and `global-val`
+/// scans toward *older* entries, so a name is met *before* the marker that
+/// governs it -- the applicable book is the *next* marker in the walk, not
+/// the previous one. Reading it the intuitive way attributes every book's
+/// contents to the book included before it. The interleaving is emitted as
+/// it stands and reassembled in Rust, where it is testable.
+///
+/// `in` over the world, never `from`/`to`: the `loop$` index list
+/// materialisation cost 33 GB and a machine.
+const CENSUS_PROBE: &str = r#"(acl2::prog2$
+  (acl2::cw "~%<<<ASS-BEGIN census>>>~%")
+  (acl2::prog2$
+    (acl2::cw "~*0"
+      (acl2::list "" "~x*~%" "~x*~%" "~x*~%"
+        (loop$ for acl2::tr in (acl2::w acl2::state)
+               when (or (eq (cadr acl2::tr) 'acl2::formals)
+                        (eq (cadr acl2::tr) 'acl2::theorem)
+                        (eq (cadr acl2::tr) 'acl2::macro-args)
+                        (eq (cadr acl2::tr) 'acl2::const)
+                        (and (eq (car acl2::tr) 'acl2::include-book-path)
+                             (eq (cadr acl2::tr) 'acl2::global-value)))
+               collect (if (eq (car acl2::tr) 'acl2::include-book-path)
+                           (cons :path (car (cddr acl2::tr)))
+                         (cons (car acl2::tr) (cadr acl2::tr))))))
+    (acl2::prog2$
+      (acl2::cw "<<<ASS-END census>>>~%")
+      (acl2::value :invisible))))"#;
+
+/// Every documented topic's name and one-line summary.
+///
+/// Two parallel blocks rather than one stream of pairs, because a `~*` element
+/// is substituted whole and a short is a *string* -- ACL2 rewraps it across
+/// lines, so pairs on one line would need the parser to tell a wrapped short
+/// from the next entry. Two blocks in table order zip without ambiguity, and
+/// `keyed_block` folds each wrapped value back together on its own.
+///
+/// Only `:short`. `:long` is fetched per topic when someone opens it: shorts
+/// are a sentence apiece and worth having resident for hover, longs are not.
+///
+/// **This probe names the XDOC package, so it fails to *read* in a world that
+/// has none** -- which is an ordinary outcome, not a bug: a bare image simply
+/// has no xdoc. The failure is contained because `query` re-probes the command
+/// number after a failed submission, and the caller caches the emptiness so it
+/// is attempted once.
+const DOC_INDEX_PROBE: &str = r#"(acl2::let ((acl2::tbl (xdoc::get-xdoc-table (acl2::w acl2::state))))
+  (acl2::prog2$
+    (acl2::cw "~%<<<ASS-BEGIN docnames>>>~%")
+    (acl2::prog2$
+      (acl2::cw "~*0"
+        (acl2::list "" "n ~x*~%" "n ~x*~%" "n ~x*~%"
+          (loop$ for acl2::x in acl2::tbl
+                 collect (acl2::cdr (acl2::assoc-eq :name acl2::x)))))
+      (acl2::prog2$
+        (acl2::cw "<<<ASS-END docnames>>>~%<<<ASS-BEGIN docshorts>>>~%")
+        (acl2::prog2$
+          (acl2::cw "~*0"
+            (acl2::list "" "s ~x*~%" "s ~x*~%" "s ~x*~%"
+              (loop$ for acl2::x in acl2::tbl
+                     collect (acl2::cdr (acl2::assoc-eq :short acl2::x)))))
+          (acl2::prog2$
+            (acl2::cw "<<<ASS-END docshorts>>>~%")
+            (acl2::value :invisible)))))))"#;
+
+/// One topic's full documentation, transported verbatim.
+///
+/// **`princ$`, not `cw`, and that is not a style choice.** Real xdoc markup
+/// contains `~x0` and `~%` inside its code blocks -- `fmt` would read those as
+/// its own directives and either corrupt the text or fail for want of
+/// arguments. `princ$` writes the string's characters and nothing else, which
+/// also preserves the line structure that `@({...})` blocks depend on and that
+/// `fmt`'s right margin would rewrap away.
+///
+/// The name travels as a **string**, compared against `symbol-name`, so no
+/// package has to exist for the probe to read and a token from a buffer can
+/// never resolve to the wrong symbol. Case is normalised by the caller.
+fn doc_topic_probe(upcased: &str) -> String {
+    format!(
+        "(acl2::let* ((acl2::tbl (xdoc::get-xdoc-table (acl2::w acl2::state)))\n\
+         (acl2::hit (acl2::car (loop$ for acl2::x in acl2::tbl\n\
+         when (acl2::equal (acl2::symbol-name\n\
+         (acl2::cdr (acl2::assoc-eq :name acl2::x)))\n\
+         \"{upcased}\")\n\
+         collect acl2::x))))\n\
+         (acl2::pprogn\n\
+         (acl2::princ$ \"<<<ASS-BEGIN topic>>>\" acl2::*standard-co* acl2::state)\n\
+         (acl2::princ$ \"\n\" acl2::*standard-co* acl2::state)\n\
+         (acl2::princ$ (acl2::if acl2::hit\n\
+         (acl2::cdr (acl2::assoc-eq :long acl2::hit)) \"\")\n\
+         acl2::*standard-co* acl2::state)\n\
+         (acl2::princ$ \"\n<<<ASS-END topic>>>\n\" acl2::*standard-co* acl2::state)\n\
+         (acl2::value :invisible)))"
+    )
+}
+
 /// Ask the world about one name.
+///
+/// `evcmd` is the command number in force at the name's own event, which is
+/// what separates a name this *file* introduced from one that was already
+/// there when the session opened. Both report no book -- ACL2's own
+/// definitions belong to no `include-book`, and neither do this file's -- so
+/// without it the two are indistinguishable, and hover cheerfully told the
+/// reader that `symbolp` was "defined in this file".
 ///
 /// `decode-logical-name` is `pe`'s own path to the event, and
 /// `include-book-path` at that event's world tail is how `pe` prints the book
@@ -1238,14 +1615,15 @@ fn detail_probe(name: &str) -> String {
          (acl2::global-val 'acl2::include-book-path acl2::ev))))\n\
          (acl2::prog2$\n\
          (acl2::cw \"~%<<<ASS-BEGIN detail>>>~%found ~x0~%formals ~x1~%guard ~x2~%\
-         margs ~x3~%thm ~x4~%const ~x5~%book ~x6~%<<<ASS-END detail>>>~%\"\n\
+         margs ~x3~%thm ~x4~%const ~x5~%book ~x6~%evcmd ~x7~%<<<ASS-END detail>>>~%\"\n\
          (acl2::if acl2::ev acl2::t acl2::nil)\n\
          (acl2::getpropc acl2::nm 'acl2::formals :none acl2::wrld)\n\
          (acl2::getpropc acl2::nm 'acl2::guard :none acl2::wrld)\n\
          (acl2::getpropc acl2::nm 'acl2::macro-args :none acl2::wrld)\n\
          (acl2::getpropc acl2::nm 'acl2::theorem :none acl2::wrld)\n\
          (acl2::getpropc acl2::nm 'acl2::const :none acl2::wrld)\n\
-         (acl2::car acl2::bk))\n\
+         (acl2::car acl2::bk)\n\
+         (acl2::if acl2::ev (acl2::max-absolute-command-number acl2::ev) -1))\n\
          (acl2::value :invisible)))"
     )
 }
@@ -1381,6 +1759,67 @@ pub struct SyncOptions {
     pub skip_proofs: bool,
 }
 
+/// One rune a name introduced, and what the world knows about it.
+///
+/// The fields are ACL2's own, keyword-keyed: `:hyps`, `:equiv`, `:lhs`,
+/// `:rhs`, `:subclass`, `:loop-stopper`, `:trigger`, `:concls`, `:basic-ts`,
+/// `:corollary`, `:clique`, `:controller-alist` -- whatever the rule's class
+/// carries. They are kept as ACL2 rendered them (untranslated), in the order
+/// it gave them, rather than mapped onto a fixed struct: the set differs per
+/// rule class, and inventing a union of them would go stale against the next
+/// class ACL2 grows.
+#[derive(Debug, Clone)]
+pub struct RuneDetail {
+    /// `(:rewrite foo)`, `(:type-prescription bar)`.
+    pub rune: String,
+    /// Whether it is enabled in the session's current theory.
+    pub enabled: Option<bool>,
+    pub fields: Vec<(String, String)>,
+}
+
+impl RuneDetail {
+    /// The rule class: `:rewrite`, `:forward-chaining`, `:definition`.
+    pub fn class(&self) -> Option<&str> {
+        self.rune.trim_start_matches('(').split_whitespace().next()
+    }
+
+    pub fn field(&self, key: &str) -> Option<&str> {
+        self.fields.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+}
+
+/// What the world knows about one name the file introduced.
+///
+/// Gathered when its form was admitted, not when someone asks. A session
+/// serialises on one ACL2, so a question asked during a proof cannot be
+/// answered by the prover -- which is exactly when an editor wants to show
+/// what an earlier form defined. Scraping while the form is in hand and
+/// serving from memory is what makes the answer available at all.
+///
+/// This is the `OutputStore` doctrine applied to the world: capture in full
+/// while we can, hand it over on request.
+#[derive(Debug, Clone)]
+pub struct NameRules {
+    pub name: String,
+    /// Index of the unit that introduced it, so a rollback drops it.
+    pub unit: usize,
+    /// `:ideal` (logic mode, guards unverified), `:common-lisp-compliant`
+    /// (guards verified), or `:program`.
+    pub symbol_class: Option<String>,
+    /// The measure and well-founded relation, for a recursive function.
+    pub justification: Option<String>,
+    /// Formals for a function, argument list for a macro.
+    pub formals: Option<String>,
+    pub guard: Option<String>,
+    /// The statement, for a theorem.
+    pub statement: Option<String>,
+    pub constant: Option<String>,
+    /// Every rune the name introduced, in ACL2's order. A rune with no rule
+    /// info -- `:executable-counterpart`, `:induction` -- appears with an
+    /// empty `fields`, which `:pr` does not show at all.
+    pub runes: Vec<RuneDetail>,
+}
+
 /// A session anchored to one file.
 pub struct Book {
     acl2: PathBuf,
@@ -1400,6 +1839,9 @@ pub struct Book {
     outputs: Arc<Mutex<OutputStore>>,
     /// The unit whose submission has not reported yet.
     pending: Option<PendingUnit>,
+    /// What the world knows about each name this file's forms introduced,
+    /// scraped as each form went in. See [`NameRules`].
+    rules: HashMap<String, NameRules>,
     /// Every book the world is currently built on, keyed by ACL2's name for
     /// it, as it looked when first observed. See `stale_includes`.
     deps: HashMap<String, Dep>,
@@ -1453,6 +1895,10 @@ pub struct Book {
 struct PendingUnit {
     index: usize,
     hash: u64,
+    /// Carried rather than looked up: by the time a unit finishes, the file
+    /// may have changed under it, so the split that produced it is the only
+    /// place these names were ever right.
+    names: Vec<String>,
     line_start: usize,
     line_end: usize,
     label: u64,
@@ -1499,6 +1945,7 @@ impl Book {
             rebuilds: 0,
             outputs: Arc::new(Mutex::new(OutputStore::new()?)),
             pending: None,
+            rules: HashMap::new(),
             deps: HashMap::new(),
             dep_names: Vec::new(),
             base_dep_count: None,
@@ -1520,8 +1967,8 @@ impl Book {
     ///
     /// One function, called from `open` and from `rebuild`, so the recovery
     /// path cannot drift from the first-start path. A rebuild that skipped
-    /// `OWN_OUTPUT` quietly re-inhibited PROVE under a `(quiet)`
-    /// customization -- losing the induction narrative from every capture
+    /// `OWN_OUTPUT` quietly re-inhibited PROVE under a customization that
+    /// inhibits it -- losing the induction narrative from every capture
     /// after the first rebuild, a failure already on record,
     /// reintroduced by the recovery path -- and kept reporting the
     /// pre-rebuild environment answers.
@@ -1742,6 +2189,12 @@ impl Book {
         if self.session.is_running() {
             return Err(SyncError::Busy { index: self.running_unit() });
         }
+        // Floored here rather than at each caller, because it follows from the
+        // contract above: every `form` reaching this function is one we
+        // generated. A caller's short deadline must not leave a probe of ours
+        // in flight -- that wedges every later sync behind our own bookkeeping
+        // and, worse, a later `resume` reports the probe as the user's eval.
+        let deadline = deadline.max(PROBE_FLOOR);
         let body = format!("{form}\n{CMD_PROBE}");
         let sub = self.session.submit(&body, deadline)?;
         // Same reasoning as `finish_eval`: a form that failed aborted its `ld`
@@ -1797,11 +2250,37 @@ impl Book {
         if !is_safe_symbol(name) {
             return Ok(None);
         }
-        let r = self.query(&detail_probe(name), deadline.max(PROBE_FLOOR))?;
+        // A name this file introduced was scraped when its form went in, so
+        // answer from memory. That is not merely faster: a session
+        // serialises on one ACL2, so during a proof this is the only way the
+        // question can be answered at all -- and hovering over an earlier
+        // form while a later one grinds is exactly when it is asked.
+        if let Some(r) = self.rules.get(name) {
+            let kind = if r.formals.is_some() {
+                NameKind::Function
+            } else if r.statement.is_some() {
+                NameKind::Theorem
+            } else if r.constant.is_some() {
+                NameKind::Constant
+            } else {
+                NameKind::Other
+            };
+            return Ok(Some(NameDetail {
+                name: name.to_string(),
+                kind,
+                origin: Origin::File,
+                formals: r.formals.clone(),
+                guard: r.guard.clone(),
+                statement: r.statement.clone(),
+                book: None,
+                book_path: None,
+            }));
+        }
+        let r = self.query(&detail_probe(name), deadline)?;
         let Some(body) = r.block("detail") else { return Ok(None) };
         let pairs = keyed_block(
             body,
-            &["found", "formals", "guard", "margs", "thm", "const", "book"],
+            &["found", "formals", "guard", "margs", "thm", "const", "book", "evcmd"],
         );
         let get = |k: &str| {
             pairs
@@ -1835,15 +2314,86 @@ impl Book {
         };
         let book = get("book").filter(|b| !is_nil(b));
         let book_path = book.as_deref().and_then(|b| self.resolve_dep(b));
+        // A name introduced after the base label came from this file's forms;
+        // one at or below it was already in the world when the session opened.
+        // Only asked when there is no book, since an included book's names are
+        // above the baseline too -- they arrived with an `include-book` the
+        // file admitted.
+        let origin = if book.is_some() {
+            Origin::Book
+        } else {
+            let ev: Option<i64> = get("evcmd").and_then(|v| v.parse().ok());
+            match (ev, self.base_command_number) {
+                (Some(e), Some(b)) if e > b => Origin::File,
+                _ => Origin::Builtin,
+            }
+        };
         Ok(Some(NameDetail {
             name: name.to_string(),
             kind,
+            origin,
             formals: formals.or(margs),
             guard: get("guard").filter(|g| !is_nil(g)),
             statement: theorem,
             book,
             book_path,
         }))
+    }
+
+    /// Every name in the world, with its kind and defining book.
+    ///
+    /// One walk over `(w state)`. Measured on `std/top` + `centaur/fty/top`
+    /// (347k triples): **2.5 s, 25,582 names across 625 books**, about 1.1 MB
+    /// of output. That is a background job at open, not
+    /// something on any interactive path -- which is why `describe` exists
+    /// separately and answers one name in 10 ms without any of this.
+    ///
+    /// Re-run when the include set changes, and not otherwise: the dependency
+    /// baseline already watches for that.
+    pub fn census(&mut self, deadline: Duration) -> Result<Vec<CensusEntry>, SyncError> {
+        let r = self.query(CENSUS_PROBE, deadline)?;
+        Ok(r.block("census").map(parse_census).unwrap_or_default())
+    }
+
+    /// Every documented topic's name and summary. See [`DOC_INDEX_PROBE`].
+    ///
+    /// Empty when the world has no xdoc at all, which is a real state and not
+    /// an error -- the probe cannot even be read there, and that is fine.
+    pub fn doc_index(&mut self, deadline: Duration) -> Result<Vec<DocTopic>, SyncError> {
+        let r = self.query(DOC_INDEX_PROBE, deadline)?;
+        let (Some(names), Some(shorts)) = (r.block("docnames"), r.block("docshorts")) else {
+            return Ok(Vec::new());
+        };
+        let names = keyed_block(names, &["n"]);
+        let shorts = keyed_block(shorts, &["s"]);
+        Ok(names
+            .iter()
+            .zip(shorts.iter())
+            .filter_map(|((_, n), (_, s))| {
+                let short = flatten(s);
+                // `nil` is ACL2 printing "this topic has no summary".
+                let short = unquote(&short).unwrap_or(short);
+                (!n.trim().is_empty() && !is_nil(&short))
+                    .then(|| DocTopic { name: flatten(n), short })
+            })
+            .collect())
+    }
+
+    /// One topic's full documentation, as raw markup. See [`doc_topic_probe`].
+    ///
+    /// `Ok(None)` means the world documents no such topic, which is the
+    /// ordinary answer for most names.
+    pub fn doc_topic(
+        &mut self,
+        name: &str,
+        deadline: Duration,
+    ) -> Result<Option<String>, SyncError> {
+        if !is_safe_symbol(name) {
+            return Ok(None);
+        }
+        let bare = name.rsplit("::").next().unwrap_or(name).to_ascii_uppercase();
+        let r = self.query(&doc_topic_probe(&bare), deadline)?;
+        Ok(r.block("topic").map(str::to_string).filter(|t| !t.trim().is_empty()))
     }
 
     /// Turn a completed (or timed-out) eval submission into a result, undoing
@@ -2165,6 +2715,10 @@ impl Book {
             return Ok(out);
         };
         out.resolved_through = Some(target);
+        // The units are in hand here and nowhere downstream: a target usually
+        // resolves to a reused form, and reused forms leave no record to look
+        // a line up in.
+        out.resolved_through_line = units.get(target).map(|u| u.line_start);
 
         for (i, u) in units.iter().enumerate().take(target + 1).skip(keep) {
             let (sub, output_ref) =
@@ -2172,15 +2726,17 @@ impl Book {
             let output_lines = self.outs().lines(&output_ref).unwrap_or(0);
             match sub.outcome {
                 Outcome::Ok => {
-                    let (inner, inner_total) = parse_inner(&sub);
+                    let (inner, inner_total, clique) = parse_inner(&sub);
                     out.admitted.push(UnitReport {
                         index: i,
                         line_start: u.line_start,
                         line_end: u.line_end,
+                        names: u.names.clone(),
                         elapsed: sub.elapsed,
                         event_data: parse_event_data(&sub),
                         inner,
                         inner_total,
+                        clique,
                         output_ref,
                         output_lines,
                     });
@@ -2229,7 +2785,7 @@ impl Book {
                     {
                         let text = String::from_utf8_lossy(&bytes[u.start..u.end]);
                         let (rsub, rref) = self.admit_text(
-                            &text, u.hash, u.line_start, u.line_end, i, true,
+                            &text, u.hash, u.line_start, u.line_end, &u.names, i, true,
                             budget.floored(),
                         )?;
                         report.retry_output_ref = Some(rref);
@@ -2412,9 +2968,9 @@ impl Book {
             Ok(sub) => parse_checkpoints(&sub),
             Err(_) => Checkpoints::default(),
         };
-        let (inner, inner_total) = match self.session.submit(&self.inner_probe, deadline) {
+        let (inner, inner_total, _clique) = match self.session.submit(&self.inner_probe, deadline) {
             Ok(sub) => parse_inner(&sub),
-            Err(_) => (Vec::new(), 0),
+            Err(_) => (Vec::new(), 0, Vec::new()),
         };
         (ed, cp, inner, inner_total)
     }
@@ -2438,7 +2994,16 @@ impl Book {
         deadline: Duration,
     ) -> Result<(crate::session::Submission, OutputRef), SyncError> {
         let text = String::from_utf8_lossy(&bytes[u.start..u.end]).into_owned();
-        self.admit_text(&text, u.hash, u.line_start, u.line_end, index, skip_proofs, deadline)
+        self.admit_text(
+            &text,
+            u.hash,
+            u.line_start,
+            u.line_end,
+            &u.names,
+            index,
+            skip_proofs,
+            deadline,
+        )
     }
 
     /// The submission itself, for a unit's text however obtained -- sliced
@@ -2454,6 +3019,7 @@ impl Book {
         hash: u64,
         line_start: usize,
         line_end: usize,
+        names: &[String],
         index: usize,
         skipped: bool,
         deadline: Duration,
@@ -2483,6 +3049,7 @@ impl Book {
             self.pending = Some(PendingUnit {
                 index,
                 hash,
+                names: names.to_vec(),
                 line_start,
                 line_end,
                 label,
@@ -2513,6 +3080,11 @@ impl Book {
             if let Some(target) = in_package_target(text.as_bytes()) {
                 self.make_package_stick(&target, deadline.max(PROBE_FLOOR))?;
             }
+            // Gather while the form is in hand. Asking later is not an
+            // option: the next thing the session does may be a proof, and
+            // then nothing can be asked of ACL2 at all.
+            let introduced = inner_names(&sub);
+            self.scrape_rules(&introduced, index, deadline);
         }
         Ok((sub, output_ref))
     }
@@ -2608,15 +3180,17 @@ impl Book {
             if let Some(target) = p.in_package.clone() {
                 self.make_package_stick(&target, deadline.max(PROBE_FLOOR))?;
             }
-            let (inner, inner_total) = parse_inner(&sub);
+            let (inner, inner_total, clique) = parse_inner(&sub);
             return Ok(Some(Resumed::Admitted(UnitReport {
                 index: p.index,
                 line_start: p.line_start,
                 line_end: p.line_end,
+                names: p.names.clone(),
                 elapsed: sub.elapsed,
                 event_data: parse_event_data(&sub),
                 inner,
                 inner_total,
+                clique,
                 output_ref,
                 output_lines,
             })));
@@ -2648,6 +3222,7 @@ impl Book {
                 p.hash,
                 p.line_start,
                 p.line_end,
+                &p.names,
                 p.index,
                 true,
                 deadline.max(PROBE_FLOOR),
@@ -2946,11 +3521,13 @@ impl Book {
                 }
                 continue;
             };
+            let (unit, line) = self.includer_of(pos, total);
             let Some(m) = meta else {
                 stale.push(StaleInclude {
                     book: name.clone(),
                     path,
-                    unit: self.unit_that_included(pos, total),
+                    unit,
+                    line,
                     missing: true,
                 });
                 continue;
@@ -2971,7 +3548,8 @@ impl Book {
             stale.push(StaleInclude {
                 book: name.clone(),
                 path,
-                unit: self.unit_that_included(pos, total),
+                unit,
+                line,
                 missing: false,
             });
         }
@@ -3016,6 +3594,14 @@ impl Book {
 
     /// The unit that pulled in the book at `pos` of a newest-first list of
     /// length `total`. See `Admitted::dep_count`.
+    /// The unit that included the dependency at `pos`, as both an index and
+    /// that unit's first line. Returned together so the two can never drift.
+    fn includer_of(&self, pos: usize, total: usize) -> (Option<usize>, Option<usize>) {
+        let unit = self.unit_that_included(pos, total);
+        let line = unit.and_then(|i| self.admitted.get(i)).map(|a| a.line_start);
+        (unit, line)
+    }
+
     fn unit_that_included(&self, pos: usize, total: usize) -> Option<usize> {
         let nth = total.checked_sub(pos)?; // it was the nth ever pushed
         if nth <= self.base_dep_count.unwrap_or(0) {
@@ -3024,6 +3610,105 @@ impl Book {
         self.admitted
             .iter()
             .position(|a| a.dep_count.is_some_and(|c| c >= nth))
+    }
+
+    /// Scrape what the world knows about the names a unit just introduced.
+    ///
+    /// Best effort by design: this runs beside real work, and a session that
+    /// cannot answer should cost the caller nothing. A failure here leaves
+    /// the store without those names, which the reader reports as "not
+    /// known" rather than as an error.
+    fn scrape_rules(&mut self, names: &[String], unit: usize, deadline: Duration) {
+        if names.is_empty() {
+            return;
+        }
+        let probe = rules_probe(names);
+        let Ok(sub) = self.session.submit(&probe, deadline.max(PROBE_FLOOR)) else { return };
+        let Some(body) = sub.block("rules") else { return };
+        let keys = ["rname", "rrunes", "rclass", "rjust", "rformals", "rguard",
+                    "rthm", "rconst", "rmargs", "rinfo"];
+        let pairs = keyed_block(body, &keys);
+        // One value per key per name, emitted in that order, so the columns
+        // line up positionally -- the same discipline `items` already uses
+        // for runes and warnings.
+        let col = |k: &str| -> Vec<String> {
+            pairs.iter().filter(|(pk, _)| pk == k).map(|(_, v)| flatten(v)).collect()
+        };
+        let (rn, rr, rc, rj) = (col("rname"), col("rrunes"), col("rclass"), col("rjust"));
+        let (rf, rg, rt) = (col("rformals"), col("rguard"), col("rthm"));
+        let (rk, rm, ri) = (col("rconst"), col("rmargs"), col("rinfo"));
+        let pick = |v: &Vec<String>, i: usize| -> Option<String> {
+            v.get(i).filter(|x| !is_nil(x) && *x != ":none").cloned()
+        };
+        for (i, name) in rn.iter().enumerate() {
+            let detail = ri.get(i).map(|x| x.as_str()).unwrap_or("");
+            let mut by_rune: Vec<RuneDetail> = Vec::new();
+            for entry in sexp_elements(detail) {
+                let fields: Vec<(String, String)> =
+                    sexp_elements(&entry).iter().filter_map(|f| sexp_field(f)).collect();
+                let Some(rune) = fields.iter().find(|(k, _)| k == ":rune").map(|(_, v)| v.clone())
+                else {
+                    continue;
+                };
+                let enabled = fields
+                    .iter()
+                    .find(|(k, _)| k == ":enabled")
+                    .map(|(_, v)| !is_nil(v));
+                by_rune.push(RuneDetail {
+                    rune,
+                    enabled,
+                    fields: fields
+                        .into_iter()
+                        .filter(|(k, _)| k != ":rune" && k != ":enabled")
+                        .collect(),
+                });
+            }
+            // Runes ACL2 records no rule info for -- `:executable-counterpart`,
+            // `:induction` -- exist all the same, and a reader asking what a
+            // name introduced wants to see them. `:pr` shows neither.
+            for rune in sexp_elements(rr.get(i).map(|x| x.as_str()).unwrap_or("")) {
+                if !by_rune.iter().any(|r| r.rune == rune) {
+                    by_rune.push(RuneDetail { rune, enabled: None, fields: Vec::new() });
+                }
+            }
+            // The body is the one thing here the user *did* write, so it is
+            // the one thing not worth storing: it is in the file, and for a
+            // generated function it is one world query away when the session
+            // is free.
+            for r in by_rune.iter_mut() {
+                if r.class() == Some(":definition") {
+                    r.fields.retain(|(k, _)| k != ":rhs");
+                }
+            }
+            self.rules.insert(
+                name.clone(),
+                NameRules {
+                    name: name.clone(),
+                    unit,
+                    symbol_class: pick(&rc, i),
+                    justification: pick(&rj, i),
+                    formals: pick(&rf, i).or_else(|| pick(&rm, i)),
+                    guard: pick(&rg, i),
+                    statement: pick(&rt, i),
+                    constant: pick(&rk, i),
+                    runes: by_rune,
+                },
+            );
+        }
+    }
+
+    /// What the world knows about a name this file introduced, from memory.
+    ///
+    /// Answers while a proof is running, which is the whole reason the
+    /// scrape is eager: the session's ACL2 is busy exactly when an editor
+    /// wants to describe an earlier form.
+    pub fn rules_for(&self, name: &str) -> Option<&NameRules> {
+        self.rules.get(name)
+    }
+
+    /// Every name this file has introduced, in no particular order.
+    pub fn known_names(&self) -> impl Iterator<Item = &str> {
+        self.rules.keys().map(|s| s.as_str())
     }
 
     /// The file this session is anchored to.
@@ -3102,7 +3787,27 @@ impl Book {
         // Assigning drops the old Session, whose Drop kills the child. The
         // control block carries over, so handles held outside the lock keep
         // addressing this book.
-        self.session = Session::start(&self.acl2, &dir, self.control.clone())?;
+        //
+        // On failure the old session cannot be kept: `start` adopts the stream
+        // before its last two failure paths, so by now the session we still
+        // hold owns a reader of a superseded epoch and everything it prints is
+        // being dropped. It would look alive and answer nothing, and `health`
+        // would spend a full deadline to report ACL2 unresponsive for a
+        // process that is fine. End it, so what we report is what is true;
+        // `dirty` is still set, so the next sync starts a fresh one.
+        self.session = match Session::start(&self.acl2, &dir, self.control.clone()) {
+            Ok(s) => s,
+            Err(e) => {
+                self.session.terminate();
+                // And say so, because `admitted` still describes a world that
+                // now has no session behind it. Reaching here through the
+                // `dirty` check leaves the flag set anyway; reaching here
+                // through a direct call would not, and the book would carry a
+                // dead session with nothing recording that it needs a rebuild.
+                self.dirty = true;
+                return Err(e.into());
+            }
+        };
         self.admitted.clear();
         self.label_gen = 0;
         self.rebuilds += 1;
@@ -3121,6 +3826,7 @@ impl Book {
                 u.hash,
                 u.line_start,
                 u.line_end,
+                &u.names,
                 i,
                 skipped.get(i).copied().unwrap_or(false),
                 budget.remaining(),
@@ -3225,6 +3931,9 @@ impl Book {
         for a in &self.admitted[keep..] {
             self.outs().mark_superseded(&a.output_ref);
         }
+        // Undone units take their names with them: the world no longer has
+        // them, so neither should the store.
+        self.rules.retain(|_, r| r.unit < keep);
         self.admitted.truncate(keep);
         Ok(())
     }
@@ -3232,6 +3941,22 @@ impl Book {
     /// Lines currently believed to be admitted, for reporting.
     pub fn admitted_lines(&self) -> Vec<(usize, usize)> {
         self.admitted.iter().map(|a| (a.line_start, a.line_end)).collect()
+    }
+
+    /// How many books the world currently rests on.
+    ///
+    /// The length of `include-book-alist-all` as of the last admitted unit,
+    /// or of the session's own environment when nothing has been admitted.
+    /// Recorded per unit already, for attributing a stale dependency to the
+    /// form that pulled it in; exposed because it is also the cheapest honest
+    /// signal that *the set of included books has changed* — which is the one
+    /// event that invalidates a census.
+    ///
+    /// A count rather than a set: it moves whenever an `include-book` is
+    /// admitted or rolled back, which is exactly the question being asked,
+    /// and it costs nothing to read.
+    pub fn dep_count(&self) -> Option<usize> {
+        self.admitted.last().and_then(|a| a.dep_count).or(self.base_dep_count)
     }
 
     /// Indices of admitted units whose proofs were skipped -- an editor's
@@ -3250,6 +3975,109 @@ impl Book {
     fn first_skipped(&self) -> Option<usize> {
         self.admitted.iter().position(|a| a.skipped)
     }
+}
+
+/// Ask the world everything it knows about `names`, in one submission.
+///
+/// **Not `:pr`.** `pr-fn` is `print-info-for-rules (info-for-rules ...)` --
+/// a printer over a structure -- so this calls `info-for-rules` and keeps
+/// the structure. The difference is the one this design keeps making: `:pr`
+/// output is an aligned label layout whose terms wrap at the right margin,
+/// and reading it would mean depending on ACL2's *wording*; the structure is
+/// keyword-keyed data ACL2 cannot reword without breaking its own callers.
+/// The keys are also richer than the print: an entry carries both the
+/// untranslated term (for display) and the translated one, and we keep the
+/// first.
+///
+/// The world-segment dance mirrors `pr-fn` exactly: `decode-logical-name` to
+/// the event, `world-to-next-non-deeper-event` for its segment,
+/// `actual-props` for the rules it laid down, filtered to this name's numes.
+///
+/// These are `:program`-mode system internals, in the same category as
+/// `get-event-data`: pinned to an ACL2 version, confined to this module, and
+/// loud rather than silent if they move -- a probe that no longer evaluates
+/// fails its submission instead of quietly reporting less.
+fn rules_probe(names: &[String]) -> String {
+    // Every form ends `(value :invisible)`: `ld` prints each top-level form's
+    // value otherwise, and a stray `NIL` landing inside the block would be
+    // read as part of the structure it follows.
+    let mut out = String::from(
+        "(acl2::prog2$ (acl2::cw \"~%<<<ASS-BEGIN rules>>>~%\") \
+         (acl2::value :invisible))\n",
+    );
+    for n in names {
+        out.push_str(&format!(
+            "(acl2::prog2$\n\
+             (acl2::let* ((acl2::wrld (acl2::w acl2::state))\n\
+             (acl2::nm '{n})\n\
+             (acl2::rmp (acl2::getpropc acl2::nm 'acl2::runic-mapping-pairs \
+                          acl2::nil acl2::wrld))\n\
+             (acl2::w2 (acl2::decode-logical-name acl2::nm acl2::wrld)))\n\
+             (acl2::cw \"rname ~x0~%rrunes ~x1~%rclass ~x2~%rjust ~x3~%\
+             rformals ~x4~%rguard ~x5~%rthm ~x6~%rconst ~x7~%rmargs ~x8~%\
+             rinfo ~x9~%\"\n\
+             acl2::nm\n\
+             (acl2::strip-cdrs acl2::rmp)\n\
+             (acl2::getpropc acl2::nm 'acl2::symbol-class :none acl2::wrld)\n\
+             (acl2::getpropc acl2::nm 'acl2::justification :none acl2::wrld)\n\
+             (acl2::getpropc acl2::nm 'acl2::formals :none acl2::wrld)\n\
+             (acl2::getpropc acl2::nm 'acl2::guard :none acl2::wrld)\n\
+             (acl2::getpropc acl2::nm 'acl2::theorem :none acl2::wrld)\n\
+             (acl2::getpropc acl2::nm 'acl2::const :none acl2::wrld)\n\
+             (acl2::getpropc acl2::nm 'acl2::macro-args :none acl2::wrld)\n\
+             (acl2::if acl2::w2\n\
+               (acl2::info-for-rules\n\
+                 (acl2::actual-props\n\
+                   (acl2::world-to-next-non-deeper-event\n\
+                     (acl2::access-event-tuple-depth (acl2::cddr (acl2::car acl2::w2)))\n\
+                     (acl2::cdr acl2::w2))\n\
+                   acl2::nil acl2::nil)\n\
+                 (acl2::strip-cars acl2::rmp)\n\
+                 (acl2::ens-maybe-brr acl2::state)\n\
+                 acl2::wrld)\n\
+               acl2::nil)))\n\
+             (acl2::value :invisible))\n"
+        ));
+    }
+    out.push_str(
+        "(acl2::prog2$ (acl2::cw \"<<<ASS-END rules>>>~%\") \
+         (acl2::value :invisible))\n",
+    );
+    out
+}
+
+/// The top-level elements of an ACL2-printed list.
+///
+/// The splitter does the reading, which is the point: it already handles
+/// strings, `|bars|`, character literals and comments, and it is indifferent
+/// to the line breaks ACL2's prettyprinter inserts at the right margin --
+/// the very thing that makes the printed *layout* an unreliable thing to
+/// parse. Anything that will not lex yields nothing rather than a guess.
+fn sexp_elements(text: &str) -> Vec<String> {
+    let t = text.trim();
+    let Some(inner) = t.strip_prefix('(').and_then(|x| x.strip_suffix(')')) else {
+        return Vec::new();
+    };
+    match split(inner.as_bytes()) {
+        Ok(forms) => forms
+            .iter()
+            .map(|f| flatten(&inner[f.start..f.end]))
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// One `(:key value ...)` field of an `info-for-rules` entry.
+///
+/// ACL2 gives `(:lhs <untranslated> <translated>)`; the first value is the
+/// one a reader wants, and the second is the printer's business.
+fn sexp_field(text: &str) -> Option<(String, String)> {
+    let parts = sexp_elements(text);
+    let key = parts.first()?.clone();
+    if !key.starts_with(':') {
+        return None;
+    }
+    Some((key, parts.get(1).cloned().unwrap_or_default()))
 }
 
 /// Whether a session is answering.
@@ -3345,6 +4173,52 @@ mod tests {
                     "a#b", "a\\b", "a`b", "a,b"] {
             assert!(!super::is_safe_symbol(bad), "{bad:?} must be refused");
         }
+    }
+
+    /// The census orientation, which is the whole correctness question.
+    ///
+    /// The world is newest-first and `global-val` scans toward older entries,
+    /// so a name belongs to the *next* marker in the walk, not the previous
+    /// one. Reading it the other way round is not a subtle error -- it
+    /// attributes every book's contents to whatever was included before it --
+    /// and it looks entirely plausible, which is why it is pinned here. This
+    /// is the layout ACL2 actually printed for a book including bstar.
+    #[test]
+    fn a_name_belongs_to_the_marker_that_follows_it() {
+        let body = "(spike-double-thm . theorem)\n\
+                    (spike-double . formals)\n\
+                    (:path)\n\
+                    (patbind-access . macro-args)\n\
+                    (access-b*-bindings . formals)\n\
+                    (:path :system . \"std/util/bstar.lisp\")\n\
+                    (binary-append . formals)\n";
+        let got = super::parse_census(body);
+        let seen: Vec<(&str, Option<&str>)> =
+            got.iter().map(|e| (e.name.as_str(), e.book.as_deref())).collect();
+        assert_eq!(seen, vec![
+            ("spike-double-thm", None),
+            ("spike-double", None),
+            ("patbind-access", Some("(:system . \"std/util/bstar.lisp\")")),
+            ("access-b*-bindings", Some("(:system . \"std/util/bstar.lisp\")")),
+            // Past the last marker: ACL2's own world, which has no book.
+            ("binary-append", None),
+        ]);
+        assert_eq!(got[0].kind, super::NameKind::Theorem);
+        assert_eq!(got[2].kind, super::NameKind::Macro);
+    }
+
+    /// A long entry wraps, and the continuation must not read as a new one.
+    #[test]
+    fn a_wrapped_census_entry_stays_one_entry() {
+        let body = "(some-extremely-long-generated-theorem-name-that-wraps\n\
+                    \x20   . theorem)\n\
+                    (:path . \"/abs/path/to/book.lisp\")\n";
+        let got = super::parse_census(body);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].name, "some-extremely-long-generated-theorem-name-that-wraps");
+        assert_eq!(got[0].kind, super::NameKind::Theorem);
+        assert_eq!(got[0].book.as_deref(), Some("\"/abs/path/to/book.lisp\""),
+                   "the absolute-path shape resolve_dep already reads");
     }
 
     /// ACL2 wraps at whitespace, never inside an atom, so rejoining a wrapped

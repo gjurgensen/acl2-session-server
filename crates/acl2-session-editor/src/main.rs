@@ -91,6 +91,16 @@ enum Answer {
 struct Daemon {
     registry: Mutex<Registry>,
     books: Mutex<HashMap<String, BookHandle>>,
+    /// Drivers of closed books that may still be unwinding.
+    ///
+    /// `close` takes a book out of the map, so the EOF sweep can no longer
+    /// see it -- and dropping its `JoinHandle` detaches the thread rather
+    /// than waiting for it, while the driver still has to notice the abort,
+    /// leave its loop and drop its `Book`. That drop is what kills ACL2. An
+    /// editor shutting down closes its books and ends the daemon in the same
+    /// breath, so the handles have to be kept somewhere the sweep still
+    /// reaches or the process exits mid-unwind and the child is left running.
+    closing: Mutex<Vec<std::thread::JoinHandle<()>>>,
     out: Out,
 }
 
@@ -113,6 +123,7 @@ impl Daemon {
                 now(self.close(&p.book))
             }
             "output" => now(self.output(args(params)?)),
+            "induction" => now(self.induction(args(params)?)),
             "status" => {
                 let p: wire::BookParams = args(params)?;
                 now(self.status(&p.book))
@@ -144,6 +155,68 @@ impl Daemon {
                 let id = id.clone();
                 self.handle_of(&p.book, |h| {
                     h.tx.send(Cmd::Definition { id, name: p.name }).map_err(|e| e.to_string())
+                })
+                .map_err(fail)?
+                .map_err(fail)?;
+                Ok(Answer::ByDriver)
+            }
+            "links" => {
+                let p: wire::BookParams = args(params)?;
+                let id = id.clone();
+                self.handle_of(&p.book, |h| {
+                    h.tx.send(Cmd::Links { id }).map_err(|e| e.to_string())
+                })
+                .map_err(fail)?
+                .map_err(fail)?;
+                Ok(Answer::ByDriver)
+            }
+            "complete" => {
+                let p: wire::CompleteParams = args(params)?;
+                let id = id.clone();
+                self.handle_of(&p.book, |h| {
+                    h.tx.send(Cmd::Complete { id, prefix: p.prefix }).map_err(|e| e.to_string())
+                })
+                .map_err(fail)?
+                .map_err(fail)?;
+                Ok(Answer::ByDriver)
+            }
+            "symbols" => {
+                let p: wire::BookParams = args(params)?;
+                let id = id.clone();
+                self.handle_of(&p.book, |h| {
+                    h.tx.send(Cmd::Symbols { id }).map_err(|e| e.to_string())
+                })
+                .map_err(fail)?
+                .map_err(fail)?;
+                Ok(Answer::ByDriver)
+            }
+            // Served from the scrape, so unlike `describe` it is never
+            // declined for a busy session: see `Driver::rules`.
+            "rules" => {
+                let p: wire::RulesParams = args(params)?;
+                let id = id.clone();
+                self.handle_of(&p.book, |h| {
+                    h.tx.send(Cmd::Rules { id, name: p.name }).map_err(|e| e.to_string())
+                })
+                .map_err(fail)?
+                .map_err(fail)?;
+                Ok(Answer::ByDriver)
+            }
+            "doc" => {
+                let p: wire::DocParams = args(params)?;
+                let id = id.clone();
+                self.handle_of(&p.book, |h| {
+                    h.tx.send(Cmd::Doc { id, name: p.name }).map_err(|e| e.to_string())
+                })
+                .map_err(fail)?
+                .map_err(fail)?;
+                Ok(Answer::ByDriver)
+            }
+            "certify" => {
+                let p: wire::CertifyParams = args(params)?;
+                let id = id.clone();
+                self.handle_of(&p.book, |h| {
+                    h.tx.send(Cmd::Certify { id, jobs: p.jobs }).map_err(|e| e.to_string())
                 })
                 .map_err(fail)?
                 .map_err(fail)?;
@@ -218,14 +291,35 @@ impl Daemon {
 
     fn close(&self, book: &str) -> Result<Value, String> {
         let handle = self.books.lock().expect("books lock").remove(book);
-        if let Some(h) = &handle {
+        let had = handle.is_some();
+        if let Some(h) = handle {
             // Wake a blocked driver call, then let the driver exit; its Arc
             // keeps the session alive until then, and the drop kills ACL2.
             h.control.request_abort();
             let _ = h.tx.send(Cmd::Close);
+            let mut closing = self.closing.lock().expect("closing lock");
+            // Reap the ones that finished while we were not looking, so a
+            // long editing session does not accumulate a handle per close.
+            closing.retain(|h| !h.is_finished());
+            closing.push(h.driver);
         }
         let closed = self.registry.lock().expect("registry lock").close(&SessionId::from(book));
-        Ok(json!({ "closed": closed && handle.is_some() }))
+        Ok(json!({ "closed": closed && had }))
+    }
+
+    /// Served from the outputs handle, like `output` and for the same reason:
+    /// nothing here touches the session, so a grinding proof never delays it.
+    fn induction(&self, p: wire::InductionParams) -> Result<Value, String> {
+        let outputs = self.handle_of(&p.book, |h| h.outputs.clone())?;
+        let r = OutputRef::from(p.output_ref.as_str());
+        let found = {
+            let outs = outputs.lock().expect("outputs lock");
+            acl2_session::induction::from_output(&outs, &r).map_err(|e| e.to_string())?
+        };
+        Ok(serde_json::to_value(wire::InductionReply {
+            inductions: found.iter().map(wire::induction).collect(),
+        })
+        .expect("serialize"))
     }
 
     fn output(&self, p: wire::OutputParams) -> Result<Value, String> {
@@ -373,6 +467,7 @@ fn main() {
     let daemon = Daemon {
         registry: Mutex::new(Registry::new(policy)),
         books: Mutex::new(HashMap::new()),
+        closing: Mutex::new(Vec::new()),
         out: Out(Arc::new(Mutex::new(io::stdout()))),
     };
     let stdin = io::stdin();
@@ -417,5 +512,15 @@ fn main() {
     }
     for h in handles {
         let _ = h.driver.join();
+    }
+    // And the books already closed by the client, whose drivers left the map
+    // before this sweep could see them. An editor shuts down by closing its
+    // books and then ending the daemon, so this is the ordinary path rather
+    // than a corner: without it the process reaches here with nothing in the
+    // map, exits at once, and takes the still-unwinding driver with it --
+    // leaving exactly the abandoned ACL2 the joins above exist to prevent.
+    let closing: Vec<_> = std::mem::take(&mut *daemon.closing.lock().expect("closing lock"));
+    for h in closing {
+        let _ = h.join();
     }
 }

@@ -8,12 +8,16 @@
 //! edit lands within a slice of arriving -- and only an edit that touches the
 //! prefix through the running unit aborts its proof.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
 use std::time::Duration;
 
 use acl2_session::registry::SharedBook;
-use acl2_session::{split, Form, NameDetail, Outcome, Resumed, SyncError, WorldChange};
+use acl2_session::{
+    split, CensusEntry, Form, NameDetail, Origin, Outcome, Resumed, SyncError,
+    WorldChange,
+};
 use serde_json::Value;
 
 use crate::wire;
@@ -33,6 +37,20 @@ pub enum Cmd {
     /// Where is this name defined? Same never-queue policy as `Describe`,
     /// which it is built on. See [`Driver::definition`].
     Definition { id: Value, name: String },
+    /// Every `include-book` in the snapshot, resolved. See [`Driver::links`].
+    Links { id: Value },
+    /// Names the user could be typing. See [`Driver::complete`].
+    Complete { id: Value, prefix: String },
+    /// The outline of the snapshot. See [`Driver::symbols`].
+    Symbols { id: Value },
+    /// What did this form introduce -- rule classes, trigger terms, derived
+    /// runes? Served from the scrape taken as the form was admitted, so it
+    /// needs no session and is never declined. See [`Driver::rules`].
+    Rules { id: Value, name: String },
+    /// One topic's documentation. See [`Driver::doc`].
+    Doc { id: Value, name: String },
+    /// Certify the book on disk. See [`Driver::certify`].
+    Certify { id: Value, jobs: Option<usize> },
     Pause,
     Close,
 }
@@ -59,6 +77,27 @@ const DEP_TICK: Duration = Duration::from_secs(2);
 /// `decode-logical-name` scanning a very large world -- and short enough that
 /// a pathological one cannot stall the driver's loop.
 const DESCRIBE: Duration = Duration::from_secs(2);
+/// Deadline for the census walk. Measured at 2.5 s on a std+fty world;
+/// a Kestrel-heavy one is larger, and it runs on an idle
+/// tick where the time is free, so this is generous on purpose.
+const CENSUS: Duration = Duration::from_secs(60);
+
+/// Keyword families worth offering, which need no world at all. Not
+/// exhaustive and not meant to be -- these are the ones typed constantly.
+const KEYWORDS: &[&str] = &[
+    // Rule classes.
+    ":rewrite", ":linear", ":definition", ":type-prescription", ":forward-chaining",
+    ":elim", ":congruence", ":equivalence", ":refinement", ":induction", ":well-founded-relation",
+    ":built-in-clause", ":compound-recognizer", ":meta", ":clause-processor", ":tau-system",
+    // Hints.
+    ":use", ":by", ":in-theory", ":induct", ":expand", ":cases", ":hands-off", ":restrict",
+    ":nonlinearp", ":do-not", ":do-not-induct", ":instructions", ":otf-flg",
+    // xargs and friends.
+    ":guard", ":guard-hints", ":guard-debug", ":measure", ":well-founded-relation",
+    ":mode", ":verify-guards", ":normalize", ":stobjs", ":ruler-extenders", ":hints",
+    // Common flags.
+    ":dir", ":system", ":rule-classes", ":corollary", ":trigger-terms", ":doc",
+];
 
 enum Flow {
     Continue,
@@ -136,6 +175,74 @@ pub struct Driver {
     /// emits no state -- and an idle session is exactly when someone is
     /// reading code and hovering.
     details: HashMap<String, Option<NameDetail>>,
+    /// Names ACL2's own sources define, mapped to file and line. Built on the
+    /// first jump into a built-in and kept: see [`Driver::builtin_definition`].
+    builtins: Option<HashMap<String, (String, usize)>>,
+    /// Every name in the world, once someone has needed it.
+    ///
+    /// Built on an *idle tick* rather than on the request that wants it: the
+    /// walk is seconds, and the driver is single-threaded, so building it
+    /// inline would stall an edit or a hover behind it. The first completion
+    /// therefore answers from the buffer alone and says `incomplete`, and the
+    /// one after it has the world.
+    symbols: Option<Vec<CensusEntry>>,
+    /// A completion arrived with no census built. Cleared once one is.
+    census_wanted: bool,
+    /// A hover arrived with no doc index built. Cleared once one is.
+    docs_wanted: bool,
+    /// The certification in flight: whom to answer, and with what `-j`.
+    ///
+    /// A build is not a submission -- it is a separate process tree running
+    /// `cert.pl`, which runs `make`, which runs its own ACL2s -- so it does
+    /// not block the session and the reconciler keeps going while it runs.
+    /// What it does need is following, which is what `certify_tick` does.
+    certifying: Option<(Value, Option<usize>)>,
+    /// Every documented topic's one-line summary, by folded name.
+    ///
+    /// Built on the same tick as the census and invalidated by the same
+    /// signal, but far cheaper -- one table read, a sentence per topic. Held
+    /// resident so a summary is on the hover even while a proof runs, which
+    /// is the same reasoning as everything else here. `Some(empty)` records
+    /// that the world has no xdoc, so it is attempted once rather than on
+    /// every hover.
+    docs: Option<HashMap<String, String>>,
+    /// The include count the census was built against. When the world comes
+    /// to rest on a different set of books, the table is describing a world
+    /// that no longer exists.
+    census_deps: Option<usize>,
+    /// Names this file's own units introduced, and which unit introduced
+    /// each. Free: the unit envelopes already carry them, so nothing is asked
+    /// of ACL2 for this. It exists so a hover on your own definition answers
+    /// *while a proof is running*, which is exactly when you are reading
+    /// rather than writing. Measured as the right granularity: an
+    /// `include-book` reports no inner events at all, so a library's
+    /// thousands of names never land here -- those stay with `details`,
+    /// where being stable makes them cache well.
+    file_names: HashMap<String, (String, &'static str, usize)>,
+}
+
+/// What kind of thing a definer introduces, from the definer's own name.
+///
+/// Only the heads whose meaning is fixed; everything else -- `fty::defprod`,
+/// `std::deflist`, and whatever a book invents next -- falls to `other`,
+/// which is honest. Guessing that an unknown `def…` makes a function would
+/// put a misleading icon beside half a modern book.
+fn symbol_kind(head: &str) -> &'static str {
+    let bare = head.rsplit("::").next().unwrap_or(head).to_ascii_lowercase();
+    match bare.as_str() {
+        "defun" | "defund" | "defun-sk" | "defund-sk" | "define" | "defines"
+        | "defun-inline" | "defiteration" => "function",
+        "defthm" | "defthmd" | "defrule" | "defruled" | "defaxiom" | "defcong"
+        | "defequiv" | "defrefinement" => "theorem",
+        "defmacro" | "defabbrev" => "macro",
+        "defconst" | "defconstant" => "constant",
+        _ => "other",
+    }
+}
+
+/// Case-folded, package-stripped: the key both sides of a lookup agree on.
+fn fold(name: &str) -> String {
+    name.rsplit("::").next().unwrap_or(name).to_ascii_lowercase()
 }
 
 impl Driver {
@@ -157,6 +264,14 @@ impl Driver {
             eval_queue: VecDeque::new(),
             eval_in_flight: None,
             details: HashMap::new(),
+            builtins: None,
+            symbols: None,
+            census_wanted: false,
+            census_deps: None,
+            docs: None,
+            docs_wanted: false,
+            certifying: None,
+            file_names: HashMap::new(),
         }
     }
 
@@ -172,6 +287,8 @@ impl Driver {
                     if let Flow::Exit = self.tick() {
                         return;
                     }
+                    self.census_tick();
+                    self.certify_tick();
                     continue;
                 }
                 Err(RecvTimeoutError::Disconnected) => return,
@@ -185,6 +302,14 @@ impl Driver {
             if let Flow::Exit = self.drive() {
                 return;
             }
+            // Not only on the timeout branch. A client that polls -- which is
+            // exactly what a completion popup does -- keeps the channel warm,
+            // so a driver waiting for true idleness would never build the
+            // census at all and completion would never see the world. Found
+            // by the protocol test, which polls every 500 ms and waited
+            // forever. It runs at most once, so the cost is one pause.
+            self.census_tick();
+            self.certify_tick();
         }
     }
 
@@ -306,6 +431,30 @@ impl Driver {
                 self.definition(&id, &name);
                 Flow::Continue
             }
+            Cmd::Links { id } => {
+                self.links(&id);
+                Flow::Continue
+            }
+            Cmd::Complete { id, prefix } => {
+                self.complete(&id, &prefix);
+                Flow::Continue
+            }
+            Cmd::Symbols { id } => {
+                self.symbols(&id);
+                Flow::Continue
+            }
+            Cmd::Rules { id, name } => {
+                self.rules(&id, &name);
+                Flow::Continue
+            }
+            Cmd::Doc { id, name } => {
+                self.doc(&id, &name);
+                Flow::Continue
+            }
+            Cmd::Certify { id, jobs } => {
+                self.certify(&id, jobs);
+                Flow::Continue
+            }
             Cmd::Pause => {
                 // The protocol loop already sent request_abort, so a blocked
                 // call has yielded; the escalation itself runs here, where
@@ -319,12 +468,15 @@ impl Driver {
                 // parked driver, and a query is worth more, not less, once
                 // the proof it was waiting behind has been called off.
                 self.abandon_in_flight("interrupted");
+                // `interrupt` kills the build as well as the proof.
+                self.abandon_certify("interrupted");
                 self.emit_state(None);
                 self.settle("interrupted", None);
                 Flow::Continue
             }
             Cmd::Close => {
                 self.abandon_all_evals("the session is closing");
+                self.abandon_certify("the session is closing");
                 Flow::Exit
             }
         }
@@ -348,13 +500,45 @@ impl Driver {
     ///
     /// `available: false` is not an error and not "no such name": the client
     /// shows nothing and asks again on the next hover.
+    /// What a form introduced, in the detail `:pr` gives -- from memory.
+    ///
+    /// Unlike `describe` this never has to decline. The scrape was taken
+    /// when the form was admitted precisely so that the answer would not
+    /// depend on the prover being free, and reading what an earlier form
+    /// defined while a later one grinds is the case it exists for.
+    fn rules(&mut self, id: &Value, name: &str) {
+        let found = {
+            let book = self.book.lock().expect("book lock");
+            book.rules_for(name).map(|r| wire::rules_reply(name, Some(r)))
+        };
+        let r = found.unwrap_or_else(|| wire::rules_reply(name, None));
+        self.out.reply(id, to_value(r));
+    }
+
     fn describe(&mut self, id: &Value, name: &str) {
         match self.cached_detail(name) {
-            Ok(d) => self.out.reply(id, to_value(wire::described(name, d.as_ref()))),
-            // Busy, or the session unwell -- which the client learns about
-            // through `status`; a hover is not the place to surface it a
-            // second time, so both degrade to the same "ask again".
-            Err(()) => self.out.reply(id, to_value(wire::describe_busy(name))),
+            Ok(d) => {
+                let mut r = wire::described(name, d.as_ref());
+                r.short = self.doc_short(name);
+                self.out.reply(id, to_value(r))
+            }
+            // The session is busy, or unwell. Before declining, answer from
+            // what needs no session at all: this file's own names, recorded
+            // as their units admitted. A partial answer that is true beats an
+            // empty tooltip, and this is the case that matters -- hovering
+            // your own definition while a proof runs is exactly when you are
+            // reading rather than writing.
+            //
+            // Anything else degrades to "ask again". A session that is unwell
+            // is reported through `status`; a tooltip is not the place to say
+            // so a second time.
+            Err(()) => {
+                let mut r = self.known_locally(name).unwrap_or_else(|| wire::describe_busy(name));
+                // Resident, so it is there even when the rest of the answer
+                // had to be declined.
+                r.short = self.doc_short(name);
+                self.out.reply(id, to_value(r));
+            }
         }
     }
 
@@ -403,20 +587,527 @@ impl Driver {
             Ok(d) => d,
             Err(()) => return self.out.reply(id, to_value(wire::definition_busy())),
         };
-        let Some(p) = detail.and_then(|d| d.book_path) else {
-            // Either no such name, or one ACL2 itself defines -- for which
-            // there is no book to open. Both are "nothing to jump to".
+        let Some(d) = detail else {
             return self.out.reply(id, to_value(wire::definition_missing()));
         };
-        let line = std::fs::read(&p).ok().and_then(|b| self.site_in(&b, name).map(|s| s.line));
+        if d.origin == Origin::Builtin {
+            return self.builtin_definition(id, name);
+        }
+        let Some(p) = d.book_path else {
+            return self.out.reply(id, to_value(wire::definition_missing()));
+        };
+        // Tier 3, and tier 4 once the census can supply the world order for
+        // that book: either the name is written there, or it was generated
+        // and the decomposition/anchoring pair finds the form that made it.
+        let order = self.book_order(d.book.as_deref());
+        let found = std::fs::read(&p).ok().and_then(|b| acl2_session::locate(&b, &order, name));
         self.out.reply(id, to_value(wire::DefinitionReply {
             available: true,
             found: true,
             unit: None,
             path: Some(p.display().to_string()),
-            line,
-            how: line.map(|_| "definer"),
+            line: found.map(|f| f.line),
+            how: found.map(|f| f.how.as_str()),
         }));
+    }
+
+    /// The names the world attributes to one book, in **file order**.
+    ///
+    /// The census is newest-first, so this reverses it. Empty when no census
+    /// has been built, which `locate` reads as "tier 1 only" -- an honest
+    /// answer rather than a guessed one, and the reason a generated name
+    /// still opens its book at the top until completion has been used once.
+    fn book_order(&self, book: Option<&str>) -> Vec<String> {
+        let (Some(book), Some(all)) = (book, self.symbols.as_ref()) else {
+            return Vec::new();
+        };
+        let mut v: Vec<String> = all
+            .iter()
+            .filter(|e| e.book.as_deref() == Some(book))
+            .map(|e| e.name.clone())
+            .collect();
+        v.reverse();
+        v
+    }
+
+    /// Every `include-book` in the snapshot, resolved to a file.
+    ///
+    /// Needs no session at all -- it is the snapshot plus two directories --
+    /// so it answers immediately whatever the prover is doing. It lives here
+    /// rather than in the protocol loop only because the snapshot does.
+    ///
+    /// Resolution mirrors ACL2's: `:dir :system` is relative to the books
+    /// directory the session reported at startup, and a bare name is relative
+    /// to the directory of the file doing the including. A project's own
+    /// `:dir` alias is declined rather than guessed at -- the same choice
+    /// `resolve_dep` makes for dependencies, and for the same reason. A
+    /// target that does not exist is declined too: a link that opens nothing
+    /// is worse than no link.
+    fn links(&mut self, id: &Value) {
+        let (books, own) = {
+            let book = self.book.lock().expect("book lock");
+            (
+                book.books_dir().map(Path::to_path_buf),
+                book.path().parent().map(Path::to_path_buf),
+            )
+        };
+        let links = acl2_session::include_sites(&self.bytes)
+            .into_iter()
+            .map(|s| {
+                let rel = format!("{}.lisp", s.book);
+                let base = match s.dir.as_deref() {
+                    None => own.clone(),
+                    Some(d) if d.eq_ignore_ascii_case(":system") => books.clone(),
+                    Some(_) => None,
+                };
+                let path = base
+                    .map(|b| b.join(&rel))
+                    .filter(|p| p.is_file())
+                    .map(|p| p.display().to_string());
+                wire::BookLink { line: s.line, book: s.book, path }
+            })
+            .collect();
+        self.out.reply(id, to_value(wire::LinksReply { links }));
+    }
+
+    /// Certify the book, and follow the build rather than waiting on it.
+    ///
+    /// A zero deadline both *starts* the build and polls it without blocking:
+    /// the core's `certify` starts one if none is running and then returns as
+    /// soon as the deadline is out, so the same call serves for both. That is
+    /// what lets a build be followed exactly like a proof -- `certify_tick`
+    /// polls between everything else -- instead of holding the driver for the
+    /// minutes a real certification takes.
+    ///
+    /// A second request while one runs is refused rather than queued. Builds
+    /// are long, and a queue of identical builds serves nobody.
+    fn certify(&mut self, id: &Value, jobs: Option<usize>) {
+        if self.certifying.is_some() {
+            self.out.error(id, -32603, "already certifying this book".into());
+            return;
+        }
+        // Certification runs against the file on **disk**, never the buffer:
+        // it is what `cert.pl` would do from a shell, so an unsaved edit
+        // certifies as whatever was saved. The client saves first.
+        let r = {
+            let mut book = self.book.lock().expect("book lock");
+            book.certify(Duration::ZERO, jobs.unwrap_or(1))
+        };
+        match r {
+            Ok(r) if r.status == acl2_session::CertStatus::StillRunning => {
+                self.certifying = Some((id.clone(), jobs));
+            }
+            Ok(r) => self.out.reply(id, to_value(wire::certified(&r))),
+            Err(e) => self.out.error(id, -32603, e.to_string()),
+        }
+    }
+
+    /// Follow the build one poll at a time, streaming its tail.
+    fn certify_tick(&mut self) {
+        let Some((id, jobs)) = self.certifying.clone() else { return };
+        let (r, progress) = {
+            let Ok(mut book) = self.book.try_lock() else { return };
+            let r = book.certify(Duration::ZERO, jobs.unwrap_or(1));
+            let p = book.build_progress(TAIL_LINES);
+            (r, p)
+        };
+        match r {
+            Ok(rep) if rep.status == acl2_session::CertStatus::StillRunning => {
+                if let Some(p) = progress {
+                    self.out.notify("cert_tail", &wire::CertTailEvent {
+                        book: self.id.clone(),
+                        elapsed_ms: p.elapsed.as_millis(),
+                        lines_so_far: p.lines_so_far,
+                        tail: p.tail,
+                    });
+                }
+            }
+            Ok(rep) => {
+                self.certifying = None;
+                self.out.reply(&id, to_value(wire::certified(&rep)));
+            }
+            Err(e) => {
+                self.certifying = None;
+                self.out.error(&id, -32603, e.to_string());
+            }
+        }
+    }
+
+    /// Tell a waiting certify that its build is gone.
+    ///
+    /// `Book::interrupt` kills the build outright, which also means the next
+    /// poll would find no build and cheerfully start a *second* one. Clearing
+    /// the slot here is what stops that, and answering the request is what
+    /// stops a client waiting forever -- the same discipline evals have.
+    fn abandon_certify(&mut self, why: &str) {
+        if let Some((id, _)) = self.certifying.take() {
+            self.out.error(&id, -32603, format!("certification {why}"));
+        }
+    }
+
+    /// One topic's documentation.
+    ///
+    /// The summary comes from the resident index, so it is there whatever the
+    /// prover is doing; the body needs the session, because keeping every
+    /// topic's `:long` in memory would be pages apiece for thousands of
+    /// topics to serve the one someone opened. Busy therefore declines the
+    /// body but still answers with the summary -- a heading and a sentence
+    /// beats an empty window, and the client can ask again.
+    fn doc(&mut self, id: &Value, name: &str) {
+        let short = self.doc_short(name);
+        let long = {
+            let mut book = self.book.lock().expect("book lock");
+            book.doc_topic(name, DESCRIBE)
+        };
+        let (available, long) = match long {
+            Ok(l) => (true, l),
+            Err(_) => (false, None),
+        };
+        self.out.reply(id, to_value(wire::DocReply {
+            available,
+            found: short.is_some() || long.is_some(),
+            name: name.to_string(),
+            short,
+            long,
+        }));
+    }
+
+    /// The outline of the snapshot.
+    ///
+    /// Built entirely from the text, so it needs no session and works while a
+    /// proof runs, and -- more to the point -- it covers the whole file
+    /// rather than the admitted prefix. An outline that stopped at the
+    /// frontier would be least useful exactly when a book is long and only
+    /// partly checked, which is when someone reaches for it.
+    ///
+    /// One entry per unit, named by what it introduces. A unit that
+    /// introduces nothing of its own is named by its head -- `encapsulate`,
+    /// `mutual-recursion`, `in-theory` -- with any definers inside it as
+    /// children, because a flat outline would hide the members of exactly the
+    /// forms most worth navigating. `include-book` is named by the book it
+    /// pulls in, which is what a reader is looking for when scanning.
+    fn symbols(&mut self, id: &Value) {
+        let defs = acl2_session::definer_sites(&self.bytes);
+        let mut out: Vec<wire::BookSymbol> = Vec::new();
+        for (i, u) in self.units.iter().enumerate() {
+            let text = &self.bytes[u.start..u.end];
+            let inside: Vec<&acl2_session::DefinerSite> =
+                defs.iter().filter(|d| d.offset >= u.start && d.offset < u.end).collect();
+            let head = acl2_session::head_of(text);
+            // The unit's own definer is the one that starts where it does;
+            // anything else nested is a child. A `(local (defthm ...))` has
+            // none at the start, so its inner definer names it instead.
+            let own = inside.iter().find(|d| d.offset == u.start);
+            let includes = acl2_session::include_sites(text);
+            // Named by what it introduces, if it introduces something itself;
+            // otherwise by the book it includes, otherwise by its head. Only
+            // the first case consumes a definer -- in the others every
+            // definer found inside is a child.
+            let (name, kind) = if let Some(d) = own {
+                (d.name.clone(), symbol_kind(&d.head))
+            } else if let Some(inc) = includes.first() {
+                (format!("include-book \"{}\"", inc.book), "include")
+            } else if let Some(h) = head.as_deref() {
+                (h.to_string(), "other")
+            } else {
+                (String::from("(form)"), "other")
+            };
+            // Everything nested *inside* the unit, which is exactly the sites
+            // that are not the unit's own head. Identified by offset rather
+            // than by position in the list: the outermost site does sort
+            // first today, because `definers_in` records a form before
+            // recursing into it, but relying on that is an invisible coupling
+            // between two functions -- and if the walk order ever changed,
+            // this would silently drop a real child instead of failing.
+            let children = inside
+                .iter()
+                .filter(|d| d.offset != u.start)
+                .map(|d| wire::BookSymbol {
+                    name: d.name.clone(),
+                    kind: symbol_kind(&d.head),
+                    unit: None,
+                    line_start: d.line,
+                    line_end: d.line,
+                    children: Vec::new(),
+                })
+                .collect();
+            out.push(wire::BookSymbol {
+                name,
+                kind,
+                unit: Some(i),
+                line_start: u.line_start,
+                line_end: u.line_end,
+                children,
+            });
+        }
+        self.out.reply(id, to_value(wire::SymbolsReply { symbols: out }));
+    }
+
+    /// Names the user could be typing.
+    ///
+    /// Three sources, and they are available at different times, which is the
+    /// shape of this feature rather than an accident:
+    ///
+    /// - **The buffer**, always. The definer scan over the snapshot costs
+    ///   nothing, needs no session, and covers exactly the names being
+    ///   written right now -- including forms below the frontier, which the
+    ///   world has never heard of.
+    /// - **The world**, once the census has run. Everything an included book
+    ///   defines, generated names included, which no scan of any text could
+    ///   supply.
+    /// - **Keyword families**, when the token starts with `:`. Static, so
+    ///   they need neither. Gated on the colon because offering `:rewrite`
+    ///   while someone types a function name is noise.
+    ///
+    /// Filtering is server-side because a world holds tens of thousands of
+    /// names and shipping them per keystroke is a megabyte per keystroke. The
+    /// cap plus `incomplete` is LSP's own contract: the client re-asks as the
+    /// prefix narrows rather than filtering a truncation and concluding a
+    /// name does not exist.
+    ///
+    /// **Package prefixes come out right for free.** The census prints
+    /// through ACL2's own printer with the session's `current-package` in
+    /// force -- which, after a sync, is the file's own `in-package`. So a
+    /// name is already written the way this file would have to write it.
+    fn complete(&mut self, id: &Value, prefix: &str) {
+        const CAP: usize = 500;
+        let want = fold(prefix);
+        let mut items: Vec<wire::CompletionItem> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+
+        if prefix.starts_with(':') {
+            for k in KEYWORDS {
+                if fold(k).starts_with(&want) && seen.insert(fold(k)) {
+                    items.push(wire::CompletionItem {
+                        name: k.to_string(),
+                        kind: "keyword",
+                        book: None,
+                    });
+                }
+            }
+        }
+        for s in acl2_session::definer_sites(&self.bytes) {
+            if fold(&s.name).starts_with(&want) && seen.insert(fold(&s.name)) {
+                items.push(wire::CompletionItem {
+                    name: s.name,
+                    kind: "other",
+                    book: None,
+                });
+            }
+        }
+        let mut capped = false;
+        if let Some(world) = &self.symbols {
+            for e in world {
+                if items.len() >= CAP {
+                    capped = true;
+                    break;
+                }
+                if fold(&e.name).starts_with(&want) && seen.insert(fold(&e.name)) {
+                    items.push(wire::CompletionItem {
+                        name: e.name.clone(),
+                        kind: wire::kind_str(e.kind),
+                        book: e.book.clone(),
+                    });
+                }
+            }
+        } else {
+            // Ask for one on the next idle tick, and tell the client that
+            // what it has is provisional so it comes back.
+            self.census_wanted = true;
+            capped = true;
+        }
+        items.sort_by_key(|i| fold(&i.name));
+        self.out.reply(id, to_value(wire::CompleteReply { items, incomplete: capped }));
+    }
+
+    /// Remember what a unit introduced, from the envelope already in hand.
+    ///
+    /// Costs nothing: `event-data-fal` has already recorded each event's name
+    /// and kind for this unit, and the envelope carries them. Measured, an
+    /// `include-book` records none of its book's internal events, so this
+    /// stays exactly what it should be -- the file's own names -- without
+    /// needing a cap to keep a library out.
+    fn note_unit(&mut self, u: &acl2_session::sync::UnitReport) {
+        for e in &u.inner {
+            let kind = match e.kind.as_deref().map(|k| k.to_ascii_lowercase()) {
+                Some(k) if k.starts_with("defthm") || k.starts_with("defaxiom") => "theorem",
+                Some(k) if k.starts_with("defmacro") => "macro",
+                Some(k) if k.starts_with("defconst") => "constant",
+                Some(k) if k.starts_with("defun") || k.starts_with("defines") => "function",
+                _ => "other",
+            };
+            self.file_names.insert(fold(&e.name), (e.name.clone(), kind, u.index));
+        }
+    }
+
+    /// This name's one-line summary, if the world documents it.
+    ///
+    /// Asking is what makes the index wanted; it is built on the next tick,
+    /// so the first hover of a session has no summary and the rest do.
+    fn doc_short(&mut self, name: &str) -> Option<String> {
+        let Some(docs) = self.docs.as_ref() else {
+            self.docs_wanted = true;
+            return None;
+        };
+        docs.get(&fold(name)).cloned()
+    }
+
+    /// What this file's own units introduced, if this is one of them.
+    ///
+    /// The answer a hover gets while a proof is running. Partial by nature --
+    /// formals and a guard need the world, and the world is busy -- but name,
+    /// kind and "defined in this file" is most of what the tooltip says, and
+    /// it is *true*, which beats an empty tooltip.
+    fn known_locally(&self, name: &str) -> Option<wire::DescribeReply> {
+        let (written, kind, _) = self.file_names.get(&fold(name))?;
+        Some(wire::DescribeReply {
+            available: true,
+            found: true,
+            name: written.clone(),
+            kind: Some(kind),
+            origin: Some("file"),
+            formals: None,
+            guard: None,
+            statement: None,
+            book: None,
+            path: None,
+            short: None,
+        })
+    }
+
+    /// Build the census, if a completion has asked for one.
+    ///
+    /// On the idle tick, where seconds are free. `try_lock` because an idle
+    /// tick must never wait on anything: if the book is busy, the next tick
+    /// will do.
+    fn census_tick(&mut self) {
+        let deps = {
+            let Ok(book) = self.book.try_lock() else { return };
+            book.dep_count()
+        };
+        // Invalidate eagerly, rebuild lazily -- which is what keeps a sync
+        // from turning into a rebuild storm. A book with ten `include-book`
+        // forms moves this count ten times while it is being checked, and
+        // rebuilding on each would be ten multi-second walks mid-sync,
+        // strictly worse than never rebuilding at all. *Dropping* the table
+        // is free, and the rebuild is then demand-driven: it happens on the
+        // next completion, which is a moment the user chose.
+        if self.symbols.is_some() && self.census_deps != deps {
+            self.symbols = None;
+            // Topics arrive with books, so the same signal retires them --
+            // and re-arms the want, since something clearly cares.
+            self.docs = None;
+            self.docs_wanted = true;
+        }
+        // Demand-driven, exactly like the census below, and for a reason the
+        // protocol test caught: built eagerly, this submits on the tick right
+        // after the driver settles, so `status` reports the session busy when
+        // nothing the *user* asked for is running. A session that never hovers
+        // should pay nothing, and one that does pays once.
+        if self.docs_wanted && self.docs.is_none() {
+            let r = {
+                let Ok(mut book) = self.book.try_lock() else { return };
+                book.doc_index(DESCRIBE)
+            };
+            // A world with no xdoc answers `Ok(empty)` -- the probe cannot
+            // even be read there -- and that is recorded as built, so it is
+            // attempted once rather than on every tick. `Busy` leaves it
+            // unbuilt for the next one.
+            if let Ok(t) = r {
+                self.docs = Some(t.into_iter().map(|t| (fold(&t.name), t.short)).collect());
+                self.docs_wanted = false;
+            }
+        }
+        if !self.census_wanted || self.symbols.is_some() {
+            return;
+        }
+        let r = {
+            let Ok(mut book) = self.book.try_lock() else { return };
+            book.census(CENSUS)
+        };
+        if let Ok(c) = r
+            && !c.is_empty()
+        {
+            self.symbols = Some(c);
+            self.census_wanted = false;
+            // Recorded from *after* the walk: the world it describes is the
+            // one that existed when it finished, not when it started.
+            self.census_deps = self.book.try_lock().ok().and_then(|b| b.dep_count());
+        }
+    }
+
+    /// A name ACL2 itself defines: jump into the image's own source.
+    ///
+    /// It works for most of them -- `binary-append`
+    /// really is a `defun` in `axioms.lisp`. Not for all: `symbolp` is a
+    /// primitive, axiomatised rather than defined, and appears in no source
+    /// file at all. Those honestly answer nothing, which is the point of
+    /// separating them from "defined in this file" in the first place.
+    ///
+    /// The checkout comes from the session's own `books_dir`, so this is the
+    /// ACL2 that built this world rather than whichever one is on the path.
+    /// The index is built once and kept: ~13 MB of source is about a second,
+    /// which is far too slow to repeat per jump and unnoticeable once.
+    /// `doc.lisp` is skipped -- 8 MB of documentation topics, no definitions
+    /// anyone wants to land in.
+    fn builtin_definition(&mut self, id: &Value, name: &str) {
+        if self.builtins.is_none() {
+            self.builtins = Some(self.index_builtins());
+        }
+        let hit = self.builtins.as_ref().and_then(|m| m.get(&fold(name))).cloned();
+        match hit {
+            Some((path, line)) => self.out.reply(id, to_value(wire::DefinitionReply {
+                available: true,
+                found: true,
+                unit: None,
+                path: Some(path),
+                line: Some(line),
+                how: Some("builtin"),
+            })),
+            None => self.out.reply(id, to_value(wire::definition_missing())),
+        }
+    }
+
+    /// Scan the ACL2 checkout's own sources once. See [`Driver::builtin_definition`].
+    fn index_builtins(&self) -> HashMap<String, (String, usize)> {
+        let mut out = HashMap::new();
+        let Some(books) = self.book.lock().expect("book lock").books_dir().map(Path::to_path_buf)
+        else {
+            return out;
+        };
+        let Some(checkout) = books.parent() else { return out };
+        let Ok(entries) = std::fs::read_dir(checkout) else { return out };
+        let mut files: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "lisp"))
+            .filter(|p| p.file_name().is_some_and(|n| n != "doc.lisp"))
+            .collect();
+        files.sort();
+        // A name can appear in more than one definer form. `binary-append` is
+        // a plain `defun` in axioms.lisp *and* has an executable-counterpart
+        // `(defun-*1* binary-append ...)` in interface-raw.lisp; the first is
+        // what anyone ctrl-clicking wants. So a `*1*` site is only ever a
+        // fallback -- it fills an empty slot and yields to a real definition,
+        // whichever file order happens to present them in. It is still worth
+        // keeping, because for a primitive like `symbolp`, axiomatised rather
+        // than defined, the `*1*` form is the only source ACL2 has.
+        let mut fallback: HashMap<String, (String, usize)> = HashMap::new();
+        for f in files {
+            let Ok(bytes) = std::fs::read(&f) else { continue };
+            let shown = f.display().to_string();
+            for s in acl2_session::definer_sites(&bytes) {
+                let target = if s.head.contains("*1*") { &mut fallback } else { &mut out };
+                // Otherwise first wins: ACL2 redefines a few names in later
+                // files (raw-Lisp shadows, `verify-termination` reruns), and
+                // the original is the one worth reading.
+                target.entry(fold(&s.name)).or_insert((shown.clone(), s.line));
+            }
+        }
+        for (k, v) in fallback {
+            out.entry(k).or_insert(v);
+        }
+        out
     }
 
     /// The form in `text` that defines `name`, if its text names it.
@@ -604,6 +1295,7 @@ impl Driver {
                 );
             }
             for u in &o.admitted {
+                self.note_unit(u);
                 self.out.notify("unit", &wire::unit_admitted(&self.id, self.revision, u));
             }
             for f in &o.skipped {
@@ -683,6 +1375,7 @@ impl Driver {
                     }
                 }
                 Ok(Some(Resumed::Admitted(u))) => {
+                    self.note_unit(&u);
                     self.out.notify("unit", &wire::unit_admitted(&self.id, self.revision, &u));
                     self.emit_state(None);
                     return Flow::Continue;
@@ -738,14 +1431,28 @@ impl Driver {
     }
 
     fn emit_state(&mut self, running: Option<usize>) {
-        // The world just moved, so every cached answer about a name is a
-        // claim about a world that no longer exists. See `Driver::details`
-        // on why this is blunt rather than incremental.
-        self.details.clear();
+        // The world moved, so cached answers about *volatile* names are
+        // claims about a world that no longer exists: anything this file
+        // introduced can have changed, and a "no such name" can have become
+        // a name. Both go.
+        //
+        // What stays is what cannot have changed. ACL2's own definitions are
+        // fixed for the life of the session, and an included book's can only
+        // vanish if the include itself is rolled back -- which moves the
+        // dependency count, and `census_tick` clears these on exactly that
+        // signal. Keeping them is what lets a hover on a library name answer
+        // from cache all the way through a long proof, instead of being
+        // cleared by every unit that admits and then declined for being busy.
+        self.details.retain(|_, d| {
+            d.as_ref().is_some_and(|d| matches!(d.origin, Origin::Book | Origin::Builtin))
+        });
         let (admitted, skipped) = {
             let book = self.book.lock().expect("book lock");
             (book.admitted_lines().len(), book.skipped_units())
         };
+        // Names from units that are no longer admitted are no longer this
+        // file's; the frontier is the authority.
+        self.file_names.retain(|_, (_, _, unit)| *unit < admitted);
         let conditional_from = skipped.first().copied();
         let units = self
             .units

@@ -16,25 +16,30 @@
 
 pub mod cert;
 pub mod image;
+pub mod induction;
 pub mod output;
 pub mod pty;
 pub mod registry;
 pub mod session;
+mod locate;
 pub mod split;
 pub mod sync;
 
 pub use session::{Outcome, Session, SessionControl, StatusSnapshot, Submission};
-pub use split::{definer_sites, split, split_str, DefinerSite, Form, SplitError};
+pub use locate::{locate, How, Located};
+pub use split::{
+    definer_sites, head_of, include_sites, split, split_str, DefinerSite, Form, IncludeSite,
+    SplitError,
+};
 pub use registry::{Registry, RegistryError, SessionId};
-pub use cert::{Build, CertError};
+pub use cert::{Build, CertError, CertReport, CertStatus};
 pub use image::{find_checkout, ImageError, ImagePolicy};
+pub use induction::Induction;
 pub use output::{OutputRef, OutputSlice, OutputStore, Slice};
 pub use session::Progress;
 pub use sync::{
-    Book, Budget, Checkpoint, EvalFailure, EvalResult, Health, InnerEvent,
-    InterruptEnvelope, InterruptReport, NameDetail, NameKind, QueryResult, Resumed, StaleInclude,
-    Status, SyncError,
-    SyncMode,
-    SyncOptions,
-    SyncOutcome, WorldChange,
+    Book, Budget, CensusEntry, Checkpoint, DocTopic, EvalFailure, EvalResult, Health, InnerEvent,
+    InterruptEnvelope, InterruptReport, NameDetail, NameKind, NameRules, Origin, QueryResult,
+    Resumed, RuneDetail, StaleInclude, Status, SyncError, SyncMode, SyncOptions, SyncOutcome,
+    WorldChange,
 };

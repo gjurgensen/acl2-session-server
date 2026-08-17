@@ -146,24 +146,65 @@ fn checkpoints(c: &core::sync::Checkpoints) -> Checkpoints {
 
 /// A form that was admitted.
 ///
-/// Facts about the event, plus a handle to the evidence. Deliberately
+/// What it is, where it is, and a handle to the evidence. Deliberately
 /// *compact*: a sync reports every form that went in, so anything routine
-/// here is multiplied by the length of the book -- measured in the field at
-/// 63 records of "still works" for one added lemma. What a clean form
-/// reports is its identity, its wall time, and its handle; everything that
-/// describes *unease* (warnings, fired hints, splitter rules) is reported
-/// exactly when present. The trimmed detail -- rules, prover steps, inner
-/// events with their per-event times -- is per form in the log, so ask the
-/// one form you care about: `acl2_output output_ref:"<this form's>"
+/// here is multiplied by the length of the book -- and not once, since sync
+/// reuses the untouched prefix and re-admits everything below the first
+/// change, so editing near the top of a book pays this on every save.
+///
+/// The trimmed detail -- rules, prover steps, inner events with their
+/// per-event times, and the log's length -- is per form in the log, so ask
+/// the one form you care about: `acl2_output output_ref:"<this form's>"
 /// mode:"find" text:"Rules:"` (or `"Prover steps"`, or `"Form:"` for the
-/// events a compound form introduced). Failures keep everything, where it
-/// is evidence rather than bulk.
+/// events a compound form introduced). Failures keep everything, where it is
+/// evidence rather than bulk.
+///
+/// There is deliberately no form index. Nothing on this surface accepts one
+/// -- `through_line` is the only positional input -- so it was a number you
+/// could look at and not use, and printing it beside `output_ref` invited the
+/// reading that `f63` names form 63.
+///
+/// It never did, not even once. `f` counts everything the session has *put in
+/// the store* -- and it is 1-based where indices are 0-based, so a fresh
+/// session's first form is index 0 and `f1`. From there the gap only widens:
+/// every `acl2_eval`, every `acl2_certify`, and every re-admission of a form
+/// takes the next number, while the index stays put. (Internal probes do not:
+/// they are not stored, so they are not the mechanism.) Two sessions drew the
+/// inference anyway and were wrong -- one asserted the ref was derivable from
+/// the index and watched a single unchanged form come back `f149`, `f150`,
+/// `f151`; a third, evaluating heavily enough to see index 51 arrive as
+/// `f161`, was never tempted and reported the index as simply unused.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct Admitted {
-    pub index: usize,
+    /// What this form is called -- what a reader means by "that form".
+    /// Absent when it names nothing, so an `include-book` costs nothing.
+    ///
+    /// A label, not a key. A compound form carries several, and `names_total`
+    /// says so when more existed than fit. Nor is it the full list of what
+    /// landed in the world: `(fty::defprod point ...)` admits 37 events, and
+    /// the one worth printing is `point`. Ask the log for the rest --
+    /// `acl2_output output_ref:"..." mode:"find" text:"Form:"`.
+    ///
+    /// Taken from ACL2's own record of the form, read through the source: the
+    /// world says which names are real, and the text says which of them the
+    /// author wrote and in what order. See `UnitReport::display_names` for
+    /// what each source gets wrong alone.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub names: Vec<String>,
+    /// Present only when the written names did not fit the budget.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub names_total: Option<usize>,
     pub line_start: usize,
-    pub line_end: usize,
-    pub elapsed_ms: u128,
+    /// Wall time, present only for a form that took over a second.
+    ///
+    /// Self-suppressing, the way `warnings` is: on two measured sessions of
+    /// real proofs -- not `skip_proofs` -- forms ran 1-83 ms and 1-495 ms, so an ordinary
+    /// book never reaches the threshold and pays nothing, while the book with
+    /// a thirty-second form still says so. The unit anyone actually waits on
+    /// is the whole book, and in those same sessions that *was* worth minutes
+    /// -- which is why timing stays on the `acl2_certify` reply unconditioned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u128>,
     /// The kinds of warning this form emitted -- `Double-rewrite`, `Use` --
     /// present only when there were any, since unlike rules a warning is an
     /// exception rather than a fact every form carries.
@@ -185,16 +226,19 @@ pub struct Admitted {
     pub splitter_rules: Vec<String>,
     /// Handle to everything ACL2 printed for this form. Pass to `acl2_output`.
     /// Kept on every record, however compact: it is the only handle to a
-    /// successful form's log that will ever exist.
+    /// successful form's log that will ever exist, and it names one *run* --
+    /// re-admit a form and the old ref stays readable and flagged
+    /// `superseded`, which no index could express.
     pub output_ref: String,
-    /// Lines behind that handle, so you can tell how much you are not seeing.
-    pub output_lines: usize,
 }
 
 /// A form that did not go in.
+///
+/// Everything is kept here -- this is evidence, not bulk -- except the form
+/// index, which is absent for the same reason it is absent from `Admitted`:
+/// nothing accepts one, and beside `output_ref` it reads as the `f` number.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct Failed {
-    pub index: usize,
     pub line_start: usize,
     pub line_end: usize,
     /// `proof_failure` -- a proof ran and did not finish; checkpoints and an
@@ -273,14 +317,18 @@ pub struct Failed {
 /// information does not exist.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct SyncReply {
-    /// The form this sync was *aiming* at: the file's last form, or the one
-    /// `through_line` selected.
+    /// The line this sync was *aiming* at: the file's last form, or the one
+    /// `through_line` selected, reported as that form's first line.
+    ///
+    /// A line rather than a form index, so it round-trips: the number you get
+    /// back is the number you can pass to `through_line`. An index was neither
+    /// usable as input nor relatable to anything else in the reply.
     ///
     /// This is the target, not the progress -- it does not move as a long book
     /// is worked through. How far the run actually got is `admitted` and
     /// `reused`, and the form left running is `in_flight`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub target_form: Option<usize>,
+    pub target_line: Option<usize>,
     /// Forms left untouched because the file had not changed under them.
     pub reused: usize,
     /// Forms undone because the file had changed under them.
@@ -325,11 +373,12 @@ pub struct StaleInclude {
     pub book: String,
     /// Where it resolved to on disk.
     pub path: String,
-    /// The form in *this* file that pulled it in. Absent when no form did:
-    /// a book included transitively by another book, or one the session
-    /// environment supplied.
+    /// The first line of the form in *this* file that pulled it in -- the
+    /// line to sync `through_line` at. Absent when no form did: a book
+    /// included transitively by another book, or one the session environment
+    /// supplied.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub unit: Option<usize>,
+    pub line: Option<usize>,
     /// The file is gone, not merely different.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub missing: bool,
@@ -339,7 +388,7 @@ pub fn stale_include(s: &core::StaleInclude) -> StaleInclude {
     StaleInclude {
         book: s.book.clone(),
         path: s.path.display().to_string(),
-        unit: s.unit,
+        line: s.line,
         missing: s.missing,
     }
 }
@@ -347,7 +396,6 @@ pub fn stale_include(s: &core::StaleInclude) -> StaleInclude {
 /// A form ACL2 is still working on.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct InFlight {
-    pub index: usize,
     pub line_start: usize,
     pub line_end: usize,
     /// Handle to this form's output. It fills in when the form finishes; until
@@ -362,7 +410,7 @@ impl From<core::SyncOutcome> for SyncReply {
         // obvious thing to key on.
         let running = o.failed.as_ref().is_some_and(|f| f.still_running);
         SyncReply {
-            target_form: o.resolved_through,
+            target_line: o.resolved_through_line,
             reused: o.reused,
             rolled_back: o.rolled_back,
             rebuilt: o.rebuilt,
@@ -370,7 +418,6 @@ impl From<core::SyncOutcome> for SyncReply {
             failed: o.failed.as_ref().filter(|_| !running).map(failed),
             stale_includes: o.stale_includes.iter().map(stale_include).collect(),
             in_flight: o.failed.as_ref().filter(|_| running).map(|f| InFlight {
-                index: f.index,
                 line_start: f.line_start,
                 line_end: f.line_end,
                 output_ref: f.output_ref.to_string(),
@@ -381,24 +428,62 @@ impl From<core::SyncOutcome> for SyncReply {
 
 // The inner events are dropped here rather than at the source: the core
 // still carries them on `UnitReport`, and a different client may want them.
+/// How many characters of names one record may carry.
+///
+/// A budget rather than a count, because ACL2 names run long: four at forty
+/// characters would be 180 bytes, worse than the whole record used to be,
+/// while a count of four says nothing about that. Sized to hold the common
+/// single name comfortably and to stop an `encapsulate` of a dozen from
+/// dominating the reply.
+const NAME_BUDGET: usize = 60;
+
+/// Wall time is reported only above this, in milliseconds.
+///
+/// Absolute and deliberately boring: it needs no calibration to the book, and
+/// a second is roughly where waiting becomes noticeable. A threshold rather
+/// than a ratio because "slower than its neighbours" is not the question --
+/// "is this one worth my attention" is. The measurements behind it are in
+/// `Admitted::elapsed_ms`.
+const SLOW_MS: u128 = 1000;
+
+/// Names, up to the budget, and how many there really were.
+///
+/// Truncation is reported rather than silent, matching `inner`/`inner_total`
+/// and the checkpoint counts: a list that quietly stops is a list you cannot
+/// trust to be a list.
+fn names_within_budget(names: &[String]) -> (Vec<String>, Option<usize>) {
+    let mut out = Vec::new();
+    let mut used = 0;
+    for n in names {
+        // Always take the first, however long: one over-budget name is more
+        // use than none, and the total says what was left out.
+        if !out.is_empty() && used + n.len() > NAME_BUDGET {
+            break;
+        }
+        used += n.len();
+        out.push(n.clone());
+    }
+    let total = (out.len() < names.len()).then_some(names.len());
+    (out, total)
+}
+
 pub fn admitted(u: &core::sync::UnitReport) -> Admitted {
+    let (names, names_total) = names_within_budget(&u.display_names());
     Admitted {
-        index: u.index,
+        names,
+        names_total,
         line_start: u.line_start,
-        line_end: u.line_end,
-        elapsed_ms: u.elapsed.as_millis(),
+        elapsed_ms: Some(u.elapsed.as_millis()).filter(|ms| *ms >= SLOW_MS),
         warnings: u.event_data.warnings.clone(),
         hint_events: u.event_data.hint_events.clone(),
         splitter_rules: u.event_data.splitter_rules.clone(),
         output_ref: u.output_ref.to_string(),
-        output_lines: u.output_lines,
     }
 }
 
 pub fn failed(f: &core::sync::FailureReport) -> Failed {
     let (prover_steps, step_limit_reached) = steps_split(f.event_data.prover_steps);
     Failed {
-        index: f.index,
         line_start: f.line_start,
         line_end: f.line_end,
         status: match f.status {
@@ -516,6 +601,56 @@ pub fn evaluated(r: &core::EvalResult) -> EvalReply {
         output_ref: r.output_ref.to_string(),
         output_lines: r.output_lines,
         elapsed_ms: r.elapsed.as_millis(),
+    }
+}
+
+/// Why the prover inducted, recovered from a captured log.
+///
+/// A different class of fact from everything else on this wire. The rest is
+/// probed out of the world or read from `get-event-data`; the induction
+/// scheme is *printed* by ACL2 and recorded nowhere, so this is a parse over
+/// prose. Fields are individually optional because of it -- an ACL2 that
+/// words the announcement differently drops a field rather than inventing
+/// one, and an empty list means "nothing recognised", not "no induction".
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct InductionWire {
+    /// The pool name: `*1`, or `*1.1` for an induction beneath one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goal: Option<String>,
+    /// The induction term from the conjecture, untranslated: `(append x y)`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggested_by: Option<String>,
+    /// Which rule suggested it: "the :induction rule binary-append". The
+    /// runes themselves are in the form's own `rules`, structurally.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<String>,
+    /// The scheme, with `:p` standing for the conjecture.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<String>,
+    /// The function whose admission licenses the induction. Absent when ACL2
+    /// justified it by the scheme's own measure conjectures instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub justified_by: Option<String>,
+    /// ACL2's own phrasing: "two nontautological subgoals".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subgoals: Option<String>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct InductionReply {
+    /// One per announcement, in the order ACL2 printed them: a proof can
+    /// induct more than once.
+    pub inductions: Vec<InductionWire>,
+}
+
+pub fn induction(i: &acl2_session::Induction) -> InductionWire {
+    InductionWire {
+        goal: i.goal.clone(),
+        suggested_by: i.suggested_by.clone(),
+        attribution: i.attribution.clone(),
+        scheme: i.scheme.clone(),
+        justified_by: i.justified_by.clone(),
+        subgoals: i.subgoals.clone(),
     }
 }
 
@@ -769,7 +904,7 @@ pub fn certified(r: &acl2_session::cert::CertReport) -> CertifyReply {
 
 #[cfg(test)]
 mod tests {
-    use super::prove_ms_of;
+    use super::*;
 
     /// Real tuples from the field session, plus the shapes that must fail
     /// closed. The first component is prove time in seconds.
@@ -787,5 +922,70 @@ mod tests {
         assert_eq!(prove_ms_of(Some("(x y z)")), None);
         assert_eq!(prove_ms_of(Some("(1/0 0 0 0)")), None);
         assert_eq!(prove_ms_of(None), None);
+    }
+
+    fn n(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn the_common_case_is_one_name_and_no_total() {
+        let (names, total) = names_within_budget(&n(&["segment-listp-of-append"]));
+        assert_eq!(names, ["segment-listp-of-append"]);
+        assert_eq!(total, None, "nothing was left out, so nothing is claimed");
+    }
+
+    #[test]
+    fn nothing_written_reports_nothing() {
+        let (names, total) = names_within_budget(&[]);
+        assert!(names.is_empty());
+        assert_eq!(total, None);
+    }
+
+    /// The budget is characters, not a count: this is the case a count of
+    /// four would have let through at 180 bytes.
+    #[test]
+    fn long_names_stop_sooner_than_short_ones() {
+        let long = n(&[
+            "segment-listp-of-revappend-when-segment-listp",
+            "segment-listp-of-append-when-segment-listp",
+            "segment-listp-of-rev",
+        ]);
+        let (names, total) = names_within_budget(&long);
+        assert_eq!(names.len(), 1, "one long name fills the budget");
+        assert_eq!(total, Some(3));
+
+        let short = n(&["a", "b", "c", "d", "e"]);
+        let (names, total) = names_within_budget(&short);
+        assert_eq!(names.len(), 5, "five short ones fit where one long one did not");
+        assert_eq!(total, None);
+    }
+
+    /// A single over-budget name is still reported. One name you can search
+    /// for beats none, and the total says what was dropped.
+    #[test]
+    fn the_first_name_is_never_dropped() {
+        let huge = "x".repeat(NAME_BUDGET * 3);
+        let (names, total) = names_within_budget(&[huge.clone(), "b".into()]);
+        assert_eq!(names, [huge]);
+        assert_eq!(total, Some(2));
+    }
+
+    /// Truncation is always accompanied by the true count -- a list that
+    /// quietly stops is a list you cannot trust to be a list.
+    #[test]
+    fn a_truncated_list_always_says_so() {
+        for k in 1..12usize {
+            let v: Vec<String> = (0..k).map(|i| format!("name-number-{i:02}")).collect();
+            let (names, total) = names_within_budget(&v);
+            assert_eq!(
+                total.is_some(),
+                names.len() < v.len(),
+                "k={k}: total present exactly when something was dropped"
+            );
+            if let Some(t) = total {
+                assert_eq!(t, k);
+            }
+        }
     }
 }

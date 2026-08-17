@@ -42,6 +42,7 @@ function check(ok, what) {
 const pages = [
   ['the console page', require('./out/console.js').html('demo.lisp')],
   ['the panel page', require('./out/panel.js').HTML],
+  ['the docs page', require('./out/docView.js').HTML],
 ];
 
 /** The script a page will actually run. */
@@ -64,6 +65,16 @@ for (const [name, page] of pages) {
   } catch (e) {
     check(false, `${name}'s script parses: ${e.message}`);
   }
+}
+
+// Every page runs with scripts enabled, and the docs page renders markup
+// derived from a book. A page that ships without a policy loses the layer
+// that stands behind the escaping, and nothing else here would notice --
+// the docs page went without one for as long as it existed.
+for (const [name, page] of pages) {
+  check(/http-equiv="Content-Security-Policy"/.test(page)
+        && /default-src 'none'/.test(page),
+        `${name} declares a content security policy`);
 }
 
 const consoleScript = scriptOf(pages[0][1]);
@@ -149,6 +160,252 @@ check(
   'and reproduces the source text exactly, so the overlay stays in register'
 );
 check(spans([[{ t: 'a', c: '' }], [{ t: 'b', c: '' }]]) === 'a\nb', 'and joins lines with newlines');
+
+// The link range, which is where a coordinate bug would hide: the daemon
+// sends no columns, so the client places them by finding the quoted name on
+// the line. Non-ASCII before the include is the case that would break a
+// byte-offset scheme and must not break this one.
+const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
+{
+  const line = '(include-book "std/util/bstar" :dir :system)';
+  const r = linkRangeOnLine(line, 'std/util/bstar');
+  check(r && line.slice(r[0], r[1]) === 'std/util/bstar',
+        'the link range covers exactly the book name');
+  check(line[r[0] - 1] === '"' && line[r[1]] === '"',
+        'and excludes the quotes, so the underline is the path');
+  const wide = '  ; \u00e9\u00e9\u00e9 note\n(local (include-book "a/b"))';
+  const w = linkRangeOnLine(wide, 'a/b');
+  check(w && wide.slice(w[0], w[1]) === 'a/b',
+        'and stays right when the line holds non-ASCII');
+  check(linkRangeOnLine('(include-book "other")', 'a/b') === undefined,
+        'and declines when the name is not on the line');
+}
+{
+  // A built-in must never render as local.
+  const builtin = { available: true, found: true, name: 'symbolp',
+                    kind: 'function', origin: 'builtin', formals: '(x)' };
+  const md = hoverMarkdown(builtin);
+  check(!/this file/i.test(md), 'a built-in is not "defined in this file"');
+  check(/built into acl2/i.test(md), 'it says where it really comes from');
+  const local = { available: true, found: true, name: 'alpha',
+                  kind: 'function', origin: 'file', formals: '(x)' };
+  check(/this file/i.test(hoverMarkdown(local)), 'while a local name still says so');
+  const fromBook = { available: true, found: true, name: 'b*', kind: 'macro',
+                     origin: 'book', book: '(:system . "std/util/bstar.lisp")' };
+  check(hoverMarkdown(fromBook).includes('std/util/bstar.lisp'),
+        'and a book name is shown the way it is written');
+  check(bookLabel('(:system . "a/b.lisp")') === 'a/b.lisp', 'bookLabel unwraps :system');
+  check(hoverMarkdown({ available: false, found: false, name: 'x' }) === undefined,
+        'a declined hover renders nothing at all');
+}
+
+{
+  // The completion prefix. It must agree with what the daemon will accept as
+  // a symbol, or the client asks about something that can never be found.
+  const { prefixAt } = require('./out/names.js');
+  const line = '(defthm foo (equal (alph';
+  check(prefixAt(line, line.length) === 'alph', 'the prefix is the token being typed');
+  check(prefixAt('(foo bar', 4) === 'foo', 'and ends where the cursor is, mid-line');
+  check(prefixAt('(foo bar', 1) === '', 'and is empty right after an open paren');
+  check(prefixAt('(foo bar', 5) === '', 'and empty right after a space');
+  check(prefixAt('  :in-th', 8) === ':in-th', 'a leading colon is part of it');
+  check(prefixAt('(a b)c', 6) === 'c', 'a close paren ends a token');
+  check(prefixAt('x "quoted', 9) === 'quoted', 'and so does a quote');
+  check(prefixAt('fty::defpro', 11) === 'fty::defpro', 'a package prefix stays attached');
+}
+
+{
+  // xdoc summaries arrive as raw markup, because the machinery that expands
+  // it is not in the world. Left alone a tooltip reads "@(see b*) binder...".
+  const { xdocInline } = require('./out/names.js');
+  const real = "@(see b*) binder for accessing record structure fields introduced\n  with ACL2's @('defrec').";
+  const out = xdocInline(real);
+  check(!out.includes('@('), 'no directive machinery survives into the tooltip');
+  check(out.includes('`b*`'), 'a cross-reference becomes the symbol it names');
+  check(out.includes('`defrec`'), 'and inline code keeps its text');
+  check(!out.includes('\n'), 'a wrapped summary becomes one line');
+  check(xdocInline('<p>A <b>bold</b> and <i>slanted</i> thing.</p>')
+          === 'A **bold** and *slanted* thing.',
+        'inline tags become markdown and block tags are dropped');
+  check(xdocInline('a &amp; b &lt; c &mdash; d') === 'a & b < c \u2014 d',
+        'entities resolve, including the ones with codepoints');
+  check(xdocInline('@({ (foo bar)\n  (baz) })') === '`(foo bar) (baz)`',
+        'a code block collapses to inline code in a one-line summary');
+  check(xdocInline('') === '', 'and an empty summary stays empty');
+
+  // The summary reaches the hover, above the provenance line.
+  const { hoverMarkdown } = require('./out/names.js');
+  const md = hoverMarkdown({
+    available: true, found: true, name: 'b*', kind: 'macro', origin: 'book',
+    book: '(:system . "std/util/bstar.lisp")',
+    short: 'A @(see binder) for @(\'let*\') forms.',
+  });
+  check(md.includes('`binder`'), 'the hover shows the rendered summary');
+  check(md.indexOf('`binder`') < md.indexOf('bstar.lisp'),
+        'above where it came from, since what it *is* comes first');
+}
+
+
+// ---- `pretty`: re-flowing a term to the width it is read at ----
+
+const { pretty } = require('./out/pretty.js');
+
+{
+  // The reason the rule is not width alone: the inner
+  // conjunction fits comfortably on the head's line and is still laid out
+  // down the page, because that is how a list of hypotheses is read.
+  const src = '(implies (and (not (consp b)) b) (not (segment-listp (append a b))))';
+  const want =
+    '(implies (and (not (consp b))\n' +
+    '              b)\n' +
+    '         (not (segment-listp (append a b))))';
+  check(pretty(src, 60) === want, 'a conjunction is laid out down the page');
+
+  // Alignment is under the first argument, not a fixed indent.
+  check(
+    pretty(src, 60).split('\n')[1].indexOf('b') === '(implies (and '.length,
+    'and its arguments line up under the first one'
+  );
+}
+
+{
+  // A second example. Nothing here is an always-break head, so
+  // this one is width alone -- and it is the case that showed the panel must
+  // cap its width rather than use the whole pane: at the ~115 columns a wide
+  // pane measures, a 66-character term never breaks at all.
+  const src = '(implies t (equal (segment-listp (append a b)) (segment-listp b)))';
+  const want =
+    '(implies t\n' +
+    '         (equal (segment-listp (append a b))\n' +
+    '                (segment-listp b)))';
+  check(pretty(src, 60) === want, 'the second example lays out as asked');
+  // implies breaks whatever the width; only the inner `equal` is width-driven,
+  // which is why a wide pane still splits after the hypothesis.
+  check(
+    pretty(src, 115) === '(implies t\n         (equal (segment-listp (append a b)) (segment-listp b)))',
+    'and at any width the conclusion still starts its own line'
+  );
+}
+
+check(pretty('(equal x y)', 60) === '(equal x y)', 'a short term is left alone');
+// Unconditional, and that is the point: a goal is read as its structure,
+// not as text that happens to fit. An earlier version only broke a
+// conjunction when one of its arguments was itself a list, which left short
+// ones running together.
+check(
+  pretty('(and p q)', 200) === '(and p\n     q)',
+  'a conjunction breaks however much room there is'
+);
+check(
+  pretty('(implies p q)', 200) === '(implies p\n         q)',
+  'and so does implies, so the conclusion always starts its own line'
+);
+check(pretty('(not p)', 200) === '(not p)', 'a one-argument form has nothing to break');
+check(
+  pretty('(equal (f x) (g y))', 200) === '(equal (f x) (g y))',
+  'and a head outside the family is width-driven as before'
+);
+
+{
+  // A form with no always-break head breaks only when it must.
+  const src = '(equal (segment-listp (append a b)) (segment-listp b))';
+  check(pretty(src, 80) === src, 'a wide pane leaves a term on one line');
+  check(pretty(src, 30).split('\n').length > 1, 'a narrow one breaks it');
+  check(
+    pretty(src, 30).split('\n').every((l) => l.length <= 30 || !l.includes(' ')),
+    'and keeps the lines within the width where it can'
+  );
+}
+
+// Total: anything unparseable comes back exactly as it arrived, because a
+// term this cannot read is one ACL2 printed and we would rather show it.
+for (const bad of ['(unbalanced', 'closed)', '(a "unterminated', '', '(a |open']) {
+  check(pretty(bad, 40) === bad, `unparseable input is returned unchanged: ${JSON.stringify(bad)}`);
+}
+// Parens hidden inside quoting forms are not structure.
+check(
+  pretty('(f "a)b" #\\( |c)d|)', 80) === '(f "a)b" #\\( |c)d|)',
+  'strings, char literals and bar symbols keep their parens'
+);
+
+{
+  // A whole topic. The property that matters is that code blocks come
+  // through untouched -- their line structure carries meaning, which is why
+  // the daemon transports them verbatim in the first place.
+  const { xdocText } = require('./out/names.js');
+  const real =
+    "<p>The following example shows the usage of @('unless-casematch')\n" +
+    "inside a @(see b*) form.</p>\n" +
+    "@({\n (b* (((unless-casematch obj (a . b))\n" +
+    '       (er hard? \'my-form "nope")))\n' +
+    '    (cw "The car is ~x0~%" a))\n })\n' +
+    "<p>This expands to:</p>\n";
+  const out = xdocText(real);
+  check(!out.includes('@('), 'no directive machinery survives');
+  check(out.includes('(b* (((unless-casematch obj (a . b))'),
+        'the code block keeps its text');
+  check(out.includes('~x0'), 'including fmt directives inside it');
+  check(out.includes('\n       (er hard?'), 'and its indentation and line breaks');
+  check(out.includes('b* form.'), 'a cross-reference becomes its symbol');
+  check(/expands to:\s*$/.test(out), 'and paragraphs are separated, not run together');
+
+  check(xdocText('<ul><li>one</li><li>two</li></ul>').includes('- one'),
+        'list items become bullets');
+  check(xdocText('a &mdash; b') === 'a \u2014 b', 'entities resolve');
+  check(xdocText('@(def foo)') === '[def foo]',
+        'a directive that reads the world is named, not resolved');
+  check(xdocText('') === '', 'and an empty body stays empty');
+}
+
+{
+  // The HTML renderer. The properties that matter: text is escaped, tags are
+  // not, and neither can happen to the inside of a code block.
+  const { xdocHtml } = require('./out/xdoc.js');
+  const r = xdocHtml(
+    "<p>Compare @('a &lt; b') and @(see b*).</p>\n" +
+    '@({\n (cw "~x0 <not a tag>" a)\n })\n' +
+    '<p>An <unknown-tag>odd</unknown-tag> one.</p>'
+  );
+  check(r.html.includes('<p>'), 'block tags become HTML');
+  check(r.html.includes('class="see" data-topic="b*"'), 'a cross-reference becomes a link');
+  check(r.html.includes('>a &lt; b</code>'), 'inline code is escaped, not interpreted');
+  check(r.code.length === 2, 'both the block and the inline code are lifted out');
+  check(r.code.some((c) => c.text === 'a < b'),
+        'inline code travels as source, for the tokenizer, not as escaped HTML');
+  check(r.html.includes('<code data-code='), 'and gets a slot the page can colour');
+  check(r.code.some((c) => c.text === '(cw "~x0 <not a tag>" a)'),
+        'and kept verbatim, tags and fmt directives and all');
+  check(r.html.includes('<pre data-code="0">'), 'leaving a slot where it goes');
+  check(r.html.includes('&lt;not a tag&gt;'),
+        'with the escaped text inside it, so a page with no tokenizer still shows code');
+  check(!r.html.includes('<unknown-tag>'), 'an unknown tag is dropped');
+  check(r.html.includes('odd'), 'but its text is kept');
+
+  // Prose that merely looks like markup must survive as prose.
+  // Prose containing what used to be a placeholder must survive verbatim.
+  const p0 = xdocHtml('<p>See section I0 and @(\'x\') here.</p>');
+  check(p0.html.includes('section I0 and'),
+        'prose that looks like a placeholder is not eaten');
+
+  const p2 = xdocHtml('<p>if a &lt; b &amp;&amp; c then "x"</p>');
+  check(p2.html.includes('a &lt; b'), 'a less-than in prose stays escaped');
+  check(!p2.html.includes('&amp;amp;'), 'and an entity is not double-escaped');
+
+  const m = xdocHtml('@([\\sum_{i} x_i]) and @($x^2$)');
+  check(m.html.includes('class="math"'), 'math is marked');
+  check(m.html.includes('\\sum'), 'and shown as its source, pending KaTeX');
+
+  // Code blocks must arrive as *text* for the host to tokenize, not as
+  // pre-escaped HTML: the tokenizer needs the source, and the page escapes.
+  const c2 = xdocHtml('@({\n (defun f (x)\n   (+ x 1))\n })');
+  check(c2.code[0].text === '(defun f (x)\n  (+ x 1))',
+        'a code block keeps its shape after the source indent is removed');
+  check(c2.html.includes('(defun f (x)'), 'and is escaped into the pre as a fallback');
+
+  const d = xdocHtml('@(def foo)');
+  check(d.html.includes('unresolved') && d.html.includes('[def foo]'),
+        'a world-reading directive is named, not resolved');
+}
 
 if (bad) {
   console.error(`webview: ${bad} failing`);

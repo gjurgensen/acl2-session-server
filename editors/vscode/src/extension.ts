@@ -25,13 +25,27 @@ import {
   UnitEvent,
   UnitState,
 } from './protocol';
-import { Envelope } from './protocol';
+import { Envelope, InductionWire, RulesReply, RuneWire } from './protocol';
 import { DecorationMode, Decorations } from './decorations';
 import { EVAL_SCHEME, OutputView, SCHEME } from './outputView';
 import { Highlighter } from './highlight';
-import { Panel, PanelEnvelope, PanelModel } from './panel';
+import { Panel, PanelEnvelope, PanelInduction, PanelModel, PanelNameRules } from './panel';
 import { Console, ConsoleResult, HISTORY } from './console';
-import { DefinitionReply, DescribeReply, hoverMarkdown } from './names';
+import { DocView, plainSpans } from './docView';
+import { DocHtml as DocHtmlResult, esc, xdocHtml } from './xdoc';
+import {
+  BookLink,
+  CertifyReply,
+  CompleteReply,
+  DefinitionReply,
+  DescribeReply,
+  hoverMarkdown,
+  linkRangeOnLine,
+  prefixAt,
+  BookSymbol,
+  DocReply,
+  xdocText,
+} from './names';
 
 const UPDATE_DEBOUNCE_MS = 300;
 
@@ -43,6 +57,17 @@ interface BookSession {
   lastState?: StateEvent;
   /** Latest envelope per unit index, for diagnostics, panel and output view. */
   unitEvents: Map<number, UnitEvent>;
+  /**
+   * What each unit introduced, once asked for.
+   *
+   * Cached because the panel follows the *cursor*: `followPanel` runs on
+   * every selection change, and fetching on each one put a reply -- and so a
+   * re-render -- a moment after every keystroke and every click. A re-render
+   * replaces the page, which resets every open dropdown, so the panel looked
+   * frozen. Dropped for a unit when that unit is admitted again, which is
+   * the only way what it introduced can change.
+   */
+  rulesByUnit: Map<number, PanelNameRules[]>;
   debounce?: ReturnType<typeof setTimeout>;
   /**
    * The progress notification of the eval in flight, so an `eval_state`
@@ -64,15 +89,47 @@ interface BookSession {
   console?: Console;
   /** Replies to this book's console evals, by seq, for the full-log button. */
   evalReplies: Map<number, EvalReply>;
+  /** A certification is in flight; a second is refused rather than queued. */
+  certifying?: boolean;
 }
 
 let client: DaemonClient | undefined;
 const books = new Map<string, BookSession>(); // key: document uri
 const byId = new Map<string, BookSession>(); // key: daemon book id
 
+/**
+ * The session for a document, re-anchored to the object VSCode is actually
+ * synchronising.
+ *
+ * Sessions are keyed by uri so that they outlive a tab, but a session also
+ * holds the `TextDocument` it started with -- and a closed document is never
+ * reused when the file is opened again. Kept, that reference would go on
+ * answering for an object VSCode has frozen: `getText` returns the text as of
+ * the close and `version` stops advancing. Close a book's tab, reopen it, and
+ * every edit would sync the daemon to pre-close content stamped with a
+ * revision that never moves, while the `=== s.doc` checks that gate painting
+ * stopped matching the moment the new object appeared.
+ *
+ * Every caller has the live document in hand already, so taking it back is
+ * the whole fix. Where the objects are the same -- the ordinary case -- this
+ * is an assignment of what is already there.
+ */
+function bookFor(doc: vscode.TextDocument): BookSession | undefined {
+  const s = books.get(doc.uri.toString());
+  if (s) {
+    s.doc = doc;
+  }
+  return s;
+}
+
 let decorations: Decorations;
 let outputView: OutputView;
 let evalView: OutputView;
+let docs: DocView;
+let docHistory: { book: string; name: string }[] = [];
+// The topic on screen, kept so a theme or grammar change can recolour its
+// code without going back to the daemon for text that has not changed.
+let lastDoc: { name: string; rendered: DocHtmlResult } | undefined;
 let panel: Panel;
 let highlighter: Highlighter;
 let status: vscode.StatusBarItem;
@@ -92,9 +149,31 @@ export function activate(context: vscode.ExtensionContext): void {
   outputView = new OutputView(
     SCHEME,
     'ACL2 Output',
-    '(no form under the cursor has been checked yet)'
+    // Prose, not a parenthesized aside: these two views are highlighted with
+    // the output grammar, and `(nothing evaluated yet)` is shaped exactly
+    // like an ACL2 term -- opens at column zero, closes at end of line -- so
+    // it came out syntax-highlighted, `not` and all. Keep status messages out
+    // of that shape.
+    'No form under the cursor has been checked yet.'
   );
-  evalView = new OutputView(EVAL_SCHEME, 'ACL2 Eval', '(nothing evaluated yet)');
+  evalView = new OutputView(EVAL_SCHEME, 'ACL2 Eval', 'Nothing evaluated yet.');
+  docs = new DocView();
+  docs.iconPath = windowIcon;
+  docs.onTopic = (name) => {
+    const s = byId.get(docHistory[docHistory.length - 1]?.book ?? '');
+    if (s) {
+      void openTopic(s, name, true);
+    }
+  };
+  docs.onBack = () => {
+    // Drop the current topic, then re-open the one before it.
+    docHistory.pop();
+    const prev = docHistory.pop();
+    const s = prev && byId.get(prev.book);
+    if (s && prev) {
+      void openTopic(s, prev.name, true);
+    }
+  };
   // Webview tabs take an icon; the output views cannot, since they are text
   // documents and VSCode takes an editor tab's icon from the file icon theme.
   windowIcon = {
@@ -111,25 +190,6 @@ export function activate(context: vscode.ExtensionContext): void {
   channel = vscode.window.createOutputChannel('ACL2');
 
   panel.onGoal = (m, goal, slot) => void fetchGoal(m, goal, slot);
-  panel.onFullLog = (m) => {
-    const s = byId.get(m.book);
-    if (s) {
-      void showUnitOutput(s, m.index).then(() => outputView.open());
-    }
-  };
-  panel.onRetract = (m) => {
-    const s = byId.get(m.book);
-    if (s) {
-      retractTo(s, m.index);
-    }
-  };
-  panel.onTarget = (m) => {
-    const s = byId.get(m.book);
-    if (s) {
-      s.target = m.lineEnd;
-      sendUpdate(s);
-    }
-  };
 
   // The grammar and theme load off disk, so the first panel may render
   // before they arrive; refresh once they have, and again whenever the
@@ -146,8 +206,10 @@ export function activate(context: vscode.ExtensionContext): void {
           s.console.refresh();
         }
       }
+      paintDocs();
     });
   reload();
+  renewSymbols();
   context.subscriptions.push(
     vscode.window.onDidChangeActiveColorTheme(reload),
     vscode.workspace.onDidChangeConfiguration((e) => {
@@ -163,6 +225,7 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     decorations,
     panel,
+    docs,
     status,
     channel,
     outputView,
@@ -171,6 +234,13 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.registerTextDocumentContentProvider(EVAL_SCHEME, evalView),
     vscode.languages.registerHoverProvider({ language: 'acl2' }, hoverProvider),
     vscode.languages.registerDefinitionProvider({ language: 'acl2' }, definitionProvider),
+    vscode.languages.registerDocumentLinkProvider({ language: 'acl2' }, linkProvider),
+    // `:` triggers so keyword families appear without a word first; the rest
+    // is VSCode's own 24x7 word completion.
+    vscode.languages.registerCompletionItemProvider({ language: 'acl2' }, completionProvider, ':'),
+    // Registered through a holder: see `renewSymbols` on why it has to be
+    // replaceable rather than registered once.
+    new vscode.Disposable(() => symbolReg?.dispose()),
     vscode.commands.registerCommand('acl2-session.start', startCommand),
     vscode.commands.registerCommand('acl2-session.evalSelection', () => forBook(evalCommand)),
     vscode.commands.registerCommand('acl2-session.showConsole', () =>
@@ -212,6 +282,9 @@ export function activate(context: vscode.ExtensionContext): void {
         await outputView.open();
       })
     ),
+    vscode.commands.registerCommand('acl2-session.showDocs', () => forBook(showDocs)),
+    vscode.commands.registerCommand('acl2-session.certify', () => forBook(certifyBook)),
+    vscode.tasks.registerTaskProvider('acl2', certifyTaskProvider),
     vscode.commands.registerCommand('acl2-session.showPanel', () =>
       forBook((s) => {
         panel.open();
@@ -219,8 +292,9 @@ export function activate(context: vscode.ExtensionContext): void {
       })
     ),
     vscode.commands.registerCommand('acl2-session.gotoFrontier', () => forBook(gotoFrontier)),
+    vscode.commands.registerCommand('acl2-session.gotoAttention', () => forBook(gotoAttention)),
     vscode.workspace.onDidChangeTextDocument((e) => {
-      const s = books.get(e.document.uri.toString());
+      const s = bookFor(e.document);
       if (!s || e.contentChanges.length === 0) {
         return;
       }
@@ -230,7 +304,7 @@ export function activate(context: vscode.ExtensionContext): void {
       s.debounce = setTimeout(() => sendUpdate(s), UPDATE_DEBOUNCE_MS);
     }),
     vscode.window.onDidChangeTextEditorSelection((e) => {
-      const s = books.get(e.textEditor.document.uri.toString());
+      const s = bookFor(e.textEditor.document);
       if (!s) {
         return;
       }
@@ -241,7 +315,14 @@ export function activate(context: vscode.ExtensionContext): void {
         void followPanel(s);
       }
     }),
-    vscode.window.onDidChangeVisibleTextEditors(() => {
+    vscode.window.onDidChangeVisibleTextEditors((editors) => {
+      // Reopening a book's tab brings a *new* document object for the same
+      // file, and this fires before any edit or provider call would have
+      // re-anchored the session. Do it here, or the identity check in `paint`
+      // never matches again and the reopened book stays blank.
+      for (const e of editors) {
+        bookFor(e.document);
+      }
       for (const s of books.values()) {
         paint(s);
       }
@@ -252,6 +333,9 @@ export function activate(context: vscode.ExtensionContext): void {
         for (const s of books.values()) {
           paint(s);
         }
+        // termWidth changes how terms are laid out, and the panel holds the
+        // model it would need to re-lay out, so a refresh is enough.
+        panel.refresh();
       }
       if (e.affectsConfiguration('acl2-session.highlightOutput')) {
         void outputView.refreshLanguage();
@@ -298,7 +382,7 @@ function report(e: unknown): void {
  */
 const hoverProvider: vscode.HoverProvider = {
   async provideHover(doc, position, token) {
-    const s = books.get(doc.uri.toString());
+    const s = bookFor(doc);
     if (!s || !client?.alive) {
       return undefined;
     }
@@ -337,9 +421,21 @@ const hoverProvider: vscode.HoverProvider = {
  */
 const definitionProvider: vscode.DefinitionProvider = {
   async provideDefinition(doc, position, token) {
-    const s = books.get(doc.uri.toString());
+    const s = bookFor(doc);
     if (!s || !client?.alive) {
       return undefined;
+    }
+    // On an include-book, the definition *is* the book. Worth handling here
+    // and not only as a DocumentLink: ctrl-click is not the only way people
+    // navigate, and vim mode's `gf` grabs the raw word -- which for
+    // `:dir :system` is neither a real path nor a `.lisp` -- so `gd` is the
+    // gesture that has to work. The line is checked first so an ordinary
+    // lookup never pays for this.
+    if (/\(\s*include-book\b/i.test(doc.lineAt(position.line).text)) {
+      const target = await includeTargetAt(s, doc, position);
+      if (target) {
+        return target;
+      }
     }
     const range = doc.getWordRangeAtPosition(position);
     if (!range) {
@@ -366,6 +462,432 @@ const definitionProvider: vscode.DefinitionProvider = {
   },
 };
 
+/**
+ * Ctrl-click an `include-book` to open the book it includes.
+ *
+ * The daemon resolves the paths, because only it knows the session's books
+ * directory and only ACL2 knows a project's own `:dir` aliases; the client
+ * places the ranges, because only it has the document's UTF-16 coordinates.
+ * An include that did not resolve -- an unknown alias, or a book that is not
+ * built -- gets no link at all rather than one that opens nothing.
+ */
+const linkProvider: vscode.DocumentLinkProvider = {
+  async provideDocumentLinks(doc, token) {
+    const s = bookFor(doc);
+    if (!s || !client?.alive) {
+      return [];
+    }
+    let r: { links: BookLink[] };
+    try {
+      r = await client.request('links', { book: s.id });
+    } catch {
+      return [];
+    }
+    if (token.isCancellationRequested) {
+      return [];
+    }
+    const out: vscode.DocumentLink[] = [];
+    for (const l of r.links) {
+      if (!l.path || l.line < 1 || l.line > doc.lineCount) {
+        continue;
+      }
+      const text = doc.lineAt(l.line - 1).text;
+      const span = linkRangeOnLine(text, l.book);
+      if (!span) {
+        continue;
+      }
+      const range = new vscode.Range(l.line - 1, span[0], l.line - 1, span[1]);
+      const link = new vscode.DocumentLink(range, vscode.Uri.file(l.path));
+      link.tooltip = l.path;
+      out.push(link);
+    }
+    return out;
+  },
+};
+
+const SYMBOL_KIND: Record<string, vscode.SymbolKind> = {
+  function: vscode.SymbolKind.Function,
+  macro: vscode.SymbolKind.Method,
+  theorem: vscode.SymbolKind.Event,
+  constant: vscode.SymbolKind.Constant,
+  include: vscode.SymbolKind.File,
+  other: vscode.SymbolKind.Object,
+};
+
+/**
+ * The outline, for the Outline view, breadcrumbs, ctrl+shift+O and sticky
+ * scroll.
+ *
+ * The daemon builds it from the text, so it covers the whole file rather than
+ * the admitted prefix -- an outline that stopped at the frontier would be
+ * least useful exactly when a book is long and half-checked, which is when
+ * anyone reaches for it. The *status* is added here, from the paint map this
+ * side already holds: the daemon has no business in the painting.
+ */
+let symbolReg: vscode.Disposable | undefined;
+/**
+ * What the outline last showed, so it is only renewed when it would differ.
+ *
+ * Without this the renewal feeds itself: `drive` settles on every command
+ * pass, so a symbols query produces a `settled`, which renews, which makes
+ * VSCode query again -- a loop that flickers the Outline view continuously
+ * and is started by *any* request, not just this one.
+ */
+let outlineKey = '';
+
+function currentOutlineKey(s: BookSession): string {
+  const units = s.lastState?.units ?? [];
+  return `${s.id}|${units.length}|${units.map((u) => u.status).join(',')}`;
+}
+
+/**
+ * Re-register the symbol provider, which is the only way to make VSCode ask
+ * again.
+ *
+ * Document symbols are cached against the document's *version*, and there is
+ * no change event a provider can fire -- unlike code lenses, which have one.
+ * So the empty answer given before a session existed would stand until the
+ * file was edited, and the outline of a book being checked stayed blank for
+ * as long as nobody typed. Re-registering invalidates that cache.
+ */
+function renewSymbols(): void {
+  symbolReg?.dispose();
+  symbolReg = vscode.languages.registerDocumentSymbolProvider(
+    { language: 'acl2' },
+    symbolProvider
+  );
+}
+
+const symbolProvider: vscode.DocumentSymbolProvider = {
+  async provideDocumentSymbols(doc, token) {
+    const s = bookFor(doc);
+    if (!s || !client?.alive) {
+      return undefined;
+    }
+    let r: { symbols: BookSymbol[] };
+    try {
+      r = await client.request('symbols', { book: s.id });
+    } catch {
+      return undefined;
+    }
+    if (token.isCancellationRequested) {
+      return undefined;
+    }
+    const statusOf = new Map<number, string>();
+    for (const u of s.lastState?.units ?? []) {
+      statusOf.set(u.index, u.status);
+    }
+    const build = (b: BookSymbol): vscode.DocumentSymbol => {
+      const last = Math.min(Math.max(b.line_end - 1, 0), doc.lineCount - 1);
+      const range = new vscode.Range(
+        Math.max(b.line_start - 1, 0),
+        0,
+        last,
+        doc.lineAt(last).text.length
+      );
+      const sym = new vscode.DocumentSymbol(
+        b.name,
+        b.unit !== undefined ? (statusOf.get(b.unit) ?? '') : '',
+        SYMBOL_KIND[b.kind] ?? vscode.SymbolKind.Object,
+        range,
+        range
+      );
+      sym.children = (b.children ?? []).map(build);
+      return sym;
+    };
+    return r.symbols.map(build);
+  },
+};
+
+const COMPLETION_KIND: Record<string, vscode.CompletionItemKind> = {
+  function: vscode.CompletionItemKind.Function,
+  macro: vscode.CompletionItemKind.Method,
+  theorem: vscode.CompletionItemKind.Event,
+  constant: vscode.CompletionItemKind.Constant,
+  keyword: vscode.CompletionItemKind.Keyword,
+  other: vscode.CompletionItemKind.Text,
+};
+
+/**
+ * Completion from the live world.
+ *
+ * The daemon filters, because a world holds tens of thousands of names and
+ * shipping them per keystroke is a megabyte per keystroke. `incomplete` is
+ * passed straight through to VSCode's `isIncomplete`, which is what makes it
+ * re-ask as the prefix narrows -- and what covers the first completion of a
+ * session, answered from the buffer alone while the census is still being
+ * built on an idle tick.
+ *
+ * A theorem is offered as an Event because VSCode has no icon for "fact";
+ * it reads as distinct from functions and macros at a glance, which is the
+ * job the icon actually has to do here.
+ */
+const completionProvider: vscode.CompletionItemProvider = {
+  async provideCompletionItems(doc, position, token) {
+    const s = bookFor(doc);
+    if (!s || !client?.alive) {
+      return undefined;
+    }
+    const prefix = prefixAt(doc.lineAt(position.line).text, position.character);
+    let r: CompleteReply;
+    try {
+      r = await client.request('complete', { book: s.id, prefix });
+    } catch {
+      return undefined;
+    }
+    if (token.isCancellationRequested) {
+      return undefined;
+    }
+    const items = r.items.map((i) => {
+      const c = new vscode.CompletionItem(
+        i.name,
+        COMPLETION_KIND[i.kind] ?? vscode.CompletionItemKind.Text
+      );
+      if (i.book) {
+        c.detail = i.book.replace(/^\(:system \. "|"\)$/g, '');
+      }
+      return c;
+    });
+    return new vscode.CompletionList(items, r.incomplete);
+  },
+};
+
+/**
+ * The book an `include-book` at this position refers to, if the cursor is on
+ * one. Shares the daemon's resolution with the link provider rather than
+ * re-deriving it, so the two can never disagree about where a book lives.
+ */
+async function includeTargetAt(
+  s: BookSession,
+  doc: vscode.TextDocument,
+  position: vscode.Position
+): Promise<vscode.Location | undefined> {
+  let r: { links: BookLink[] };
+  try {
+    r = await client!.request('links', { book: s.id });
+  } catch {
+    return undefined;
+  }
+  for (const l of r.links) {
+    if (!l.path || l.line !== position.line + 1) {
+      continue;
+    }
+    const span = linkRangeOnLine(doc.lineAt(position.line).text, l.book);
+    // Anywhere in the form counts, not just inside the quotes: `gd` with the
+    // cursor on `include-book` itself should go there too.
+    if (span && position.character <= span[1] + 1) {
+      return new vscode.Location(vscode.Uri.file(l.path), new vscode.Position(0, 0));
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Certify the book with cert.pl.
+ *
+ * Saves first, because certification runs against the file on **disk**: it is
+ * what you would get from a shell, and certifying one thing while looking at
+ * another is the silent lie this design refuses everywhere else. That is the
+ * VSCode-conventional behaviour for a build command anyway.
+ *
+ * The session is untouched -- `cert.pl` is a separate process tree, so
+ * checking carries on and queries keep answering while it runs.
+ */
+async function certifyBook(s: BookSession): Promise<void> {
+  if (s.certifying) {
+    void vscode.window.showInformationMessage('acl2-session: already certifying this book');
+    return;
+  }
+  if (s.doc.isDirty && !(await s.doc.save())) {
+    void vscode.window.showWarningMessage('acl2-session: could not save before certifying');
+    return;
+  }
+  s.certifying = true;
+  const jobs = vscode.workspace
+    .getConfiguration('acl2-session')
+    .get<number>('certifyJobs', 4);
+  const started = Date.now();
+  const tick = setInterval(() => {
+    const secs = Math.floor((Date.now() - started) / 1000);
+    status.text = `$(sync~spin) ACL2: certifying ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
+    status.tooltip = 'ACL2: click to interrupt the certification';
+    status.command = 'acl2-session.interrupt';
+  }, 500);
+  try {
+    const r: CertifyReply = await client!.request('certify', { book: s.id, jobs });
+    if (r.status === 'certified') {
+      void vscode.window.showInformationMessage(
+        `ACL2: certified in ${(r.elapsed_ms / 1000).toFixed(1)}s`
+      );
+    } else {
+      // The blamed book is usually a dependency rather than this one, and
+      // saying which is the difference between a report and "it broke".
+      const blamed = (r.failed_books ?? [])[0];
+      const where = blamed && !blamed.endsWith(basename(s.doc.fileName)) ? ` in ${basename(blamed)}` : '';
+      const pick = await vscode.window.showErrorMessage(
+        `ACL2: certification failed${where}${r.error_line ? `: ${r.error_line}` : ''}`,
+        'Show Log'
+      );
+      if (pick === 'Show Log' && r.output_ref) {
+        await showCertLog(s, r.output_ref, r.output_lines);
+      }
+    }
+  } catch (e) {
+    report(e);
+  } finally {
+    clearInterval(tick);
+    s.certifying = false;
+    status.command = 'acl2-session.showPanel';
+    status.tooltip = 'ACL2: show the panel';
+    updateStatusBar(s);
+  }
+}
+
+function basename(p: string): string {
+  return p.split(/[\\/]/).pop() ?? p;
+}
+
+async function showCertLog(s: BookSession, ref: string, lines: number): Promise<void> {
+  try {
+    const out = await client!.request('output', {
+      book: s.id,
+      output_ref: ref,
+      mode: 'tail',
+      lines: Math.min(lines, 4000),
+    });
+    outputView.set(s.id, null, out.text as string);
+    await outputView.open();
+  } catch (e) {
+    report(e);
+  }
+}
+
+/**
+ * The same thing as a build task, so Ctrl+Shift+B reaches it the way it
+ * reaches `make` everywhere else.
+ *
+ * The task is a thin trigger for the command rather than a shell execution:
+ * the structured completion -- which book was blamed, and its error line --
+ * is exactly what a terminal would flatten.
+ */
+const certifyTaskProvider: vscode.TaskProvider = {
+  provideTasks(): vscode.Task[] {
+    const t = new vscode.Task(
+      { type: 'acl2' },
+      vscode.TaskScope.Workspace,
+      'certify',
+      'acl2',
+      new vscode.CustomExecution(async () => new CertifyTerminal())
+    );
+    t.group = vscode.TaskGroup.Build;
+    return [t];
+  },
+  resolveTask(): vscode.Task | undefined {
+    return undefined;
+  },
+};
+
+/** A task that just runs the command; the reporting lives there. */
+class CertifyTerminal implements vscode.Pseudoterminal {
+  private writeEmitter = new vscode.EventEmitter<string>();
+  onDidWrite = this.writeEmitter.event;
+  private closeEmitter = new vscode.EventEmitter<number>();
+  onDidClose = this.closeEmitter.event;
+
+  open(): void {
+    this.writeEmitter.fire('Certifying via ACL2: Certify Book...\r\n');
+    void vscode.commands.executeCommand('acl2-session.certify').then(() => {
+      this.closeEmitter.fire(0);
+    });
+  }
+
+  close(): void {
+    /* the command owns the build; interrupting is a separate action */
+  }
+}
+
+/**
+ * Show the documentation for the name under the cursor.
+ *
+ * Rendered as text rather than HTML for now: the full renderer -- `<see>`
+ * links you can follow, KaTeX, `@(def …)` resolved against the world -- wants
+ * a webview of its own, and this is the part that is useful without one.
+ */
+async function showDocs(s: BookSession): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  const range = editor && editor.document.getWordRangeAtPosition(editor.selection.active);
+  const name = range ? editor!.document.getText(range) : '';
+  if (!name) {
+    void vscode.window.showInformationMessage('acl2-session: put the cursor on a name first');
+    return;
+  }
+  await openTopic(s, name, false);
+}
+
+/**
+ * Show one topic, following a cross-reference or opening a fresh one.
+ *
+ * The history lives here rather than in the view, because going back means
+ * re-fetching: only the extension can talk to the daemon, and a topic body is
+ * not worth keeping copies of once it has been read.
+ */
+async function openTopic(s: BookSession, name: string, keepOpen: boolean): Promise<void> {
+  let r: DocReply;
+  try {
+    r = await client!.request('doc', { book: s.id, name });
+  } catch (e) {
+    report(e);
+    return;
+  }
+  if (!r.found) {
+    const why = r.available
+      ? `no documentation for ${name}`
+      : `the session is busy; try ${name} again in a moment`;
+    if (keepOpen) {
+      // Mid-navigation: say it in the window rather than in a toast the
+      // reader has to dismiss to get back to what they were reading.
+      //
+      // Escaped, because `name` need not be a name: following a cross
+      // reference hands us whatever the book wrote in `<see topic="...">`,
+      // and this is the one path that puts it in the page as markup rather
+      // than as a link's text.
+      const safe = esc(why);
+      docs.show({ name, html: `<p>${safe}.</p>`, code: [], canGoBack: docHistory.length > 0 });
+    } else {
+      void vscode.window.showInformationMessage(`acl2-session: ${why}`);
+    }
+    return;
+  }
+  docHistory.push({ book: s.id, name });
+  const body = [r.short, r.long].filter(Boolean).join('\n');
+  lastDoc = { name, rendered: xdocHtml(body) };
+  paintDocs();
+}
+
+/**
+ * Put the current topic on screen, coloured with whatever the tokenizer can
+ * offer right now.
+ *
+ * Separate from fetching it, because the grammar and theme load off disk and
+ * can arrive *after* a window is already open -- and because a theme change
+ * has to recolour what is on screen without asking the daemon again for text
+ * that has not changed. The same reason the panel re-renders on reload.
+ */
+function paintDocs(): void {
+  if (!lastDoc) {
+    return;
+  }
+  const code = lastDoc.rendered.code.map((c) =>
+    highlighter.ready ? { slot: c.slot, lines: highlighter.tokenize(c.text) } : plainSpans(c)
+  );
+  docs.show({
+    name: lastDoc.name,
+    html: lastDoc.rendered.html,
+    code,
+    canGoBack: docHistory.length > 1,
+  });
+}
+
 /** The 1-based start line of a unit, from the last state event. */
 function unitLine(s: BookSession, index: number): number | undefined {
   return s.lastState?.units.find((u) => u.index === index)?.line_start;
@@ -373,7 +895,7 @@ function unitLine(s: BookSession, index: number): number | undefined {
 
 function forBook(f: (s: BookSession) => unknown): void {
   const editor = vscode.window.activeTextEditor;
-  const s = editor && books.get(editor.document.uri.toString());
+  const s = editor && bookFor(editor.document);
   if (!s) {
     void vscode.window.showInformationMessage(
       'acl2-session: no live session for this file (run "ACL2: Start Live Checking")'
@@ -413,13 +935,28 @@ function ensureClient(): DaemonClient {
     )
   );
   c.on('exit', () => {
-    if (client === c && books.size > 0) {
-      void vscode.window.showErrorMessage(
-        'acl2-session: the daemon exited; see the "ACL2" output channel'
-      );
+    // A newer client may already have replaced this one; that death is its
+    // predecessor's, and none of this belongs to it.
+    if (client !== c) {
+      return;
     }
-    if (client === c) {
-      client = undefined;
+    client = undefined;
+    // The sessions died with the daemon. Their book ids mean nothing to a
+    // fresh one, so there is nothing here to reconnect -- and leaving them
+    // in the map is worse than useless: the gutter goes on asserting an
+    // admitted prefix that no session backs any more, and Start finds the
+    // stale entry and answers by sending it an update, which with no client
+    // is `client?.notify` on undefined -- silently nothing at all. Dropping
+    // them clears the paint and lets Start mean what it says.
+    const orphaned = [...books.values()];
+    for (const s of orphaned) {
+      dropBook(s);
+    }
+    if (orphaned.length > 0) {
+      void vscode.window.showErrorMessage(
+        'acl2-session: the daemon exited and its sessions are gone (see the "ACL2" ' +
+          'output channel). Run "ACL2: Start Live Checking" to begin again.'
+      );
     }
   });
   c.on('state', onState);
@@ -441,7 +978,11 @@ async function startCommand(): Promise<void> {
   }
   const doc = editor.document;
   const key = doc.uri.toString();
-  const existing = books.get(key);
+  // Through `bookFor`, because running Start on a book whose tab was closed
+  // and reopened is exactly how a session ends up holding a document VSCode
+  // has frozen -- and this path would otherwise answer by pushing its stale
+  // text at the daemon.
+  const existing = bookFor(doc);
   if (existing) {
     sendUpdate(existing);
     return;
@@ -454,11 +995,16 @@ async function startCommand(): Promise<void> {
       doc,
       target: null,
       unitEvents: new Map(),
+      rulesByUnit: new Map(),
       evalQueue: [],
       evalReplies: new Map(),
     };
     books.set(key, s);
     byId.set(s.id, s);
+    // The outline could not be answered before this session existed, and
+    // VSCode will not ask again on its own.
+    outlineKey = '';
+    renewSymbols();
     status.show();
     status.text = '$(sync~spin) ACL2: starting';
     channel.appendLine(`opened ${doc.fileName} as ${s.id} under ${r.image}`);
@@ -490,11 +1036,27 @@ function refreshContext(): void {
 
 function stopBook(s: BookSession): void {
   void client?.request('close', { book: s.id }).catch(() => undefined);
+  dropBook(s);
+}
+
+/**
+ * Forget a session on this side.
+ *
+ * Split from `stopBook` because the daemon dying needs everything here and
+ * none of the `close` above: there is nobody left to tell.
+ */
+function dropBook(s: BookSession): void {
   books.delete(s.doc.uri.toString());
   byId.delete(s.id);
   // The transcript is answers from a world that no longer exists.
   s.console?.dispose();
   s.console = undefined;
+  // A pending debounce would otherwise fire an `update` for a book that is
+  // gone -- typing and then stopping inside 300 ms was enough.
+  if (s.debounce) {
+    clearTimeout(s.debounce);
+    s.debounce = undefined;
+  }
   for (const editor of vscode.window.visibleTextEditors) {
     if (editor.document === s.doc) {
       decorations.clear(editor);
@@ -665,7 +1227,7 @@ async function evalLog(s: BookSession, r: EvalReply, lines: number): Promise<str
     });
     return o.text as string;
   } catch (err) {
-    return `(output unavailable: ${err})`;
+    return `Output unavailable: ${err}`;
   }
 }
 
@@ -702,6 +1264,65 @@ async function showEvalLog(s: BookSession, seq: number): Promise<void> {
   }
 }
 
+/**
+ * Cycle the check's attention points.
+ *
+ * The list, top to bottom: every red form in file order, then exactly ONE
+ * machine target -- the running form if a check is live, otherwise the end of
+ * the book. Reds first, and topmost first, because a skipped false claim can
+ * poison every proof below it, so fixing downward is the wrong direction.
+ *
+ * Standing on an attention point advances to the next, wrapping. Standing
+ * anywhere else goes to the *first*, not to the next one below the cursor:
+ * "where should I look" has a top-down answer that does not depend on where
+ * the cursor happens to be.
+ *
+ * `gotoFrontier` stays separate, for going straight to the frontier without
+ * walking the reds to get there.
+ *
+ * Landing on the running form does not start *following* it, so that the
+ * cursor tracks the frontier as it advances: that would be a mode, not a jump.
+ */
+function gotoAttention(s: BookSession): void {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) {
+    return;
+  }
+  const units = s.lastState?.units;
+  if (!units) {
+    void vscode.window.showInformationMessage('acl2-session: nothing to jump to yet');
+    return;
+  }
+  const points: { line: number; kind: string }[] = units
+    .filter((u) => u.status === 'skipped' || u.status === 'failed')
+    .map((u) => ({ line: u.line_start, kind: u.status }));
+  const running = units.find((u) => u.status === 'running');
+  points.push(
+    running
+      ? { line: running.line_start, kind: 'running' }
+      : { line: editor.document.lineCount, kind: 'eof' }
+  );
+
+  // By line, not by character: the cursor may sit anywhere along the form's
+  // first line and still be standing on it.
+  const line = editor.selection.active.line + 1;
+  const at = points.findIndex((p) => p.line === line);
+  const next = points[at >= 0 ? (at + 1) % points.length : 0];
+
+  const pos = new vscode.Position(next.line - 1, 0);
+  editor.selection = new vscode.Selection(pos, pos);
+  editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+  vscode.window.setStatusBarMessage(
+    {
+      skipped: 'ACL2: proofs skipped here \u2014 fix it to re-check below for real',
+      failed: 'ACL2: this form failed',
+      running: 'ACL2: the frontier, still working',
+      eof: 'ACL2: nothing red \u2014 the end of the book',
+    }[next.kind] ?? '',
+    4000
+  );
+}
+
 function gotoFrontier(s: BookSession): void {
   const editor = vscode.window.activeTextEditor;
   const units = s.lastState?.units ?? [];
@@ -736,7 +1357,20 @@ function onState(p: StateEvent): void {
     // cursor's form as soon as there is something to render, or the one
     // button would open an empty panel and leave it that way until the
     // cursor happened to move.
-    void followPanel(s);
+    //
+    // Falling back to the first form matters more than it looks: at start
+    // the cursor is usually on line 1, which is the `in-package` or a
+    // comment above it, so the honest answer to "which form is the cursor
+    // in" is "none" and the panel would open on its placeholder. Only on
+    // adoption, though -- once the panel is showing something, moving the
+    // cursor onto a blank line leaves it where it is rather than jumping it
+    // back to the top of the book.
+    const editor = vscode.window.activeTextEditor;
+    const at =
+      editor?.document === s.doc
+        ? unitAt(s, editor.selection.active.line + 1)?.index
+        : undefined;
+    void followPanel(s, at ?? 0);
   }
 }
 
@@ -746,6 +1380,8 @@ function onUnit(p: UnitEvent): void {
     return;
   }
   s.unitEvents.set(p.index, p);
+  // Re-admitted: whatever it introduced may be different now.
+  s.rulesByUnit.delete(p.index);
   if (outputView.shownBook === s.id && outputView.shownUnit === p.index) {
     void showUnitOutput(s, p.index);
   }
@@ -781,6 +1417,14 @@ function onSettled(p: SettledEvent): void {
     return;
   }
   updateStatusBar(s);
+  // The outline carries each unit's status as its detail, and those are only
+  // as fresh as the last time VSCode asked -- but renew only when they have
+  // actually moved, or the renewal feeds itself. See `outlineKey`.
+  const key = currentOutlineKey(s);
+  if (key !== outlineKey) {
+    outlineKey = key;
+    renewSymbols();
+  }
   if (p.reason === 'split_error' || p.reason === 'error') {
     status.text = `$(warning) ACL2: ${p.reason}`;
     if (p.message) {
@@ -841,7 +1485,7 @@ async function followOutputView(s: BookSession, force: boolean): Promise<void> {
 async function showUnitOutput(s: BookSession, index: number): Promise<void> {
   const e = s.unitEvents.get(index);
   if (!e) {
-    outputView.set(s.id, index, '(not checked yet)');
+    outputView.set(s.id, index, 'Not checked yet.');
     return;
   }
   try {
@@ -853,7 +1497,7 @@ async function showUnitOutput(s: BookSession, index: number): Promise<void> {
     });
     outputView.set(s.id, index, r.text as string);
   } catch (err) {
-    outputView.set(s.id, index, `(output unavailable: ${err})`);
+    outputView.set(s.id, index, `Output unavailable: ${err}`);
   }
 }
 
@@ -873,6 +1517,112 @@ async function followPanel(s: BookSession, index?: number): Promise<void> {
   const model = buildPanelModel(s, at);
   if (model) {
     panel.render(model);
+    void followInduction(s, at);
+    void followRules(s, at);
+  }
+}
+
+/**
+ * Fill in what the form introduced.
+ *
+ * One request per name the form's events recorded, answered from the scrape
+ * the daemon took as the form was admitted -- so unlike the log-reading
+ * `induction` this needs no prover and returns during a proof, which is when
+ * a reader is most likely to be looking at an earlier form.
+ *
+ * Names come from the unit's inner events, which is what "inside this form"
+ * means for anything macro-generated: a `define` records the function and
+ * every theorem it wrote, none of which appear in the buffer.
+ */
+async function followRules(s: BookSession, index: number): Promise<void> {
+  const cached = s.rulesByUnit.get(index);
+  if (cached) {
+    // Already known: hand it over and let the panel decide whether anything
+    // changed. Asking again would cost a round trip per name and, worse,
+    // land a re-render on top of whatever the reader was doing.
+    panel.rules(s.id, index, cached);
+    return;
+  }
+  const e = s.unitEvents.get(index);
+  const names = (e?.inner ?? []).map((i) => i.name).filter((n) => n);
+  if (!names.length) {
+    return;
+  }
+  try {
+    const replies = await Promise.all(
+      names.map((n) => client?.request('rules', { book: s.id, name: n }))
+    );
+    const entries: PanelNameRules[] = replies
+      .filter((r): r is RulesReply => !!r && r.found)
+      .map((r) => ({
+        name: r.name,
+        symbolClass: r.symbol_class,
+        justification: r.justification,
+        formals: r.formals,
+        guard: r.guard,
+        statement: r.statement,
+        runes: (r.runes ?? []).map((u: RuneWire) => ({
+          rune: u.rune,
+          class: u.class,
+          enabled: u.enabled,
+          fields: u.fields ?? [],
+        })),
+      }));
+    s.rulesByUnit.set(index, entries);
+    // Keyed by book and unit inside the panel: the cursor may have moved on.
+    panel.rules(s.id, index, entries);
+  } catch (err) {
+    // Best effort, but said out loud -- a panel that silently shows less is
+    // indistinguishable from a form that introduced less.
+    channel.appendLine(`rules: form ${index} could not be read (${err})`);
+  }
+}
+
+/**
+ * Fill in why the form inducted, if it did.
+ *
+ * Gated on the envelope rather than always asked: ACL2 records the
+ * `:induction` rune structurally in `rules`, so the cheap fact decides
+ * whether to pay for the expensive one -- which reads the whole captured log.
+ * Most forms never induct, and this keeps the panel free for them.
+ */
+async function followInduction(s: BookSession, index: number): Promise<void> {
+  const e = s.unitEvents.get(index);
+  // Both places, and the second is the one that matters. A macro that
+  // expands to a `defthm` -- `defrule`, `define`, most of std -- records its
+  // runes against the *inner* event, leaving the form's own `rules` empty.
+  // Checking only the outer list missed every such form, which is to say
+  // most real books.
+  const runes = [...(e?.rules ?? []), ...(e?.inner ?? []).flatMap((i) => i.rules ?? [])];
+  if (!e || !runes.some((r) => r.toLowerCase().includes(':induction'))) {
+    return;
+  }
+  try {
+    const r = await client?.request('induction', { book: s.id, output_ref: e.output_ref });
+    const n = (r.inductions ?? []).length;
+    if (n === 0) {
+      // The form inducted -- a rune says so -- and the log yielded nothing.
+      // That is either an ACL2 wording this does not know or a bug here, and
+      // both are worth a line rather than silence.
+      channel.appendLine(
+        `induction: form ${index} has an :induction rune but its log parsed to nothing`
+      );
+    }
+    const records: PanelInduction[] = ((r.inductions ?? []) as InductionWire[]).map((i) => ({
+      goal: i.goal,
+      suggestedBy: i.suggested_by,
+      attribution: i.attribution,
+      scheme: i.scheme,
+      justifiedBy: i.justified_by,
+      subgoals: i.subgoals,
+    }));
+    // Keyed by book and unit: the cursor may have moved on while the log was
+    // being read, and a narrative for the form you have left is noise.
+    panel.induction(s.id, index, records);
+  } catch (err) {
+    // Best effort in the panel, but not silent: swallowing this hid a real
+    // fault once already.
+    channel.appendLine(`induction: form ${index} could not be read (${err})`);
   }
 }
 
