@@ -643,7 +643,7 @@ fn rules_answer_while_the_session_is_busy() {
         let f = d.request("rules", json!({ "book": book, "name": "ru-app" }));
         assert_eq!(f["found"], true, "answered mid-proof, not declined: {f}");
         assert_eq!(f["symbol_class"], ":ideal", "guards are not verified here: {f}");
-        assert!(f["justification"].as_str().unwrap_or("").contains("acl2-count"),
+        assert!(f["measure"].as_str().unwrap_or("").contains("acl2-count"),
                 "the measure it was admitted on: {f}");
         let runes = f["runes"].as_array().expect("runes");
         let classes: Vec<&str> =

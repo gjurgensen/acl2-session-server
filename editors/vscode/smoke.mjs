@@ -215,6 +215,9 @@ assert(dnone.available && !dnone.found, 'an unknown token has no definition');
 const ru = await c.request('rules', { book: opened.book, name: 'alpha' });
 assert(ru.found, 'rules finds a name from this file');
 assert(ru.formals === '(x)', 'and carries its signature');
+assert(ru.measure === '(acl2-count x)',
+       'and the measure as a term, not the justification record around it');
+assert(ru.relation === undefined, 'o< is every defun\u2019s, so it is not reported');
 const classes = (ru.runes ?? []).map((r) => r.class);
 assert(classes.includes(':definition'), 'a defun introduces a definition rune');
 assert(classes.includes(':induction'), 'and an induction rune it never wrote');

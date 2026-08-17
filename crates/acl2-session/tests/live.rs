@@ -1617,8 +1617,11 @@ fn admitting_a_form_scrapes_what_the_world_knows() {
     // absent and the type-prescription's corollary present.
     let f = b.rules_for("sc-app").expect("the function was scraped");
     assert_eq!(f.symbol_class.as_deref(), Some(":ideal"), "{f:?}");
-    assert!(f.justification.as_deref().unwrap_or("").contains("acl2-count"),
-            "the measure is recorded: {:?}", f.justification);
+    // The measure term itself, not the justification record it sits in: the
+    // record also carries the ruler-extenders and a subversivity flag, and
+    // reads as none of the three.
+    assert_eq!(f.measure.as_deref(), Some("(acl2-count x)"), "{:?}", f.measure);
+    assert_eq!(f.relation, None, "o< is every defun's, so it is not reported");
     assert!(f.formals.as_deref().unwrap_or("").contains('x'), "{:?}", f.formals);
     let classes: Vec<&str> = f.runes.iter().filter_map(|r| r.class()).collect();
     for want in [":definition", ":type-prescription", ":executable-counterpart", ":induction"] {

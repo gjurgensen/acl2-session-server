@@ -1806,8 +1806,15 @@ pub struct NameRules {
     /// `:ideal` (logic mode, guards unverified), `:common-lisp-compliant`
     /// (guards verified), or `:program`.
     pub symbol_class: Option<String>,
-    /// The measure and well-founded relation, for a recursive function.
-    pub justification: Option<String>,
+    /// The measure term, for a recursive function -- read off the
+    /// `justification` record with ACL2's own accessor rather than shipped as
+    /// the record, which also carries the ruler-extenders and a subversivity
+    /// flag and reads as neither.
+    pub measure: Option<String>,
+    /// The well-founded relation the measure decreases under. Absent when it
+    /// is `o<`, which is the one every ordinary `defun` gets and would be
+    /// noise on all of them.
+    pub relation: Option<String>,
     /// Formals for a function, argument list for a macro.
     pub formals: Option<String>,
     pub guard: Option<String>,
@@ -3625,8 +3632,8 @@ impl Book {
         let probe = rules_probe(names);
         let Ok(sub) = self.session.submit(&probe, deadline.max(PROBE_FLOOR)) else { return };
         let Some(body) = sub.block("rules") else { return };
-        let keys = ["rname", "rrunes", "rclass", "rjust", "rformals", "rguard",
-                    "rthm", "rconst", "rmargs", "rinfo"];
+        let keys = ["rname", "rrunes", "rclass", "rmeas", "rformals", "rguard",
+                    "rthm", "rconst", "rmargs", "rrel", "rinfo"];
         let pairs = keyed_block(body, &keys);
         // One value per key per name, emitted in that order, so the columns
         // line up positionally -- the same discipline `items` already uses
@@ -3634,9 +3641,10 @@ impl Book {
         let col = |k: &str| -> Vec<String> {
             pairs.iter().filter(|(pk, _)| pk == k).map(|(_, v)| flatten(v)).collect()
         };
-        let (rn, rr, rc, rj) = (col("rname"), col("rrunes"), col("rclass"), col("rjust"));
+        let (rn, rr, rc, rj) = (col("rname"), col("rrunes"), col("rclass"), col("rmeas"));
         let (rf, rg, rt) = (col("rformals"), col("rguard"), col("rthm"));
         let (rk, rm, ri) = (col("rconst"), col("rmargs"), col("rinfo"));
+        let rl = col("rrel");
         let pick = |v: &Vec<String>, i: usize| -> Option<String> {
             v.get(i).filter(|x| !is_nil(x) && *x != ":none").cloned()
         };
@@ -3686,7 +3694,11 @@ impl Book {
                     name: name.clone(),
                     unit,
                     symbol_class: pick(&rc, i),
-                    justification: pick(&rj, i),
+                    measure: pick(&rj, i),
+                    // `o<` is what a `defun` gets when nobody said otherwise,
+                    // so reporting it says nothing; a different relation is
+                    // a deliberate choice and worth a line.
+                    relation: pick(&rl, i).filter(|r| r != "o<"),
                     formals: pick(&rf, i).or_else(|| pick(&rm, i)),
                     guard: pick(&rg, i),
                     statement: pick(&rt, i),
@@ -4012,14 +4024,23 @@ fn rules_probe(names: &[String]) -> String {
              (acl2::nm '{n})\n\
              (acl2::rmp (acl2::getpropc acl2::nm 'acl2::runic-mapping-pairs \
                           acl2::nil acl2::wrld))\n\
+             (acl2::jst (acl2::getpropc acl2::nm 'acl2::justification \
+                          acl2::nil acl2::wrld))\n\
              (acl2::w2 (acl2::decode-logical-name acl2::nm acl2::wrld)))\n\
-             (acl2::cw \"rname ~x0~%rrunes ~x1~%rclass ~x2~%rjust ~x3~%\
-             rformals ~x4~%rguard ~x5~%rthm ~x6~%rconst ~x7~%rmargs ~x8~%\
-             rinfo ~x9~%\"\n\
+             (acl2::prog2$\n\
+             (acl2::cw \"rmeas ~x0~%rrel ~x1~%\"\n\
+             (acl2::if acl2::jst \
+               (acl2::access acl2::justification acl2::jst :measure) \
+               :none)\n\
+             (acl2::if acl2::jst \
+               (acl2::access acl2::justification acl2::jst :rel) \
+               :none))\n\
+             (acl2::cw \"rname ~x0~%rrunes ~x1~%rclass ~x2~%\
+             rformals ~x3~%rguard ~x4~%rthm ~x5~%rconst ~x6~%rmargs ~x7~%\
+             rinfo ~x8~%\"\n\
              acl2::nm\n\
              (acl2::strip-cdrs acl2::rmp)\n\
              (acl2::getpropc acl2::nm 'acl2::symbol-class :none acl2::wrld)\n\
-             (acl2::getpropc acl2::nm 'acl2::justification :none acl2::wrld)\n\
              (acl2::getpropc acl2::nm 'acl2::formals :none acl2::wrld)\n\
              (acl2::getpropc acl2::nm 'acl2::guard :none acl2::wrld)\n\
              (acl2::getpropc acl2::nm 'acl2::theorem :none acl2::wrld)\n\
@@ -4035,7 +4056,7 @@ fn rules_probe(names: &[String]) -> String {
                  (acl2::strip-cars acl2::rmp)\n\
                  (acl2::ens-maybe-brr acl2::state)\n\
                  acl2::wrld)\n\
-               acl2::nil)))\n\
+               acl2::nil))))\n\
              (acl2::value :invisible))\n"
         ));
     }
@@ -4156,9 +4177,34 @@ mod tests {
 
     #[test]
     fn the_detail_probe_is_balanced() {
-        for name in ["append", "b*", "fty::deffixequiv", "foo->bar", "*const*"] {
+        let names = ["append", "b*", "fty::deffixequiv", "foo->bar", "*const*"];
+        for name in names {
             let p = super::detail_probe(name);
             assert_eq!(paren_balance(&p), 0, "unbalanced probe for {name}: {p}");
+        }
+        let p = super::rules_probe(&names.map(String::from));
+        assert_eq!(paren_balance(&p), 0, "unbalanced rules probe: {p}");
+    }
+
+    /// `fmt` numbers its arguments with one digit, so `~x10` is not the
+    /// eleventh argument -- it is the second, followed by a literal `0`. The
+    /// probe then reports a field it never printed and drops the one it did,
+    /// silently and only against a live ACL2. Ten arguments is the ceiling;
+    /// past it, split the `cw`.
+    #[test]
+    fn no_probe_asks_fmt_for_a_two_digit_argument() {
+        let names = ["append".to_string()];
+        for p in [super::detail_probe("append"), super::rules_probe(&names),
+                  super::CMD_PROBE.to_string(), super::DEPS_PROBE.to_string()] {
+            let b = p.as_bytes();
+            for i in 0..b.len().saturating_sub(3) {
+                let bad = b[i] == b'~'
+                    && b[i + 1].is_ascii_alphabetic()
+                    && b[i + 2].is_ascii_digit()
+                    && b[i + 3].is_ascii_digit();
+                assert!(!bad, "two-digit fmt argument at {i}: {}",
+                        &p[i..(i + 8).min(p.len())]);
+            }
         }
     }
 

@@ -740,9 +740,12 @@ pub struct RulesReply {
     /// guards not verified), or `:program`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub symbol_class: Option<String>,
-    /// The measure and well-founded relation, for a recursive function.
+    /// The measure term, for a recursive function.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub justification: Option<String>,
+    pub measure: Option<String>,
+    /// The well-founded relation it decreases under, when it is not `o<`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relation: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub formals: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -758,7 +761,8 @@ pub fn rules_reply(name: &str, r: Option<&acl2_session::NameRules>) -> RulesRepl
             found: false,
             name: name.to_string(),
             symbol_class: None,
-            justification: None,
+            measure: None,
+            relation: None,
             formals: None,
             guard: None,
             statement: None,
@@ -768,7 +772,8 @@ pub fn rules_reply(name: &str, r: Option<&acl2_session::NameRules>) -> RulesRepl
             found: true,
             name: r.name.clone(),
             symbol_class: r.symbol_class.clone(),
-            justification: r.justification.clone(),
+            measure: r.measure.clone(),
+            relation: r.relation.clone(),
             formals: r.formals.clone(),
             guard: r.guard.clone(),
             statement: r.statement.clone(),

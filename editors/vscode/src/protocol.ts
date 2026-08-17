@@ -274,7 +274,8 @@ export interface RulesReply {
   found: boolean;
   name: string;
   symbol_class?: string;
-  justification?: string;
+  measure?: string;
+  relation?: string;
   formals?: string;
   guard?: string;
   statement?: string;

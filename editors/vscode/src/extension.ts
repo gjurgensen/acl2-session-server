@@ -1557,7 +1557,8 @@ async function followRules(s: BookSession, index: number): Promise<void> {
       .map((r) => ({
         name: r.name,
         symbolClass: r.symbol_class,
-        justification: r.justification,
+        measure: r.measure,
+        relation: r.relation,
         formals: r.formals,
         guard: r.guard,
         statement: r.statement,
