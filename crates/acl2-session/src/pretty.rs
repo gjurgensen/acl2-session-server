@@ -920,6 +920,35 @@ mod tests {
         );
     }
 
+    /// Re-flowing already laid-out text gives what laying out the original
+    /// would have.
+    ///
+    /// The property the daemon rests on: it never has the term as ACL2 first
+    /// printed it once the client has been told a width, so a width that
+    /// changes has to be servable from the text already sent. It holds
+    /// because the reader discards whitespace entirely -- what it parses is
+    /// the term, not its layout.
+    #[test]
+    fn laying_out_laid_out_text_again_is_the_same_as_laying_out_the_original() {
+        for s in [
+            "(implies (and (natp x) (natp y) (< x y)) (equal (foo x y) (bar y x)))",
+            "(if (exprp expr) (if (vstatep vstate) (expr-unambp expr) 'nil) 'nil)",
+            "(foo (bar aaaaa) b c d)",
+            "(cons aaaaaaaaaaaaaaaaaaaa . bbbbbbbbbbbbbbbbbbbb)",
+            "(equal x '(1 2))",
+        ] {
+            for w1 in [20, 30, 40, 77, 200] {
+                for w2 in [20, 30, 40, 77, 200] {
+                    assert_eq!(
+                        pretty(&pretty(s, w1), w2),
+                        pretty(s, w2),
+                        "{s:?} laid out at {w1} then {w2}"
+                    );
+                }
+            }
+        }
+}
+
     /// Laying out an already laid-out term changes nothing further.
     #[test]
     fn the_layout_is_stable() {
