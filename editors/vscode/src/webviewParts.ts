@@ -102,6 +102,16 @@ function codes(list) {
     list.map((r) => '<code class="lisp">' + hl(r) + '</code>').join('') + '</p>';
 }
 
+// A length of ACL2 text, said the way a reader would say it. Only ever used
+// to explain that something was cut, so the units are the ones that make the
+// two numbers comparable at a glance rather than exact: "showing 16 KB of
+// 6.8 MB" is the sentence, and "16,365 of 6,831,709 characters" is not.
+function fmtChars(n) {
+  if (n >= 1000000) { return (n / 1000000).toFixed(1) + ' MB'; }
+  if (n >= 1000) { return Math.round(n / 1000) + ' KB'; }
+  return n + ' characters';
+}
+
 // ACL2 reports times as rationals of seconds; render them as labeled
 // decimals instead of fractions.
 function rat(tok) {

@@ -21,6 +21,7 @@ import * as vscode from 'vscode';
 import { TokLines } from './highlight';
 import { SHARED_CSS, SHARED_JS } from './webviewParts';
 import { pretty } from './pretty';
+import { MAX_TERM } from './policy';
 
 export interface PanelCheckpoint {
   kind: string;
@@ -111,6 +112,14 @@ export interface PanelInduction {
   suggestedBy?: string;
   attribution?: string;
   scheme?: string;
+  /**
+   * How long the scheme really is, when `scheme` is only its head.
+   *
+   * The daemon cuts it: a mutual recursion's scheme is the whole clique, and
+   * the one that started this arrived at 6.83 MB. Present means the page must
+   * say so rather than showing a term that stops without explanation.
+   */
+  schemeChars?: number;
   justifiedBy?: string;
   subgoals?: string;
 }
@@ -134,14 +143,17 @@ function inductionStrings(records: PanelInduction[]): string[] {
 }
 
 /**
- * Whether two rules records say the same thing.
+ * Whether two records say the same thing.
  *
- * By serialisation rather than field by field: the shape is a small tree of
- * plain data whose fields are ACL2's and therefore open-ended, so a
- * hand-written comparison would quietly stop noticing whatever gets added
- * next.
+ * By serialisation rather than field by field: these are small trees of plain
+ * data whose fields are ACL2's and therefore open-ended, so a hand-written
+ * comparison would quietly stop noticing whatever gets added next.
+ *
+ * Sound to use on anything the daemon sends because all of it is JSON that
+ * arrived over the wire -- there is nothing in here to serialise that did not
+ * serialise on the way in.
  */
-function same(a: PanelNameRules[], b: PanelNameRules[]): boolean {
+function same(a: unknown, b: unknown): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
@@ -172,6 +184,11 @@ export function highlightable(m: PanelEnvelope): string[] {
  * Tokenize each string once, keyed by its own text: a webview looks a string
  * up rather than carrying a tokenizer, and a rune repeated across a dozen
  * events is tokenized once.
+ *
+ * A term over `MAX_TERM` gets no entry at all, which is the whole of the
+ * fallback: `hl` in the pages renders any string it cannot find as plain
+ * escaped text, so an oversized term arrives uncolored rather than as half a
+ * million `<span>` elements. Nothing downstream has to know.
  */
 export function tokenizeAll(
   strings: string[],
@@ -180,6 +197,9 @@ export function tokenizeAll(
   const toks: Record<string, TokLines> = {};
   if (tokenizer) {
     for (const s of strings) {
+      if (s.length > MAX_TERM) {
+        continue;
+      }
       if (!(s in toks)) {
         const t = tokenizer(s);
         if (t) {
@@ -408,10 +428,20 @@ export class Panel {
    */
   induction(book: string, index: number, records: PanelInduction[]): void {
     const s = this.shown();
-    if (s && s.book === book && s.index === index) {
-      this.lastInduction = { book, index, records };
-      this.postInduction(this.lastInduction);
+    if (!s || s.book !== book || s.index !== index) {
+      return;
     }
+    // The same guard `rules` carries, and for the same reason: a render
+    // replaces the whole page and resets every dropdown the reader has
+    // opened, so a post that would change nothing must not happen. The panel
+    // follows the cursor, and the same form arriving again is the common
+    // case rather than the rare one.
+    const l = this.lastInduction;
+    if (l && l.book === book && l.index === index && same(l.records, records)) {
+      return;
+    }
+    this.lastInduction = { book, index, records };
+    this.postInduction(this.lastInduction);
   }
 
   private postInduction(i: { book: string; index: number; records: PanelInduction[] }): void {
@@ -560,7 +590,18 @@ function inductionHtml() {
     if (r.attribution) { rows += row('using', runeWords(r.attribution)); }
     if (rows) { h += '<table class="inner">' + rows + '</table>'; }
     // Laid out as ACL2 printed it -- the indentation is the structure.
-    if (r.scheme) { h += '<pre>' + hl(r.scheme) + '</pre>'; }
+    if (r.scheme) {
+      h += '<pre>' + hl(r.scheme) + '</pre>';
+      // A scheme the daemon cut says so, with the size it really is and
+      // where the rest of it lives. Said plainly rather than with an
+      // ellipsis: a term that stops without explanation reads as a bug in
+      // the parser, which is what this one would look like at 6.83 MB.
+      if (r.schemeChars) {
+        h += '<p class="meta">showing ' + fmtChars(r.scheme.length) + ' of ' +
+             fmtChars(r.schemeChars) +
+             '; the whole scheme is in the full log.</p>';
+      }
+    }
     // Neither justifiedBy nor subgoals is shown. The first is the head
     // symbol of the term in the suggested-by row, so it only repeats it; the
     // second is about what happened next rather than about the scheme, and

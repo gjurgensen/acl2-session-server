@@ -320,6 +320,16 @@ export interface InductionWire {
   attribution?: string;
   /** The scheme, with `:p` standing for the conjecture. */
   scheme?: string;
+  /**
+   * How long the scheme really is, when `scheme` is only its head.
+   *
+   * The daemon cuts it above its own limit and this is how the client knows
+   * to say so. Absent means the whole scheme is there. A mutual recursion
+   * inducts on its entire clique, and one measured here ran to 6.83 MB --
+   * see `SCHEME_LIMIT` in the daemon's `wire.rs`, and `MAX_TERM` in
+   * `policy.ts` for what the client does with a term that size.
+   */
+  scheme_chars?: number;
   /** The function whose admission licenses it, when one does. */
   justified_by?: string;
   /** ACL2's own phrasing: "two nontautological subgoals". */

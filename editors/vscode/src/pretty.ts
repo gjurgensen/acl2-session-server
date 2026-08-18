@@ -17,6 +17,8 @@
 // exactly as it arrived. A term this cannot read is a term ACL2 printed and
 // we would rather show verbatim than mangle.
 
+import { MAX_TERM } from './policy';
+
 /** A parsed term: an atom's text, or a list of nodes. */
 type Node = string | Node[];
 
@@ -48,6 +50,13 @@ const ALIGN_LIMIT = 12;
 const INDENT_LIMIT = 40;
 
 export function pretty(term: string, cols: number): string {
+  // Total in the other direction too: a term too big to read comes back
+  // exactly as it arrived, for the same reason one that will not parse does.
+  // Laying it out is only worth doing if the result can be read, and the
+  // layout *grows* the text -- 6.83 MB in gave 15.3 MB out. See `MAX_TERM`.
+  if (term.length > MAX_TERM) {
+    return term;
+  }
   const node = parse(term);
   if (node === undefined) {
     return term;

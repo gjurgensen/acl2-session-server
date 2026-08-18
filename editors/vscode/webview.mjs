@@ -505,6 +505,78 @@ check(
   );
 }
 
+// ---- a term too big to read is never worked on ----
+{
+  const { MAX_TERM } = require('./out/policy.js');
+  const { tokenizeAll } = require('./out/panel.js');
+  // The shape that took the editor down. ACL2 prints an induction scheme
+  // with nothing abbreviated, so for a mutual recursion the scheme *is* the
+  // clique: the `defines` at line 2775 of kestrel/c/syntax/validator.lisp
+  // printed 6.83 MB of it, three times over in one reply. Laying that out
+  // grew it to 15.3 MB and coloring it made 563,184 spans, per render, on
+  // every state event. The daemon now cuts the scheme; this is the guard for
+  // every other term that could take the same shape.
+  const huge = '(and\n' + ' (implies (natp x) (equal (f x) (g x)))\n'.repeat(3000) + ')';
+  check(huge.length > MAX_TERM, `the sample really is oversized (${huge.length} chars)`);
+  const t0 = Date.now();
+  check(pretty(huge, 60) === huge, 'an oversized term comes back exactly as it arrived');
+  check(Date.now() - t0 < 50, 'and comes back without being laid out');
+  // Tokenizing is declined by leaving the entry out, and that *is* the
+  // fallback: `hl` renders any string it cannot find as plain escaped text.
+  const toks = tokenizeAll([huge, '(natp x)'], (text) => [[{ t: text, c: '#fff' }]]);
+  check(!(huge in toks), 'an oversized term is not tokenized');
+  check('(natp x)' in toks, 'while an ordinary one still is');
+  globalThis.toks = toks;
+  const plain = lift('esc', 'spans', 'hl')(huge);
+  check(!plain.includes('<span'), 'so the page renders it as plain escaped text');
+  check(plain.includes('&lt;') === false && plain.startsWith('(and'),
+        'still escaped, and still the term that arrived');
+}
+
+// ---- saying how much of a scheme is on show ----
+{
+  const fmtChars = lift('fmtChars');
+  // Decimal, so the unit matches the number a reader would quote back: the
+  // scheme that started all this is 6,831,709 characters, which is 6.8 MB in
+  // the same arithmetic the rest of these notes use.
+  check(fmtChars(6831709) === '6.8 MB', 'a scheme too big to show is said in MB');
+  check(fmtChars(16365) === '16 KB', 'and the head of it in KB');
+  check(fmtChars(412) === '412 characters',
+        'while a small one is said exactly, since rounding it would say 0');
+}
+
+// ---- the daemon's cut scheme survives the client's own limit ----
+{
+  const { MAX_TERM } = require('./out/policy.js');
+  const { tokenizeAll } = require('./out/panel.js');
+  // SCHEME_LIMIT in the daemon's wire.rs and MAX_TERM here are coupled, and
+  // the coupling is easy to miss: the panel lays a scheme out *before*
+  // coloring it, and laying out grows the text about 2.2x. A cut that leaves
+  // no room for that arrives cut and uncolored at once, which is the one
+  // combination the cut was not for.
+  const SCHEME_LIMIT = 16 * 1024;
+  const conjunct = ' (implies (natp x) (equal (f x) (g x)))\n';
+  let body = '(and\n';
+  while (body.length + conjunct.length + 1 < SCHEME_LIMIT) {
+    body += conjunct;
+  }
+  // Both halves of what the daemon can hand over. Its cut lands on a line
+  // boundary inside a term, so the head it sends is usually *unbalanced* --
+  // `pretty` passes that through untouched, by its own contract -- while a
+  // scheme that happened to end there is whole and gets laid out. Either way
+  // the reader must end up with a colored scheme.
+  for (const [what, scheme] of [['an unbalanced head', body], ['a whole one', body + ')']]) {
+    const laid = pretty(scheme, 60);
+    check(
+      laid.length < MAX_TERM,
+      `${what} fits the colorer after layout (${laid.length} of ${MAX_TERM}, ` +
+        `${(laid.length / scheme.length).toFixed(1)}x)`
+    );
+    const toks = tokenizeAll([laid], (text) => [[{ t: text, c: '#fff' }]]);
+    check(laid in toks, `so ${what} reaches the reader colored, not bare`);
+  }
+}
+
 // ---- tails are pushed, never polled ----
 {
   const { planTail } = require('./out/policy.js');

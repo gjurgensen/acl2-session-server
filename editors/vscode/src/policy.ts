@@ -2,6 +2,46 @@
 // editor API -- so they can be read, argued with, and tested without one.
 
 /**
+ * The largest term this client will work on.
+ *
+ * Two things happen to every term that reaches a webview: it is re-flowed to
+ * the pane's width (`pretty`) and it is tokenized and colored
+ * (`tokenizeAll`). Both are worth their cost on a term a person is reading,
+ * and neither has any value on one nobody can. Above this, a term is passed
+ * through untouched and rendered as plain escaped text -- `hl` in the pages
+ * already falls back to `esc` for any string with no token entry, so
+ * declining to tokenize *is* the fallback, with nothing further to arrange.
+ *
+ * The number is a backstop, not a budget: it is far above any term ACL2
+ * prints for a form a person wrote, and exists for the ones it prints for a
+ * form a macro wrote. Measured on `kestrel/c/syntax/validator.lisp`, whose
+ * `defines` at line 2775 induct on a 30-way flag function. The induction
+ * scheme ACL2 printed for it was **6.83 MB**, and the panel's own handling of
+ * one of them cost:
+ *
+ *   pretty(scheme, 60)      394 ms   6.83 MB -> 15.3 MB, 319,743 lines
+ *   tokenizeAll             3471 ms
+ *   postMessage payload              88.6 MB of JSON
+ *   the page's own HTML              54.4 MB, 563,184 <span> elements
+ *
+ * Three such schemes came in one `induction` reply (20.9 MB, against 1.6 MB
+ * of real events for the whole book), and the panel re-rendered them on every
+ * `state` event -- fifteen of them in the six seconds after that form landed.
+ * The result was not a slow panel. The extension host stopped answering, so
+ * every other extension stopped with it; the renderer took a quarter of a
+ * gigabyte of structured clone and a million and a half DOM nodes in wrapping
+ * `<pre>` blocks, and the window went to "not responding" and stayed there.
+ * With the panel closed the same book checks cleanly, because nothing asks
+ * for the narrative unless the panel is showing the form.
+ *
+ * The daemon caps the scheme itself (`SCHEME_LIMIT` in the editor crate's
+ * `wire.rs`), which is what keeps 20 MB off the wire. This is the guard for
+ * every other term: a checkpoint, a `:corollary`, a statement -- any of which
+ * can take the same shape from a book nobody has opened yet.
+ */
+export const MAX_TERM = 64 * 1024;
+
+/**
  * What a `tail` event should cause.
  *
  * A tail is a **push**: the daemon sends it on its own timer and it already
