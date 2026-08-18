@@ -232,6 +232,17 @@ assert(defKeys.includes(':clique'), 'but the rest of the rule is');
 assert(!batch.rules[1].found, 'a name this file never introduced is not ours to explain');
 assert(batch.rules[1].name === 'binary-append', 'and is still named, so the order is usable');
 
+// A book of four small forms must not cost megabytes. The number is
+// generous -- this is a floor against floods, not a tight bound -- and it
+// exists because a client that asked the daemon for a slice on every `tail`
+// once pushed 245 MB in eleven minutes on a real book, against ~1.5 MB of
+// genuine events. That stalled the daemon's writer and froze the extension
+// host every other extension shares. Traffic that scales with *time* rather
+// than with the book is the shape to catch.
+assert(c.bytesReceived > 0, 'the client saw the daemon\u2019s bytes at all');
+assert(c.bytesReceived < 4 * 1024 * 1024,
+       `the whole session stayed under 4 MB (saw ${(c.bytesReceived / 1048576).toFixed(2)} MB)`);
+
 const closed = await c.request('close', { book: opened.book });
 assert(closed.closed === true, 'close closes');
 c.dispose();

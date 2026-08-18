@@ -139,6 +139,15 @@ interface Pending {
 export class DaemonClient extends EventEmitter {
   private proc: ChildProcessWithoutNullStreams;
   private buf = Buffer.alloc(0);
+  /**
+   * Bytes the daemon has sent, ever.
+   *
+   * Cheap to keep and the one number that says whether the client is being
+   * flooded. Traffic should scale with the book, not with how long a form
+   * runs: a client that asked for a slice on every `tail` once took 245 MB in
+   * eleven minutes where the events themselves were ~1.5 MB.
+   */
+  bytesReceived = 0;
   private nextId = 1;
   private pending = new Map<number, Pending>();
 
@@ -215,6 +224,7 @@ export class DaemonClient extends EventEmitter {
   }
 
   private feed(b: Buffer): void {
+    this.bytesReceived += b.length;
     this.buf = Buffer.concat([this.buf, b]);
     for (;;) {
       const headerEnd = this.buf.indexOf('\r\n\r\n');

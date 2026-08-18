@@ -505,6 +505,35 @@ check(
   );
 }
 
+// ---- tails are pushed, never polled ----
+{
+  const { planTail } = require('./out/policy.js');
+  // Every shape a tail can arrive in, including the ones that route it
+  // somewhere: none of them may ask the daemon for more. A tail arrives twice
+  // a second for as long as a form runs, so a request here is a request
+  // forever, and its reply is only as small as the output's lines happen to
+  // be. Four hundred lines of kestrel/c/syntax/validator.lisp came back as
+  // ~117 KB a time: 245 MB pushed in eleven minutes against ~1.5 MB of real
+  // events, which stalled the daemon's writer and froze the extension host
+  // that every other extension shares.
+  const shapes = [
+    { unit: null, sameBook: true, shownUnit: null, want: 'console' },
+    { unit: 7, sameBook: true, shownUnit: 7, want: 'output-view' },
+    { unit: 7, sameBook: true, shownUnit: 3, want: 'panel-only' },
+    { unit: 7, sameBook: false, shownUnit: 7, want: 'panel-only' },
+    { unit: 0, sameBook: true, shownUnit: 0, want: 'output-view' },
+  ];
+  let asked = 0;
+  for (const c of shapes) {
+    const plan = planTail(c);
+    check(plan.target === c.want,
+      `a tail with unit=${c.unit} shown=${c.shownUnit}` +
+      `${c.sameBook ? '' : ' (other book)'} goes to ${c.want}`);
+    if (plan.requestsMore) { asked++; }
+  }
+  check(asked === 0, 'and no tail, in any shape, asks the daemon for more');
+}
+
 if (bad) {
   console.error(`webview: ${bad} failing`);
   process.exit(1);

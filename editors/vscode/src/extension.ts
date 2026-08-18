@@ -15,6 +15,7 @@
 // reds included, and no diagnostics. One treatment per fact, never two.
 
 import * as vscode from 'vscode';
+import { planTail } from './policy';
 import { readFileSync } from 'fs';
 import {
   DaemonClient,
@@ -1503,27 +1504,21 @@ function onTail(p: TailEvent): void {
   // A null unit is an eval's tail: it belongs to this book's console, not to
   // any form of the file, and so to neither the panel nor a view that
   // follows the cursor.
-  if (p.unit === null) {
+  // The rule lives in `policy.planTail`, where it can be tested without an
+  // editor -- and where the reason it is a push rather than a poll is written
+  // down next to the numbers that made the case.
+  const plan = planTail({
+    unit: p.unit,
+    sameBook: outputView.shownBook === s.id,
+    shownUnit: outputView.shownUnit,
+  });
+  if (plan.target === 'console') {
     s.console?.tail(p.elapsed_ms, p.text);
   } else {
-    s.runningUnit = p.unit;
+    s.runningUnit = p.unit ?? undefined;
     s.runningRef = p.output_ref;
-    if (outputView.shownBook === s.id && outputView.shownUnit === p.unit) {
-      // The text the event already carries, never a fresh request. Asking the
-      // daemon for a deeper slice on every tick looks harmless -- it is one
-      // request, throttled to one in flight -- but the reply is proportional
-      // to the *lines*, and a book like kestrel/c/syntax/validator.lisp
-      // prints long ones: 400 lines came back as ~117 KB, twice a second, for
-      // as long as the form ran. Measured on a live session: 245 MB pushed
-      // from the daemon in eleven minutes against ~1.5 MB of real events for
-      // the whole book, with the daemon's writer thread blocked on a socket
-      // the client could no longer drain and the extension host spending its
-      // life parsing JSON and re-tokenising a virtual document.
-      //
-      // A live view is for watching output go by, which is what the pushed
-      // tail is. Depth on demand still works: opening the view, or the form
-      // landing, calls `showUnitOutput`, which reads the handle properly.
-      outputView.set(s.id, p.unit, p.text);
+    if (plan.target === 'output-view') {
+      outputView.set(s.id, p.unit as number, p.text);
     }
     panel.tail(p.book, p.unit, p.elapsed_ms, p.text);
   }
