@@ -409,9 +409,14 @@ pub struct InductionWire {
     /// The runes themselves are in the unit's `rules`, structurally.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attribution: Option<String>,
-    /// The scheme, with `:p` standing for the conjecture.
+    /// The scheme, with `:p` standing for the conjecture -- or the head of
+    /// it, when `scheme_chars` says there was more.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scheme: Option<String>,
+    /// How long the scheme really is, in characters, when what is above is
+    /// only its head. Absent when the whole thing is there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheme_chars: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub justified_by: Option<String>,
     /// ACL2's own phrasing -- "two nontautological subgoals".
@@ -424,14 +429,105 @@ pub struct InductionReply {
     pub inductions: Vec<InductionWire>,
 }
 
+/// How much of an induction scheme crosses the wire.
+///
+/// The scheme is the one field here with no bound of its own. ACL2 prints it
+/// with the gag-mode evisc tuple, which is `nil` under this crate's settings,
+/// so nothing is abbreviated -- and for a mutual recursion the scheme *is*
+/// the clique. Measured on `books/kestrel/c/syntax/validator.lisp`: the
+/// `defines` at line 2775 produced three schemes of 6.83 MB each, 20.9 MB in
+/// one reply, against 1.6 MB of real events for the whole book. What that did
+/// to the editor is recorded in `editors/vscode/src/policy.ts`.
+///
+/// So the head of it crosses and the rest stays where every other long piece
+/// of ACL2's output already lives -- behind the output handle, one `output`
+/// request away. Generous on purpose: a scheme a person can actually read
+/// arrives whole, and this is a backstop against the ones nobody can.
+///
+/// Chosen against the client's own limit rather than freely. The panel lays a
+/// scheme out at the pane's width *before* coloring it, and laying out grows
+/// the text -- 6.83 MB became 15.3 MB, about 2.2x. What the panel colors is
+/// therefore what this sends, expanded; if that lands over `MAX_TERM` in
+/// `editors/vscode/src/policy.ts` the scheme arrives cut *and* uncolored,
+/// which is the one combination nobody asked for. This leaves room for the
+/// expansion, and `webview.mjs` holds the two numbers to it.
+const SCHEME_LIMIT: usize = 16 * 1024;
+
+/// The head of a scheme, and its full length when anything was cut.
+///
+/// Cut on a line boundary because the scheme's indentation *is* its
+/// structure: stopping mid-line would leave a term's tail sitting at a column
+/// that means something else. Falling back to a character boundary covers the
+/// scheme that is one very long line, which must still be cut somewhere and
+/// must not be cut through a character.
+fn cut_scheme(s: &str) -> (String, Option<usize>) {
+    if s.len() <= SCHEME_LIMIT {
+        return (s.to_string(), None);
+    }
+    let mut cut = SCHEME_LIMIT;
+    while !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let head = match s[..cut].rfind('\n') {
+        Some(nl) => &s[..nl],
+        None => &s[..cut],
+    };
+    (head.to_string(), Some(s.chars().count()))
+}
+
 pub fn induction(i: &acl2_session::Induction) -> InductionWire {
+    let (scheme, scheme_chars) = match &i.scheme {
+        Some(s) => {
+            let (head, full) = cut_scheme(s);
+            (Some(head), full)
+        }
+        None => (None, None),
+    };
     InductionWire {
         goal: i.goal.clone(),
         suggested_by: i.suggested_by.clone(),
         attribution: i.attribution.clone(),
-        scheme: i.scheme.clone(),
+        scheme,
+        scheme_chars,
         justified_by: i.justified_by.clone(),
         subgoals: i.subgoals.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_readable_scheme_crosses_whole() {
+        let s = "(and (implies (endp x) (:p x y))\n     (implies (not (endp x)) (:p (cdr x) y)))";
+        let (head, full) = cut_scheme(s);
+        assert_eq!(head, s);
+        assert_eq!(full, None);
+    }
+
+    #[test]
+    fn a_clique_sized_scheme_is_cut_on_a_line_boundary() {
+        // The shape the editor met: one `(:p ...)` conjunct per line, more of
+        // them than anyone will read.
+        let line = "     (implies (not (equal flag 'valid-expr)) (:p flag term))\n";
+        let s = line.repeat(20_000);
+        let (head, full) = cut_scheme(&s);
+        assert!(head.len() <= SCHEME_LIMIT, "cut to {}", head.len());
+        assert_eq!(full, Some(s.chars().count()));
+        // Whole lines only: what is shown must still line up with itself.
+        assert!(head.split('\n').all(|l| l.is_empty() || l == line.trim_end()));
+    }
+
+    /// A scheme that is one enormous line still has to be cut, and cutting it
+    /// through a multi-byte character would panic rather than truncate.
+    #[test]
+    fn one_long_line_is_cut_at_a_character_boundary() {
+        let s = "\u{2192}".repeat(SCHEME_LIMIT);
+        let (head, full) = cut_scheme(&s);
+        assert!(head.len() <= SCHEME_LIMIT);
+        assert_eq!(full, Some(SCHEME_LIMIT));
+        assert!(head.chars().all(|c| c == '\u{2192}'));
     }
 }
 
