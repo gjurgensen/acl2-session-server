@@ -49,15 +49,18 @@
 //!
 //! Deliberately not implemented, none of which changes what a term *says*:
 //!
-//! - `ppr-special-syms` (`defun . 2`, `if . 2`, `let . 1` ...), the table
-//!   saying how many leading arguments stay on the head's line. Its absence
-//!   makes those forms lay out like any other; adding it later is an extra
-//!   tuple shape, not a change to this one.
 //! - Keyword pairs. ACL2 keeps `:key value` together on a line; here a keyword
 //!   is an atom like any other, so a keyword argument list breaks one item per
 //!   line rather than one pair per line.
 //! - Evisceration and iprinting, which belong to a printer that owns the
 //!   object.
+//!
+//! `ppr-special-syms` *is* implemented, from its built-in seed; see
+//! [`special_term_num`] for what is missing there (books extend the table at
+//! run time, and reading the live one would need a session).
+//!
+//! Measured against ACL2 over 406 real terms at three widths: 1218 of 1218
+//! character-identical. `examples/ppr-diff.rs` records how to repeat it.
 //!
 //! # Total
 //!
@@ -360,6 +363,20 @@ enum Tuple<'a> {
     Indent { width: usize, indent: usize, head: Box<Tuple<'a>>, cols: Vec<Tuple<'a>> },
     /// A reader macro and its argument, printed with nothing between them.
     Prefixed { width: usize, prefix: &'a str, inner: Box<Tuple<'a>> },
+    /// A form from [`special_term_num`]: a head (possibly with a name beside
+    /// it), the initial arguments, and then the body indented by `body_indent`
+    /// -- two, normally, which is what puts an `if`'s else branch to the left
+    /// of its then branch.
+    Special {
+        width: usize,
+        head: Box<Tuple<'a>>,
+        /// `None` puts the initial arguments on the head's line; `Some(i)`
+        /// starts them on the next line, indented by `i`.
+        init_indent: Option<usize>,
+        init: Vec<Tuple<'a>>,
+        body_indent: usize,
+        body: Vec<Tuple<'a>>,
+    },
 }
 
 impl Tuple<'_> {
@@ -368,9 +385,53 @@ impl Tuple<'_> {
             Tuple::Flat { width, .. }
             | Tuple::Wide { width, .. }
             | Tuple::Indent { width, .. }
-            | Tuple::Prefixed { width, .. } => *width,
+            | Tuple::Prefixed { width, .. }
+            | Tuple::Special { width, .. } => *width,
         }
     }
+}
+
+/// How many leading arguments a form treats as its own, before the rest are
+/// laid out as a body.
+///
+/// ACL2's `ppr-special-syms`, seeded from the constant `*ppr-special-syms*`.
+/// The number is the count of *initial* arguments: they lay out beside or
+/// under the head as usual, and everything after them is indented by two
+/// rather than aligned. That is what makes an `if` read the way a Lisp
+/// programmer expects, with the else branch indented less than the then
+/// branch:
+///
+/// ```text
+/// (if (exprp expr)
+///     (if (vstatep vstate)
+///         (expr-unambp expr)
+///       'nil)
+///   'nil)
+/// ```
+///
+/// The mechanism is an extension by Stephen Westfold; the tuple it builds is
+/// ACL2's `SPECIAL-TERM`.
+///
+/// In ACL2 this is a **world table**, not a constant, so books extend it --
+/// xdoc registers `defxdoc 1`, for instance. What is here is the built-in
+/// seed, which covers the forms a term or a book's top level is actually made
+/// of. Reading the live table would need a session and a probe; when that
+/// becomes worth it, this is the function that grows a second source.
+fn special_term_num(head: &Node) -> Option<usize> {
+    let Kind::Atom(name) = &head.kind else { return None };
+    // Package-insensitive: a book in its own package prints `if` for
+    // `common-lisp::if`, and the qualified spelling turns up too.
+    let bare = name.rsplit("::").next().unwrap_or(name).to_ascii_lowercase();
+    Some(match bare.as_str() {
+        "mutual-recursion" => 0,
+        "case" | "case-match" | "defabsstobj" | "defaxiom" | "defconst" | "defstobj"
+        | "defthm" | "defthmd" | "encapsulate" | "lambda" | "lambda$" | "let" | "let*"
+        | "table" => 1,
+        "defcong" | "defmacro" | "defun" | "defun-inline" | "defun-sk" | "defund"
+        | "if" | "mv-let" => 2,
+        "defchoose" => 3,
+        _ => return None,
+    })
 }
 
 /// The widest of a column, or `floor` when it is empty.
@@ -411,8 +472,18 @@ fn ppr1<'a>(x: &'a Node, width: usize, rpc: usize) -> Tuple<'a> {
                 return flat();
             };
             let width1 = width.saturating_sub(1);
+            let args = &items[1..];
             let alone = items.len() == 1 && tail.is_none();
             let head_t = ppr1(head, width1, if alone { rpc + 1 } else { 0 });
+            // A form the table knows lays its body out apart from its initial
+            // arguments. Only for a proper list with enough of them: ACL2
+            // declines rather than guessing at a form that does not have the
+            // shape its entry describes.
+            if tail.is_none()
+                && let Some(n) = special_term_num(head).filter(|&n| args.len() >= n)
+            {
+                return special_tuple(head_t, args, n, width, rpc);
+            }
             // A head that is not an atom -- a lambda, say -- cannot have
             // arguments aligned after it, so its width is not a column.
             let hd_sz = head.atom_like().then(|| head_t.width() as isize);
@@ -457,6 +528,84 @@ fn ppr1<'a>(x: &'a Node, width: usize, rpc: usize) -> Tuple<'a> {
                 },
             }
         }
+    }
+}
+
+/// Build the tuple for a form in [`special_term_num`], following ACL2's
+/// `SPECIAL-TERM` branch of `ppr1`.
+///
+/// Three pieces come out of it. The head, which may take the first initial
+/// argument onto its own line when that argument is a symbol and fits -- this
+/// is what keeps `(defun foo` together. The initial arguments, either
+/// continuing the head's line or starting the next one. And the body,
+/// indented by two unless there is no room, which is the whole point of the
+/// exercise.
+fn special_tuple<'a>(
+    head_t: Tuple<'a>,
+    args: &'a [Node],
+    n: usize,
+    width: usize,
+    rpc: usize,
+) -> Tuple<'a> {
+    let width1 = width.saturating_sub(1) as isize;
+    let hd_sz = head_t.width() as isize;
+    let (init_args, rest) = args.split_at(n);
+    let body = ppr1_lst(rest, None, width.saturating_sub(1), rpc + 1);
+
+    // A symbol first initial argument rides the head's line when it fits:
+    // `(defun foo` rather than `(defun` and `foo` beneath it.
+    let named = init_args
+        .first()
+        .filter(|a| a.atom_like())
+        .map(|a| ppr1(a, width.saturating_sub(hd_sz as usize), 0))
+        .filter(|t| hd_sz + 1 + t.width() as isize <= width1);
+    let name_sz = named.as_ref().map_or(0, |t| 1 + t.width() as isize);
+    let (head, init_src) = match named {
+        Some(_) => {
+            // The head and the name print as one flat run.
+            let Tuple::Flat { items, .. } = head_t else { unreachable!("an atom head is flat") };
+            let mut merged = items;
+            merged.push(Item::Obj(&init_args[0]));
+            (
+                Tuple::Flat { width: (hd_sz + name_sz) as usize, items: merged },
+                &init_args[1..],
+            )
+        }
+        None => (head_t, init_args),
+    };
+    let init = ppr1_lst(
+        init_src,
+        None,
+        width.saturating_sub(1),
+        if body.is_empty() { rpc + 1 } else { 0 },
+    );
+    let max_init = max_width(&init, 0);
+    let max_body = max_width(&body, -1);
+
+    // The initial arguments stay on the head's line unless they would not fit
+    // there; then they start the next one, indented under the head where
+    // there is room and pulled left where there is not.
+    let init_indent = (!init.is_empty() && hd_sz + name_sz + max_init >= width1).then(|| {
+        if hd_sz + max_init >= width1 {
+            (width1 - max_init).max(1) as usize
+        } else {
+            (hd_sz + 2) as usize
+        }
+    });
+    // Two, which is what indents a body less than the arguments above it --
+    // unless there is no room for even that.
+    let body_indent = if max_body >= width1 || init_indent == Some(1) { 1 } else { 2 };
+    let widest = (hd_sz.max(max_body + body_indent as isize - 1)).max(match init_indent {
+        Some(i) => i as isize - 1 + max_init,
+        None => hd_sz + name_sz + 1 + max_init,
+    });
+    Tuple::Special {
+        width: (1 + widest).max(0) as usize,
+        head: Box::new(head),
+        init_indent,
+        init,
+        body_indent,
+        body,
     }
 }
 
@@ -551,6 +700,29 @@ fn ppr2(x: &Tuple, col: usize, out: &mut String) {
             ppr2(head, col + 1, out);
             let at = col + 1 + head.width();
             ppr2_column(cols, at, at + 1, out);
+            out.push(')');
+        }
+        Tuple::Special { head, init_indent, init, body_indent, body, .. } => {
+            out.push('(');
+            ppr2(head, col + 1, out);
+            let hw = head.width();
+            if init_indent.is_some() {
+                out.push('\n');
+            }
+            if !init.is_empty() {
+                let (loc, at) = match init_indent {
+                    Some(i) => (0, col + i),
+                    None => (col + hw + 1, col + hw + 2),
+                };
+                ppr2_column(init, loc, at, out);
+            }
+            // ACL2 emits this newline unconditionally; skipped for an empty
+            // body, where it would leave a blank line before the close paren
+            // and there is nothing below it to separate.
+            if !body.is_empty() {
+                out.push('\n');
+                ppr2_column(body, 0, col + body_indent, out);
+            }
             out.push(')');
         }
         Tuple::Indent { indent, head, cols, .. } => {
@@ -694,6 +866,40 @@ mod tests {
         );
         let widest = out.lines().map(|l| l.len() - l.trim_start().len()).max().unwrap();
         assert!(widest <= 60, "indent ran to {widest}");
+    }
+
+    /// A form in the table lays its body out apart from its initial
+    /// arguments, which is what puts an `if`'s else branch to the *left* of
+    /// its then branch. Checked against ACL2 at this width.
+    #[test]
+    fn an_if_indents_its_else_branch_less_than_its_then_branch() {
+        let out = pretty("(if (exprp expr) (if (vstatep vstate) (expr-unambp expr) 'nil) 'nil)", 30);
+        assert_eq!(
+            out,
+            concat!(
+                "(if (exprp expr)\n",
+                "    (if (vstatep vstate)\n",
+                "        (expr-unambp expr)\n",
+                "      'nil)\n",
+                "  'nil)",
+            )
+        );
+        // The else branch is indented two, the then branch four.
+        let lines: Vec<&str> = out.lines().collect();
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        assert_eq!(indent(lines[1]), 4, "then branch");
+        assert_eq!(indent(lines[4]), 2, "else branch");
+    }
+
+    /// A symbol first argument rides the head's line, which is what keeps
+    /// `(defun foo` together rather than breaking after the definer.
+    #[test]
+    fn a_definers_name_stays_beside_it() {
+        let out = pretty(
+            "(defun foo (x y) (declare (xargs :guard (natp x))) (bar x y (baz x)))",
+            30,
+        );
+        assert!(out.starts_with("(defun foo "), "{out}");
     }
 
     /// A dotted tail keeps its dot, and the dot rides the tail's line when
