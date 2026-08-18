@@ -80,6 +80,21 @@ interface BookSession {
    * the only way what it introduced can change.
    */
   rulesByUnit: Map<number, PanelNameRules[]>;
+  /**
+   * Why each unit inducted, once asked for.
+   *
+   * Cached for the reason `rulesByUnit` is -- the panel follows the cursor,
+   * so this is asked again on every selection change and every state event --
+   * and *more* than it is, because answering means reading the unit's whole
+   * captured log. One `defines` in `kestrel/c/syntax/validator.lisp` printed
+   * 490,000 lines and 20.9 MB of induction schemes; asking again per event is
+   * how a panel takes the editor down with it.
+   *
+   * The promise, not the records, so a burst of events makes one request.
+   * Dropped when the unit is admitted again, which is the only way what its
+   * log says can change.
+   */
+  inductionByUnit: Map<number, Promise<PanelInduction[]>>;
   debounce?: ReturnType<typeof setTimeout>;
   /** Said once per book: the editor could not decode this file's bytes. */
   warnedEncoding?: boolean;
@@ -1035,6 +1050,7 @@ async function startCommand(): Promise<void> {
       target: null,
       unitEvents: new Map(),
       rulesByUnit: new Map(),
+      inductionByUnit: new Map(),
       evalQueue: [],
       evalReplies: new Map(),
     };
@@ -1483,8 +1499,10 @@ function onUnit(p: UnitEvent): void {
     s.runningUnit = undefined;
     s.runningRef = undefined;
   }
-  // Re-admitted: whatever it introduced may be different now.
+  // Re-admitted: whatever it introduced, and whatever its log says about
+  // why it inducted, may be different now.
   s.rulesByUnit.delete(p.index);
+  s.inductionByUnit.delete(p.index);
   if (outputView.shownBook === s.id && outputView.shownUnit === p.index) {
     void showUnitOutput(s, p.index);
   }
@@ -1741,33 +1759,61 @@ async function followInduction(s: BookSession, index: number): Promise<void> {
   if (!e || !runes.some((r) => r.toLowerCase().includes(':induction'))) {
     return;
   }
+  // Cached like `rules`, and dropped by the same event for the same reason:
+  // re-admission is the only thing that can change what this unit's log says.
+  //
+  // The *promise* rather than the records, which is the part `rulesByUnit`
+  // gets wrong and gets away with. A memo filled in after the await is empty
+  // for every caller that arrives before the first reply, and callers arrive
+  // in bursts -- fifteen `state` events landed in the six seconds after one
+  // `defines` was admitted, each one re-rendering the form on show. At 50 KB
+  // a reply that is invisible; reading a half-million-line log fifteen times
+  // over is not. Storing the promise makes the burst one request.
+  let pending = s.inductionByUnit.get(index);
+  if (!pending) {
+    pending = readInduction(s, index, e.output_ref);
+    s.inductionByUnit.set(index, pending);
+  }
   try {
-    const r = await client?.request('induction', { book: s.id, output_ref: e.output_ref });
-    const n = (r.inductions ?? []).length;
-    if (n === 0) {
-      // The form inducted -- a rune says so -- and the log yielded nothing.
-      // That is either an ACL2 wording this does not know or a bug here, and
-      // both are worth a line rather than silence.
-      channel.appendLine(
-        `induction: form ${index} has an :induction rune but its log parsed to nothing`
-      );
-    }
-    const records: PanelInduction[] = ((r.inductions ?? []) as InductionWire[]).map((i) => ({
-      goal: i.goal,
-      suggestedBy: i.suggested_by,
-      attribution: i.attribution,
-      scheme: i.scheme,
-      justifiedBy: i.justified_by,
-      subgoals: i.subgoals,
-    }));
+    const records = await pending;
     // Keyed by book and unit: the cursor may have moved on while the log was
     // being read, and a narrative for the form you have left is noise.
     panel.induction(s.id, index, records);
   } catch (err) {
+    // Not cached, so the next look asks again -- a failed read is a fault to
+    // retry, not an answer to remember.
+    s.inductionByUnit.delete(index);
     // Best effort in the panel, but not silent: swallowing this hid a real
     // fault once already.
     channel.appendLine(`induction: form ${index} could not be read (${err})`);
   }
+}
+
+/** Read one unit's log and recover the narrative. One request, no caching. */
+async function readInduction(
+  s: BookSession,
+  index: number,
+  ref: string
+): Promise<PanelInduction[]> {
+  const r = await client?.request('induction', { book: s.id, output_ref: ref });
+  const wire = (r?.inductions ?? []) as InductionWire[];
+  if (wire.length === 0) {
+    // The form inducted -- a rune says so -- and the log yielded nothing.
+    // That is either an ACL2 wording this does not know or a bug here, and
+    // both are worth a line rather than silence.
+    channel.appendLine(
+      `induction: form ${index} has an :induction rune but its log parsed to nothing`
+    );
+  }
+  return wire.map((i) => ({
+    goal: i.goal,
+    suggestedBy: i.suggested_by,
+    attribution: i.attribution,
+    scheme: i.scheme,
+    schemeChars: i.scheme_chars,
+    justifiedBy: i.justified_by,
+    subgoals: i.subgoals,
+  }));
 }
 
 function buildPanelModel(s: BookSession, index: number): PanelModel | undefined {
