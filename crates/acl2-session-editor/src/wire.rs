@@ -4,12 +4,58 @@
 //! are deliberately richer than the MCP crate's -- an editor renders; it does
 //! not pay per token.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use serde::{Deserialize, Serialize};
 
 use acl2_session::sync::{Checkpoints, EvalResult, FailureReport, UnitReport};
 use acl2_session::{
     CertReport, CertStatus, NameDetail, NameKind, Origin, Outcome, Slice, Status, WorldChange,
 };
+
+/// How wide the client's pane is, in characters.
+///
+/// Terms cross this wire already laid out for it. Only the client can know
+/// this number -- it is pixels and a font, so it is a measurement rather than
+/// a setting -- and it changes when the pane is dragged, so the client sends
+/// it and the daemon remembers it.
+///
+/// Process-wide, and that is not laziness. A daemon speaks to exactly one
+/// client over one pair of pipes, and that client has one pane; the
+/// alternative is threading a display setting through every constructor in
+/// this file. A daemon that ever served two clients at once would have to
+/// take this apart, and nothing else here would need to change.
+static PANE_COLS: AtomicUsize = AtomicUsize::new(DEFAULT_COLS);
+
+/// What to lay out for until the client says otherwise. ACL2's own margin, so
+/// a client that never reports gets what it would have got from a terminal.
+const DEFAULT_COLS: usize = 77;
+
+/// Record the width the client is reading at.
+pub fn set_pane_cols(cols: usize) {
+    PANE_COLS.store(cols, Ordering::Relaxed);
+}
+
+/// Lay a term out for the pane, the way ACL2 would have at that width.
+///
+/// Everything on this wire that is ACL2 *code* rather than prose goes through
+/// here. Deliberately not in the core's own types: the MCP surface carries the
+/// same terms and has no pane, so laying out belongs to the client that has
+/// one.
+fn laid(term: &str) -> String {
+    acl2_session::pretty::pretty(term, PANE_COLS.load(Ordering::Relaxed))
+}
+
+/// The same, for a field that may be absent.
+fn laid_opt(term: &Option<String>) -> Option<String> {
+    term.as_deref().map(laid)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LayoutParams {
+    /// The pane width in characters, as the client measured it.
+    pub cols: usize,
+}
 
 #[derive(Debug, Deserialize)]
 pub struct OpenParams {
@@ -476,9 +522,11 @@ fn cut_scheme(s: &str) -> (String, Option<usize>) {
 }
 
 pub fn induction(i: &acl2_session::Induction) -> InductionWire {
+    // Laid out first, then cut: the cut lands on a line boundary of the text
+    // the reader actually sees, rather than of ACL2's own 77-column printing.
     let (scheme, scheme_chars) = match &i.scheme {
         Some(s) => {
-            let (head, full) = cut_scheme(s);
+            let (head, full) = cut_scheme(&laid(s));
             (Some(head), full)
         }
         None => (None, None),
@@ -900,11 +948,13 @@ pub fn rules_reply(name: &str, r: Option<&acl2_session::NameRules>) -> RulesRepl
             found: true,
             name: r.name.clone(),
             symbol_class: r.symbol_class.clone(),
-            measure: r.measure.clone(),
+            // The terms are laid out; `relation` and `formals` are not, being
+            // a symbol and a short list that ACL2 never wraps anyway.
+            measure: laid_opt(&r.measure),
             relation: r.relation.clone(),
             formals: r.formals.clone(),
-            guard: r.guard.clone(),
-            statement: r.statement.clone(),
+            guard: laid_opt(&r.guard),
+            statement: laid_opt(&r.statement),
             runes: r
                 .runes
                 .iter()
@@ -915,7 +965,7 @@ pub fn rules_reply(name: &str, r: Option<&acl2_session::NameRules>) -> RulesRepl
                     fields: u
                         .fields
                         .iter()
-                        .map(|(k, v)| RuneField { key: k.clone(), value: v.clone() })
+                        .map(|(k, v)| RuneField { key: k.clone(), value: laid(v) })
                         .collect(),
                 })
                 .collect(),
@@ -1010,10 +1060,10 @@ pub fn unit_admitted(book: &str, revision: u64, u: &UnitReport) -> UnitEvent {
 fn checkpoint_wire(c: &Checkpoints) -> Vec<CheckpointEvent> {
     let mut out = Vec::with_capacity(c.top.len() + c.sub.len());
     for k in &c.top {
-        out.push(CheckpointEvent { kind: "top", goal: k.goal.clone(), term: k.term.clone() });
+        out.push(CheckpointEvent { kind: "top", goal: k.goal.clone(), term: laid(&k.term) });
     }
     for k in &c.sub {
-        out.push(CheckpointEvent { kind: "sub", goal: k.goal.clone(), term: k.term.clone() });
+        out.push(CheckpointEvent { kind: "sub", goal: k.goal.clone(), term: laid(&k.term) });
     }
     out
 }

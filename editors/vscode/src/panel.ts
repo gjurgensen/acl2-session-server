@@ -20,7 +20,6 @@
 import * as vscode from 'vscode';
 import { TokLines } from './highlight';
 import { SHARED_CSS, SHARED_JS } from './webviewParts';
-import { pretty } from './pretty';
 import { MAX_TERM } from './policy';
 
 export interface PanelCheckpoint {
@@ -253,6 +252,17 @@ export class Panel {
       .get<number>('termWidth', 60);
     return Math.max(20, Math.min(this.cols, max));
   }
+
+  /**
+   * Told the width, so the daemon can lay terms out for it.
+   *
+   * Laying out happens there rather than here: it is a projection of a term
+   * and nothing about it needs an editor, so one implementation serves every
+   * client instead of one per client. What only this end can do is *measure*
+   * -- the width is pixels and a font -- so what crosses is the number.
+   */
+  onCols?: (cols: number) => void;
+
   private lastInduction?: { book: string; index: number; records: PanelInduction[] };
 
   get visible(): boolean {
@@ -284,7 +294,7 @@ export class Panel {
       // the whole reason the page reports it.
       if (m.cmd === 'cols' && typeof m.cols === 'number' && m.cols !== this.cols) {
         this.cols = m.cols;
-        this.refresh();
+        this.onCols?.(this.layoutCols());
         return;
       }
       if (!this.model) {
@@ -333,29 +343,23 @@ export class Panel {
   }
 
   private postRules(r: { book: string; index: number; entries: PanelNameRules[] }): void {
-    const laid = this.layOutRules(r.entries);
     void this.panel?.webview.postMessage({
       kind: 'rules',
       book: r.book,
       index: r.index,
-      entries: laid,
-      toks: tokenizeAll(rulesStrings(laid), this.tokenizer),
+      entries: r.entries,
+      toks: tokenizeAll(rulesStrings(r.entries), this.tokenizer),
     });
   }
 
-  /** Re-flow the terms to the pane's width, as the model's are. */
-  private layOutRules(entries: PanelNameRules[]): PanelNameRules[] {
-    const cols = this.layoutCols();
-    return entries.map((e) => ({
-      ...e,
-      guard: e.guard === undefined ? undefined : pretty(e.guard, cols),
-      measure: e.measure === undefined ? undefined : pretty(e.measure, cols),
-      statement: e.statement === undefined ? undefined : pretty(e.statement, cols),
-      runes: e.runes.map((u) => ({
-        ...u,
-        fields: u.fields.map((f) => ({ ...f, value: pretty(f.value, cols) })),
-      })),
-    }));
+  /**
+   * Say the width again, for when the setting that caps it changed.
+   *
+   * The page's own measurement has not moved, so there is nothing to ask it;
+   * what changed is the cap this end puts on it.
+   */
+  reportCols(): void {
+    this.onCols?.(this.layoutCols());
   }
 
   /** Re-send the current model, for when the theme changed under us. */
@@ -373,21 +377,20 @@ export class Panel {
    * before the tokenizer sees it.
    */
   private post(model: PanelModel): void {
-    const laid: PanelModel = {
-      ...model,
-      checkpoints: model.checkpoints.map((c) => ({ ...c, term: pretty(c.term, this.layoutCols()) })),
-    };
+    // No re-flow here: terms arrive from the daemon already laid out for
+    // the width this pane reported.
+    const laid = model;
     // The narrative rides along rather than following in a second message.
     // It used to follow, and the page replaces its token map on a model --
     // so every state event rendered once with the scheme uncolored and again
     // a moment later with it colored. That is the flicker.
     const i = this.lastInduction;
     const records =
-      i && i.book === model.book && i.index === model.index ? this.layOut(i.records) : undefined;
+      i && i.book === model.book && i.index === model.index ? i.records : undefined;
     const u = this.lastRules;
     const entries =
       u && u.book === model.book && u.index === model.index
-        ? this.layOutRules(u.entries)
+        ? u.entries
         : undefined;
     void this.panel?.webview.postMessage({
       kind: 'model',
@@ -403,13 +406,6 @@ export class Panel {
         this.tokenizer
       ),
     });
-  }
-
-  private layOut(records: PanelInduction[]): PanelInduction[] {
-    return records.map((r) => ({
-      ...r,
-      scheme: r.scheme === undefined ? undefined : pretty(r.scheme, this.layoutCols()),
-    }));
   }
 
   tail(book: string, unit: number | null, elapsedMs: number, text: string): void {
@@ -445,13 +441,12 @@ export class Panel {
   }
 
   private postInduction(i: { book: string; index: number; records: PanelInduction[] }): void {
-    const laid = this.layOut(i.records);
     void this.panel?.webview.postMessage({
       kind: 'induction',
       book: i.book,
       index: i.index,
-      records: laid,
-      toks: tokenizeAll(inductionStrings(laid), this.tokenizer),
+      records: i.records,
+      toks: tokenizeAll(inductionStrings(i.records), this.tokenizer),
     });
   }
 

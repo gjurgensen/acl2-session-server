@@ -179,6 +179,68 @@ fn first_rule(d: &mut Daemon, book: &str, name: &str) -> Value {
     batch["rules"][0].clone()
 }
 
+/// Terms cross the wire already laid out for the pane the client reported.
+///
+/// The client used to do this itself, which meant every client would have to.
+/// The width is the one part only the client can know -- it is pixels and a
+/// font -- so it sends the number and the daemon does the work.
+#[test]
+#[ignore = "needs ACL2"]
+fn terms_arrive_laid_out_for_the_width_the_client_asked_for() {
+    let Some(acl2) = acl2() else {
+        eprintln!("ACL2 not set; skipping");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("acl2-editord-lay-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let book_path: PathBuf = dir.join("lay.lisp");
+    // A checkpoint wide enough that the width has to show in it.
+    let text = "(in-package \"ACL2\")\n\n\
+                (defun lay-alpha (x) (if (consp x) (lay-alpha (cdr x)) nil))\n\n\
+                (defthm lay-bad\n  (implies (and (true-listp xxxxxxxxxx) (consp yyyyyyyyyy))\n\
+                \x20          (equal (lay-alpha xxxxxxxxxx) (cons yyyyyyyyyy xxxxxxxxxx))))\n";
+    std::fs::write(&book_path, text).expect("write book");
+
+    let mut d = Daemon::start(&acl2);
+    let opened = d.request("open", json!({ "path": book_path.to_str().unwrap() }));
+    let book = opened["book"].as_str().expect("book id").to_string();
+
+    d.notify("layout", json!({ "cols": 30 }));
+    d.notify("update", json!({ "book": book, "text": text, "revision": 1 }));
+    let events = d.events_until_settled();
+    let narrow = checkpoint_of(&events).expect("the failed form has a checkpoint");
+    assert!(narrow.contains('\n'), "a term laid out at 30 columns must wrap: {narrow:?}");
+    let widest = narrow.lines().map(str::len).max().unwrap_or(0);
+    assert!(widest <= 30, "laid out to {widest} columns, not 30: {narrow}");
+
+    // The same form again at a width that fits it, to show the number is
+    // being used rather than some fixed margin.
+    d.notify("layout", json!({ "cols": 200 }));
+    d.notify("retract", json!({ "book": book, "keep": 2 }));
+    let _ = d.events_until_settled();
+    d.notify("update", json!({ "book": book, "text": text, "revision": 2 }));
+    let events = d.events_until_settled();
+    let wide = checkpoint_of(&events).expect("the failed form has a checkpoint");
+    assert!(wide.lines().count() < narrow.lines().count(), "wide: {wide}\nnarrow: {narrow}");
+
+    // Same term either way: only the whitespace moved.
+    let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert_eq!(flat(&wide), flat(&narrow));
+
+    d.request("close", json!({ "book": book }));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The first checkpoint term of the first failed unit in an event stream.
+fn checkpoint_of(events: &[(String, Value)]) -> Option<String> {
+    events
+        .iter()
+        .filter(|(m, _)| m == "unit")
+        .find_map(|(_, p)| p["checkpoints"].as_array()?.first()?["term"].as_str())
+        .map(str::to_string)
+}
+
 #[test]
 #[ignore = "needs ACL2"]
 fn the_daemon_triages_a_book_and_holds_a_retraction() {

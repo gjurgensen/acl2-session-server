@@ -482,6 +482,12 @@ impl Daemon {
                             .map_err(|e| e.to_string())
                     })?
                 }),
+            // How wide the pane is, so terms cross the wire already laid out
+            // for it. Not per book: one client, one pane, however many books
+            // it has open.
+            "layout" => serde_json::from_value::<wire::LayoutParams>(params)
+                .map_err(|e| e.to_string())
+                .map(|p| wire::set_pane_cols(p.cols)),
             "retract" => serde_json::from_value::<wire::RetractParams>(params)
                 .map_err(|e| e.to_string())
                 .and_then(|p| {

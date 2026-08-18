@@ -227,6 +227,7 @@ export function activate(context: vscode.ExtensionContext): void {
   channel = vscode.window.createOutputChannel('ACL2');
 
   panel.onGoal = (m, goal, slot) => void fetchGoal(m, goal, slot);
+  panel.onCols = (cols) => setLayout(cols);
 
   // The grammar and theme load off disk, so the first panel may render
   // before they arrive; refresh once they have, and again whenever the
@@ -387,9 +388,9 @@ export function activate(context: vscode.ExtensionContext): void {
         for (const s of books.values()) {
           paint(s);
         }
-        // termWidth changes how terms are laid out, and the panel holds the
-        // model it would need to re-lay out, so a refresh is enough.
-        panel.refresh();
+        // termWidth caps the width terms are laid out at, and laying out
+        // happens in the daemon now, so this has to go back over the wire.
+        panel.reportCols();
       }
       if (e.affectsConfiguration('acl2-session.highlightOutput')) {
         void outputView.refreshLanguage();
@@ -1653,6 +1654,39 @@ async function showUnitOutput(s: BookSession, index: number): Promise<void> {
     outputView.set(s.id, index, `Output unavailable: ${err}`);
   }
 }
+
+/**
+ * Tell the daemon how wide to lay terms out, and get what is on screen again.
+ *
+ * Both halves are needed. The first is the point; the second is because every
+ * term already delivered was laid out for the old width, and the caches are
+ * full of them. Dropping the caches and re-following costs two requests for
+ * the form on show, which is what a pane drag is worth.
+ *
+ * What this cannot repair is a *checkpoint*: those ride on `unit` events,
+ * which are pushed when a form lands and never re-sent, so a failed form
+ * keeps the wrapping it arrived with until it runs again. Worth a re-request
+ * verb one day; not worth one for a drag.
+ */
+function setLayout(cols: number): void {
+  if (cols === lastCols) {
+    return;
+  }
+  lastCols = cols;
+  client?.notify('layout', { cols });
+  for (const s of books.values()) {
+    s.rulesByUnit.clear();
+    s.inductionByUnit.clear();
+  }
+  const shown = panel.shown();
+  const s = shown && byId.get(shown.book);
+  if (s && shown) {
+    void followPanel(s, shown.index);
+  }
+}
+
+/** The width last sent, so a re-measure that says the same thing costs nothing. */
+let lastCols = 0;
 
 /** Update the panel for the form at the cursor (or a pinned INDEX). */
 async function followPanel(s: BookSession, index?: number): Promise<void> {

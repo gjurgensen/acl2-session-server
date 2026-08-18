@@ -4,13 +4,13 @@
 /**
  * The largest term this client will work on.
  *
- * Two things happen to every term that reaches a webview: it is re-flowed to
- * the pane's width (`pretty`) and it is tokenized and colored
- * (`tokenizeAll`). Both are worth their cost on a term a person is reading,
- * and neither has any value on one nobody can. Above this, a term is passed
- * through untouched and rendered as plain escaped text -- `hl` in the pages
- * already falls back to `esc` for any string with no token entry, so
- * declining to tokenize *is* the fallback, with nothing further to arrange.
+ * One thing still happens here to every term that reaches a webview: it is
+ * tokenized and colored. (Laying it out used to happen here too, and now
+ * happens in the daemon -- see `acl2_session::pretty`.) Coloring is worth its
+ * cost on a term a person is reading and has no value on one nobody can.
+ * Above this, a term gets no token entry, and that *is* the fallback: `hl` in
+ * the pages renders any string it cannot find as plain escaped text, so
+ * nothing further has to be arranged.
  *
  * The number is a backstop, not a budget: it is far above any term ACL2
  * prints for a form a person wrote, and exists for the ones it prints for a
@@ -19,7 +19,7 @@
  * scheme ACL2 printed for it was **6.83 MB**, and the panel's own handling of
  * one of them cost:
  *
- *   pretty(scheme, 60)      394 ms   6.83 MB -> 15.3 MB, 319,743 lines
+ *   laying it out           394 ms   6.83 MB -> 15.3 MB, 319,743 lines
  *   tokenizeAll             3471 ms
  *   postMessage payload              88.6 MB of JSON
  *   the page's own HTML              54.4 MB, 563,184 <span> elements
