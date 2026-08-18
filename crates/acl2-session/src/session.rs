@@ -249,7 +249,7 @@ impl SessionControl {
                 _ => (form.to_vec(), form.len()),
             }
         };
-        let shown = display_of(&String::from_utf8_lossy(&bytes));
+        let shown = display_of(&crate::split::decode(&bytes));
         // Counted on the stripped text, so it agrees with what the finished
         // log will say rather than with the raw stream. For a bounded tail it
         // is what that window holds, which is the honest answer available
@@ -299,7 +299,7 @@ impl SessionControl {
             elapsed: g.started.map(|s| s.elapsed()).unwrap_or_default(),
             bytes_so_far: form.len(),
             unit: g.unit,
-            tail: String::from_utf8_lossy(tail).into_owned(),
+            tail: crate::split::decode(tail),
         })
     }
 
@@ -787,6 +787,20 @@ impl Session {
     /// ensures that markers left over from an aborted submission cannot be
     /// mistaken for this one's.
     pub fn submit(&mut self, form: &str, deadline: Duration) -> io::Result<Submission> {
+        self.submit_bytes(form.as_bytes(), deadline)
+    }
+
+    /// `submit`, for a form that is bytes rather than text.
+    ///
+    /// ACL2 source is ISO-8859-1, not UTF-8, and books exist that mean it:
+    /// `books/kestrel/acl2pl/reader-tests.lisp` writes `#\<byte>` for all 256
+    /// of them. Decoding such a unit into a `String` on the way here -- which
+    /// this path used to do, lossily -- turns byte 0x80 into a three-byte
+    /// replacement character, and ACL2 rejects `#\` followed by three
+    /// characters. Nothing between the file and the temp file may reinterpret
+    /// a byte, so the form travels as bytes and only the wrapper around it is
+    /// text.
+    pub fn submit_bytes(&mut self, form: &[u8], deadline: Duration) -> io::Result<Submission> {
         if self.inflight.is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
@@ -816,15 +830,20 @@ impl Session {
         // return value, which would otherwise leave a stray `nil` in the
         // captured output of every single form.
         let cwd = lisp_string(&format!("{}/", self.cwd.display()));
-        std::fs::write(
-            &path,
+        let mut file = format!(
+            "(acl2::er-progn (acl2::set-cbd \"{cwd}\") \
+               (acl2::value :invisible))\n"
+        )
+        .into_bytes();
+        file.extend_from_slice(form);
+        file.extend_from_slice(
             format!(
-                "(acl2::er-progn (acl2::set-cbd \"{cwd}\") \
-                   (acl2::value :invisible))\n\
-                 {form}\n(acl2::prog2$ (acl2::cw \"~%<<<ASS-OK {genid}>>>~%\") \
+                "\n(acl2::prog2$ (acl2::cw \"~%<<<ASS-OK {genid}>>>~%\") \
                  (acl2::value :invisible))\n"
-            ),
-        )?;
+            )
+            .as_bytes(),
+        );
+        std::fs::write(&path, &file)?;
 
         // Everything is acl2::-qualified so the wrapper reads correctly
         // whatever package the session is currently in.
@@ -968,7 +987,7 @@ impl Session {
         let _ = std::fs::remove_file(self.tmpdir.join(format!("form-{genid}.lisp")));
         // One decode for the whole capture. Doing this per read chunk split
         // multi-byte sequences at arbitrary 64 KB boundaries.
-        let captured = String::from_utf8_lossy(&kept).into_owned();
+        let captured = crate::split::decode(&kept);
         let outcome = if raw || captured.contains(&format!("<<<ASS-OK {genid}>>>")) {
             Outcome::Ok
         } else {
@@ -996,7 +1015,7 @@ impl Session {
         // megabytes, and cloning all of it to render twenty lines was real
         // memcpy on every status call.
         let (bytes, total) = self.control.peek_tail(64 * 1024);
-        let text = String::from_utf8_lossy(&bytes);
+        let text = crate::split::decode(&bytes);
         let tail: Vec<&str> = text
             .lines()
             .rev()
@@ -1019,7 +1038,7 @@ impl Session {
     /// exactly the one whose partial output you want. A peek, not a drain:
     /// the bytes stay in the stream.
     pub fn captured_so_far(&mut self) -> String {
-        String::from_utf8_lossy(&self.control.peek_all()).into_owned()
+        crate::split::decode(&self.control.peek_all())
     }
 
     /// Interrupt a running form.
@@ -1143,7 +1162,7 @@ fn find_bytes(hay: &[u8], needle: &[u8]) -> Option<usize> {
 /// messages that must carry what a child actually printed.
 fn tail_text(bytes: &[u8], max: usize) -> String {
     let tail = &bytes[bytes.len().saturating_sub(max)..];
-    String::from_utf8_lossy(tail).trim().to_string()
+    crate::split::decode(tail).trim().to_string()
 }
 
 /// Escape a string for interpolation into Lisp source between double quotes.

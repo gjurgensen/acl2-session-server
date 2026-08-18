@@ -28,8 +28,8 @@ pub mod sync;
 pub use session::{Outcome, Session, SessionControl, StatusSnapshot, Submission};
 pub use locate::{locate, How, Located};
 pub use split::{
-    definer_sites, head_of, include_sites, split, split_str, DefinerSite, Form, IncludeSite,
-    SplitError,
+    decode, definer_sites, head_of, include_sites, split, split_str, DefinerSite, Form,
+    IncludeSite, SplitError,
 };
 pub use registry::{Registry, RegistryError, SessionId};
 pub use cert::{Build, CertError, CertReport, CertStatus};

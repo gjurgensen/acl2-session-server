@@ -1914,11 +1914,11 @@ struct PendingUnit {
     /// Detected at submission, because the file may change on disk while the
     /// unit runs.
     in_package: Option<String>,
-    /// The unit's text exactly as submitted. A `ContinuePastFailure` retry
+    /// The unit's bytes exactly as submitted. A `ContinuePastFailure` retry
     /// at resume time must resubmit precisely what failed, and the snapshot
     /// it came from may be gone by then -- the file changed on disk, or the
-    /// buffer moved on.
-    text: String,
+    /// buffer moved on. Bytes, not text: see `Session::submit_bytes`.
+    text: Vec<u8>,
     /// This submission *is* the skip-proofs retry. Its failure is terminal:
     /// never retry a retry.
     skipped: bool,
@@ -2790,9 +2790,9 @@ impl Book {
                     if self.mode == SyncMode::ContinuePastFailure
                         && sub.outcome == Outcome::Failed
                     {
-                        let text = String::from_utf8_lossy(&bytes[u.start..u.end]);
-                        let (rsub, rref) = self.admit_text(
-                            &text, u.hash, u.line_start, u.line_end, &u.names, i, true,
+                        let (rsub, rref) = self.admit_bytes(
+                            &bytes[u.start..u.end],
+                            u.hash, u.line_start, u.line_end, &u.names, i, true,
                             budget.floored(),
                         )?;
                         report.retry_output_ref = Some(rref);
@@ -3005,9 +3005,8 @@ impl Book {
         skip_proofs: bool,
         deadline: Duration,
     ) -> Result<(crate::session::Submission, OutputRef), SyncError> {
-        let text = String::from_utf8_lossy(&bytes[u.start..u.end]).into_owned();
-        self.admit_text(
-            &text,
+        self.admit_bytes(
+            &bytes[u.start..u.end],
             u.hash,
             u.line_start,
             u.line_end,
@@ -3025,9 +3024,9 @@ impl Book {
     /// chosen -- honest in the history (`pe` shows the wrap), and no
     /// ld-special mode for an abort to leak.
     #[allow(clippy::too_many_arguments)]
-    fn admit_text(
+    fn admit_bytes(
         &mut self,
-        text: &str,
+        text: &[u8],
         hash: u64,
         line_start: usize,
         line_end: usize,
@@ -3040,21 +3039,34 @@ impl Book {
         let label = self.label_gen;
         // The newline before the closing paren guards a unit that ends in a
         // line comment.
-        let payload = if skipped {
-            format!("(acl2::skip-proofs\n{text}\n)")
+        // Assembled as bytes: the unit is ISO-8859-1 in general, and a
+        // `String` in the middle of this would silently replace every byte
+        // ACL2 needs verbatim. Everything we add around it is our own ASCII.
+        let mut body: Vec<u8> = Vec::with_capacity(text.len() + 512);
+        body.extend_from_slice(CLEAR_STALE.as_bytes());
+        body.push(b'\n');
+        if skipped {
+            body.extend_from_slice(b"(acl2::skip-proofs\n");
+            body.extend_from_slice(text);
+            // The newline before the closing paren guards a unit that ends
+            // in a line comment.
+            body.extend_from_slice(b"\n)");
         } else {
-            text.to_owned()
-        };
-        let body = format!(
-            "{CLEAR_STALE}\n{payload}\n{EVENT_DATA_PROBE}\n{}\n\
-             (acl2::with-output :off :all (acl2::deflabel {}))\n{CMD_PROBE}",
-            self.inner_probe,
-            Self::label_name(label)
+            body.extend_from_slice(text);
+        }
+        body.extend_from_slice(
+            format!(
+                "\n{EVENT_DATA_PROBE}\n{}\n\
+                 (acl2::with-output :off :all (acl2::deflabel {}))\n{CMD_PROBE}",
+                self.inner_probe,
+                Self::label_name(label)
+            )
+            .as_bytes(),
         );
         // Named before submission, so a lock-free status reader can say which
         // unit is running while this call still holds the session.
         self.control.set_unit(Some(index));
-        let sub = self.session.submit(&body, deadline)?;
+        let sub = self.session.submit_bytes(&body, deadline)?;
         if sub.outcome == Outcome::StillRunning {
             // Deadline expired; ACL2 is untouched and still working. Remember
             // what is needed to finish recording it when it reports.
@@ -3065,8 +3077,8 @@ impl Book {
                 line_start,
                 line_end,
                 label,
-                in_package: in_package_target(text.as_bytes()),
-                text: text.to_owned(),
+                in_package: in_package_target(text),
+                text: text.to_vec(),
                 skipped,
             });
         }
@@ -3089,7 +3101,7 @@ impl Book {
             // re-issue is idempotent and one round trip, and a staleness bug
             // in a skip condition here would silently misread every form
             // after the switch.
-            if let Some(target) = in_package_target(text.as_bytes()) {
+            if let Some(target) = in_package_target(text) {
                 self.make_package_stick(&target, deadline.max(PROBE_FLOOR))?;
             }
             // Gather while the form is in hand. Asking later is not an
@@ -3229,7 +3241,7 @@ impl Book {
         // guards the retry of a retry: a skip attempt that itself failed is
         // terminal.
         if self.mode == SyncMode::ContinuePastFailure && !p.skipped {
-            let (rsub, rref) = self.admit_text(
+            let (rsub, rref) = self.admit_bytes(
                 &p.text,
                 p.hash,
                 p.line_start,
@@ -3857,9 +3869,8 @@ impl Book {
         self.dirty = false;
 
         for (i, u) in units.iter().enumerate().take(keep) {
-            let text = String::from_utf8_lossy(&bytes[u.start..u.end]);
-            let (sub, output_ref) = self.admit_text(
-                &text,
+            let (sub, output_ref) = self.admit_bytes(
+                &bytes[u.start..u.end],
                 u.hash,
                 u.line_start,
                 u.line_end,

@@ -207,7 +207,7 @@ pub fn head_of(text: &[u8]) -> Option<String> {
         return None;
     }
     let h1 = sp.datum(h0).ok()?;
-    Some(String::from_utf8_lossy(&text[h0..h1]).into_owned())
+    Some(decode(&text[h0..h1]))
 }
 
 /// One `(include-book "…" …)` found in a book's text.
@@ -351,7 +351,7 @@ impl<'a> Splitter<'a> {
     }
 
     fn text_at(&self, r: (usize, usize)) -> String {
-        String::from_utf8_lossy(&self.s[r.0..r.1]).into_owned()
+        decode(&self.s[r.0..r.1])
     }
 
     /// Record the `include-book` calls in `[start, end)`, then recurse.
@@ -404,11 +404,11 @@ impl<'a> Splitter<'a> {
             return None;
         }
         let n1 = self.datum(n0).ok()?;
-        let head = String::from_utf8_lossy(&self.s[h0..h1]).into_owned();
+        let head = decode(&self.s[h0..h1]);
         if !is_definer(&head) {
             return None;
         }
-        let name = String::from_utf8_lossy(&self.s[n0..n1]).into_owned();
+        let name = decode(&self.s[n0..n1]);
         // A keyword is never an introduced name, and `def…` forms do put one
         // in the name slot: `(std::defredundant :names (f g))` would index
         // itself as `:names`. Cheap to rule out and impossible to get right
@@ -744,6 +744,49 @@ pub fn fnv1a(bytes: &[u8]) -> u64 {
     h
 }
 
+/// Decode ACL2's bytes into text without destroying any of them.
+///
+/// ACL2's own model is Latin-1: it reads and writes bytes, and each byte is
+/// one character. `books/kestrel/acl2pl/reader-tests.lisp` means it
+/// literally, writing `#\<byte>` for all 256. Everything downstream of the
+/// session -- a JSON reply, the editor protocol, a webview -- is Unicode
+/// text, so a decode has to happen somewhere; the only question is what it
+/// does with a byte that is not UTF-8.
+///
+/// `from_utf8_lossy` answers "replace it", which is the one answer that
+/// cannot be undone: ACL2 printed `caf\xe9` and the caller received
+/// `caf\u{fffd}`, with nothing left to say what had been there.
+///
+/// This decodes UTF-8 where the bytes are UTF-8 and Latin-1 where they are
+/// not, so it is the identity on both populations that exist -- the 13406
+/// `.lisp` files in a community checkout that are valid UTF-8, and the one
+/// that is not. Nothing is ever replaced.
+pub fn decode(bytes: &[u8]) -> String {
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(bytes.len() + 8);
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        match std::str::from_utf8(rest) {
+            Ok(s) => {
+                out.push_str(s);
+                break;
+            }
+            Err(e) => {
+                let good = e.valid_up_to();
+                // The prefix is valid by construction; the byte that ends it
+                // is a Latin-1 character, which is what ACL2 meant by it and
+                // what re-encoding would have to produce to round-trip.
+                out.push_str(std::str::from_utf8(&rest[..good]).expect("valid prefix"));
+                out.push(rest[good] as char);
+                rest = &rest[good + 1..];
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1020,6 +1063,39 @@ mod tests {
         // remains the strict reader that refuses such text outright.)
         assert_eq!(sites("(defun good (x) x)\n(defun bad (x"),
                    vec![("good".to_string(), 1), ("bad".to_string(), 2)]);
+    }
+
+    /// `decode` must never destroy a byte, and must not mojibake the UTF-8
+    /// that is what almost every book actually contains. Both populations
+    /// are the identity; a Latin-1 byte survives as the character ACL2 meant.
+    #[test]
+    fn decoding_acl2s_bytes_loses_nothing() {
+        // The overwhelming case: ASCII and real UTF-8, unchanged.
+        assert_eq!(super::decode(b"(defun f (x) x)"), "(defun f (x) x)");
+        assert_eq!(super::decode("caf\u{e9} \u{2200}x".as_bytes()), "caf\u{e9} \u{2200}x");
+
+        // The case that motivated it: ACL2 printed one Latin-1 byte, which is
+        // one character to ACL2 and must be one character here.
+        assert_eq!(super::decode(b"caf\xe9"), "caf\u{e9}");
+        assert!(!super::decode(b"caf\xe9").contains('\u{fffd}'),
+                "no byte is ever replaced");
+
+        // All 256, which is literally what reader-tests.lisp writes.
+        let all: Vec<u8> = (0..=255u8).collect();
+        let d = super::decode(&all);
+        assert_eq!(d.chars().count(), 256, "one character per byte: {d:?}");
+        assert_eq!(d.chars().map(|c| c as u32).collect::<Vec<_>>(),
+                   (0..=255u32).collect::<Vec<_>>());
+
+        // Mixed: valid UTF-8 either side of a byte that is not. The UTF-8
+        // stays UTF-8 -- decoding the whole capture as Latin-1 would have
+        // turned the first word into mojibake.
+        let mixed = [b"caf\xc3\xa9 ".as_slice(), b"\xe9 end".as_slice()].concat();
+        assert_eq!(super::decode(&mixed), "caf\u{e9} \u{e9} end");
+
+        // A truncated sequence at the end -- a tail sliced mid-character --
+        // is bytes, not a panic and not a replacement.
+        assert_eq!(super::decode(b"a\xc3"), "a\u{c3}");
     }
 
     /// Community books carry raw bytes 0x80-0xFF (see the module docs), which

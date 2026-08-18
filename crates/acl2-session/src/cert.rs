@@ -177,7 +177,7 @@ impl Build {
     pub fn output(&self) -> String {
         self.buf
             .lock()
-            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .map(|b| crate::split::decode(&b))
             .unwrap_or_default()
     }
 

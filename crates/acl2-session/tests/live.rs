@@ -2241,3 +2241,52 @@ fn a_running_forms_output_can_be_read_before_it_finishes() {
         );
     }
 }
+
+/// A book that is not UTF-8, which ACL2 reads perfectly well.
+///
+/// ACL2's model is Latin-1: it reads and writes bytes, and each byte is one
+/// character. `books/kestrel/acl2pl/reader-tests.lisp` means it literally --
+/// it writes `#\<byte>` for all 256 and certifies. Exactly one of the 13407
+/// `.lisp` files in a community checkout is not valid UTF-8, and it is that
+/// one, so nothing but a test like this would ever notice a regression here.
+///
+/// Both directions are pinned, because both were broken. Decoding the unit
+/// into a `String` on the way *in* made `#\<0x80>` into `#\` followed by a
+/// three-byte replacement character, which ACL2 rejects with "must either be
+/// a single character"; decoding the capture on the way *out* replaced what
+/// ACL2 had printed, so the byte could not be recovered from the log either.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_latin1_book_survives_in_both_directions() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("latin1");
+    let file = dir.join("latin1.lisp");
+
+    // Written as bytes on purpose: `0xe9` is `é` in Latin-1 and is not valid
+    // UTF-8 on its own, which is the whole point.
+    let mut src: Vec<u8> = Vec::new();
+    src.extend_from_slice(b"(in-package \"ACL2\")\n\n(defconst *e* \"caf\xe9\")\n\n");
+    // One character to ACL2, and the assertion is what says so.
+    src.extend_from_slice(b"(assert-event (equal (length *e*) 4))\n\n");
+    // A literal character whose code is a raw high byte, as reader-tests does.
+    src.extend_from_slice(b"(assert-event (equal (char-code #\\\xe9) 233))\n\n");
+    src.extend_from_slice(
+        b"(make-event (prog2$ (cw \"MARK ~s0 MARK~%\" *e*) '(value-triple :ok)))\n",
+    );
+    std::fs::write(&file, &src).expect("write book");
+
+    let mut b = Book::open(&acl2, &file).unwrap();
+    let o = b.sync(None, D).expect("sync");
+    assert!(o.failed.is_none(), "a Latin-1 book admits: {:?}",
+            o.failed.as_ref().map(|f| &f.error_line));
+    assert_eq!(o.admitted.len(), 5, "every unit went in");
+
+    // And what ACL2 printed comes back as the character it printed, not as a
+    // replacement for it.
+    let r = &o.admitted.last().unwrap().output_ref;
+    let sl = b.output(r, Slice::Find { needle: "MARK".into(), ignore_case: false, context: 0 })
+        .expect("slice");
+    let text = sl.text;
+    assert!(text.contains("caf\u{e9}"), "the byte survives the round trip: {text:?}");
+    assert!(!text.contains('\u{fffd}'), "and is never replaced: {text:?}");
+}
