@@ -79,6 +79,8 @@ interface BookSession {
    */
   rulesByUnit: Map<number, PanelNameRules[]>;
   debounce?: ReturnType<typeof setTimeout>;
+  /** Said once per book: the editor could not decode this file's bytes. */
+  warnedEncoding?: boolean;
   /**
    * The progress notification of the eval in flight, so an `eval_state`
    * event can say *why* it has not come back -- a form queued behind a long
@@ -1078,10 +1080,35 @@ function dropBook(s: BookSession): void {
   refreshContext();
 }
 
+/**
+ * Send the buffer, or say that the buffer is the file.
+ *
+ * ACL2 reads bytes: its model is Latin-1, one byte one character, and
+ * `books/kestrel/acl2pl/reader-tests.lisp` writes `#\<byte>` for all 256 of
+ * them. VSCode hands us characters, not bytes -- it decoded the file at
+ * `files.encoding`, and for a book that is not UTF-8 that decode already
+ * replaced 1399 of them with U+FFFD. Nothing this end can undo that: the
+ * bytes are gone before `getText()` is called.
+ *
+ * So for a saved buffer we send no text at all and let the daemon read the
+ * file, whose bytes are the truth. Only unsaved edits need the buffer, and
+ * only then is the loss unavoidable -- said out loud rather than synced as
+ * if it were the book.
+ */
 function sendUpdate(s: BookSession): void {
+  const dirty = s.doc.isDirty;
+  if (dirty && s.doc.getText().includes('\uFFFD') && !s.warnedEncoding) {
+    s.warnedEncoding = true;
+    channel.appendLine(
+      `${s.id}: this file is not valid UTF-8, and the editor replaced the bytes it ` +
+      `could not decode. Saving lets the session read the file itself; until then ` +
+      `it is checking what the buffer holds, which is not what the file holds.`
+    );
+  }
   client?.notify('update', {
     book: s.id,
-    text: s.doc.getText(),
+    // Omitted on purpose when the buffer is the file -- see above.
+    text: dirty ? s.doc.getText() : undefined,
     target_line: s.target,
     // The document's own monotone version is exactly the revision the
     // protocol wants stamped back on events.

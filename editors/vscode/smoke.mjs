@@ -212,7 +212,9 @@ assert(dnone.available && !dnone.found, 'an unknown token has no definition');
 // rules: what the form introduced, which is mostly what its author never
 // wrote. Served from the scrape taken at admission, so unlike describe it
 // has no busy case to distinguish -- it never asks the prover anything.
-const ru = await c.request('rules', { book: opened.book, name: 'alpha' });
+const batch = await c.request('rules', { book: opened.book, names: ['alpha', 'binary-append'] });
+assert(batch.rules.length === 2, 'rules answers one entry per name asked, in order');
+const ru = batch.rules[0];
 assert(ru.found, 'rules finds a name from this file');
 assert(ru.formals === '(x)', 'and carries its signature');
 assert(ru.measure === '(acl2-count x)',
@@ -227,8 +229,8 @@ const defKeys = defRune.fields.map((f) => f.key);
 assert(!defKeys.includes(':rhs'), 'the body is not carried -- it is in the buffer');
 assert(defKeys.includes(':clique'), 'but the rest of the rule is');
 
-const rnone = await c.request('rules', { book: opened.book, name: 'binary-append' });
-assert(!rnone.found, 'a name this file never introduced is not ours to explain');
+assert(!batch.rules[1].found, 'a name this file never introduced is not ours to explain');
+assert(batch.rules[1].name === 'binary-append', 'and is still named, so the order is usable');
 
 const closed = await c.request('close', { book: opened.book });
 assert(closed.closed === true, 'close closes');

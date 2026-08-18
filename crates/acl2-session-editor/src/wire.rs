@@ -33,8 +33,17 @@ pub struct BookParams {
 #[derive(Debug, Deserialize)]
 pub struct UpdateParams {
     pub book: String,
-    /// The full snapshot. The daemon syncs this string's UTF-8 bytes.
-    pub text: String,
+    /// The full snapshot, when the client has one that is not the file.
+    ///
+    /// **Absent means "the buffer is the file"**, and the daemon reads the
+    /// path instead -- which is the only way a book that is not UTF-8 can be
+    /// synced at all. ACL2 source is Latin-1 and one book in a community
+    /// checkout is not valid UTF-8; an editor that decoded it has already
+    /// replaced those bytes, and no field of this type can carry them back.
+    /// A client with unsaved edits sends what it has and takes the loss; a
+    /// client without them should omit this.
+    #[serde(default)]
+    pub text: Option<String>,
     /// Auto-admit only through this 1-based line. Omitted means the whole
     /// book; 0 holds before the first unit.
     pub target_line: Option<usize>,

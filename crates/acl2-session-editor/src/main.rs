@@ -169,6 +169,8 @@ struct BookHandle {
     /// Joined at shutdown, so daemon exit always runs the driver's `Book`
     /// drop -- the thing that kills the ACL2 child.
     driver: std::thread::JoinHandle<()>,
+    /// The book's path, so an `update` carrying no text can read it.
+    path: PathBuf,
 }
 
 enum RequestError {
@@ -379,7 +381,8 @@ impl Daemon {
         let driver = std::thread::spawn(move || d.run());
         self.books.lock().expect("books lock").insert(
             id.to_string(),
-            BookHandle { tx, control, outputs, auto_rev: AtomicU64::new(0), driver },
+            BookHandle { tx, control, outputs, auto_rev: AtomicU64::new(0), driver,
+                         path: path.clone() },
         );
         Ok(serde_json::to_value(wire::OpenReply {
             book: id.to_string(),
@@ -465,12 +468,18 @@ impl Daemon {
                         let revision = p
                             .revision
                             .unwrap_or_else(|| h.auto_rev.fetch_add(1, Ordering::Relaxed) + 1);
-                        h.tx.send(Cmd::Update {
-                            bytes: p.text.into_bytes(),
-                            target_line: p.target_line,
-                            revision,
-                        })
-                        .map_err(|e| e.to_string())
+                        // No text means the client is telling us its buffer
+                        // is the file, so read the file: its bytes are the
+                        // truth, and for a book that is not UTF-8 they are
+                        // the only place the truth still exists.
+                        let bytes = match p.text {
+                            Some(t) => t.into_bytes(),
+                            None => std::fs::read(&h.path).map_err(|e| {
+                                format!("{}: {e}", h.path.display())
+                            })?,
+                        };
+                        h.tx.send(Cmd::Update { bytes, target_line: p.target_line, revision })
+                            .map_err(|e| e.to_string())
                     })?
                 }),
             "retract" => serde_json::from_value::<wire::RetractParams>(params)

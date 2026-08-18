@@ -1032,3 +1032,60 @@ fn a_forms_names_are_explained_in_one_request() {
     let none = d.request("rules", json!({ "book": book, "names": Vec::<String>::new() }));
     assert_eq!(none["rules"].as_array().map(|a| a.len()), Some(0), "{none}");
 }
+
+/// An `update` with no text means "the buffer is the file", and the daemon
+/// reads it.
+///
+/// This is the only way a book that is not UTF-8 can be checked from an
+/// editor at all. ACL2's model is Latin-1 -- one byte, one character -- and
+/// `books/kestrel/acl2pl/reader-tests.lisp` writes `#\<byte>` for all 256.
+/// VSCode hands an extension characters, not bytes: it decoded the file at
+/// `files.encoding` first, and for that book the decode replaced 1399 bytes
+/// with U+FFFD before `getText()` was ever called. Nothing on the wire can
+/// carry those back, so a client whose buffer is the file must say so and
+/// let the daemon read the bytes itself.
+#[test]
+#[ignore = "needs ACL2"]
+fn an_update_without_text_reads_the_file_bytes() {
+    let Some(acl2) = acl2() else {
+        eprintln!("ACL2 not set; skipping");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("acl2-editord-latin1-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let book_path: PathBuf = dir.join("b.lisp");
+
+    // Bytes, not a `str`: 0xe9 is `é` in Latin-1 and is not valid UTF-8, so
+    // this book cannot be expressed as the `text` field at all.
+    let mut src: Vec<u8> = Vec::new();
+    src.extend_from_slice(b"(in-package \"ACL2\")\n\n");
+    src.extend_from_slice(b"(assert-event (equal (char-code #\\\xe9) 233))\n\n");
+    src.extend_from_slice(b"(defconst *e* \"caf\xe9\")\n");
+    std::fs::write(&book_path, &src).expect("write book");
+
+    let mut d = Daemon::start(&acl2);
+    let opened = d.request("open", json!({ "path": book_path.to_str().unwrap() }));
+    let book = opened["book"].as_str().expect("book id").to_string();
+
+    // No `text` field. What the daemon syncs is what is on disk.
+    d.notify("update", json!({ "book": book, "revision": 1 }));
+    let events = d.events_until_settled();
+    let settled = &events.last().expect("settled").1;
+    assert_eq!(settled["reason"], "reached_target", "events: {events:?}");
+    let state = last_state(&events);
+    assert_eq!(statuses(&state), ["admitted", "admitted", "admitted"],
+               "a Latin-1 book checks clean: {state}");
+
+    // And the same book sent as text -- which is all a decoding editor could
+    // send -- is the failure this exists to avoid. `from_utf8_lossy` is what
+    // the editor's own decode does to it.
+    let lossy = String::from_utf8_lossy(&src).into_owned();
+    d.notify("update", json!({ "book": book, "text": lossy, "revision": 2 }));
+    let after = d.events_until_settled();
+    let state2 = last_state(&after);
+    assert!(statuses(&state2).contains(&"failed".to_string()),
+            "replaced bytes are not the book, and it shows: {state2}");
+
+    d.request("close", json!({ "book": book }));
+}
