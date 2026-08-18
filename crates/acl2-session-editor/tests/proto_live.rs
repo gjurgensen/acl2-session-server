@@ -1087,5 +1087,15 @@ fn an_update_without_text_reads_the_file_bytes() {
     assert!(statuses(&state2).contains(&"failed".to_string()),
             "replaced bytes are not the book, and it shows: {state2}");
 
+    // And it recovers. This is the step the client used to have no way to
+    // take: updates were sent on content change only, so after saving such a
+    // file nothing re-sent it and the book stayed failed until it was closed
+    // and reopened. Saving is exactly when the buffer becomes the file again.
+    d.notify("update", json!({ "book": book, "revision": 3 }));
+    let saved = d.events_until_settled();
+    let state3 = last_state(&saved);
+    assert_eq!(statuses(&state3), ["admitted", "admitted", "admitted"],
+               "reading the file again undoes it: {state3}");
+
     d.request("close", json!({ "book": book }));
 }

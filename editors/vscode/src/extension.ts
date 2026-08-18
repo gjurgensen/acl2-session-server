@@ -15,6 +15,7 @@
 // reds included, and no diagnostics. One treatment per fact, never two.
 
 import * as vscode from 'vscode';
+import { readFileSync } from 'fs';
 import {
   DaemonClient,
   EvalReply,
@@ -81,6 +82,14 @@ interface BookSession {
   debounce?: ReturnType<typeof setTimeout>;
   /** Said once per book: the editor could not decode this file's bytes. */
   warnedEncoding?: boolean;
+  /**
+   * Whether this document's text can carry this file's bytes.
+   *
+   * Measured against the file rather than assumed, and only while the two
+   * are known to agree -- at start, and after each save. `undefined` means
+   * not measured yet, which is treated as yes.
+   */
+  carriesFile?: boolean;
   /**
    * The progress notification of the eval in flight, so an `eval_state`
    * event can say *why* it has not come back -- a form queued behind a long
@@ -305,6 +314,23 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
     vscode.commands.registerCommand('acl2-session.gotoFrontier', () => forBook(gotoFrontier)),
     vscode.commands.registerCommand('acl2-session.gotoAttention', () => forBook(gotoAttention)),
+    // Saving is the moment the buffer becomes the file again, and for a book
+    // whose bytes the buffer cannot carry it is the only moment the session
+    // can be given the truth. Without this, editing such a file left it
+    // failed until the book was closed and reopened -- the next keystroke
+    // only re-sent the same replaced bytes.
+    vscode.workspace.onDidSaveTextDocument((doc) => {
+      const s = bookFor(doc);
+      if (!s) {
+        return;
+      }
+      if (s.debounce) {
+        clearTimeout(s.debounce);
+        s.debounce = undefined;
+      }
+      s.carriesFile = undefined; // re-measured against what was just written
+      sendUpdate(s);
+    }),
     vscode.workspace.onDidChangeTextDocument((e) => {
       const s = bookFor(e.document);
       if (!s || e.contentChanges.length === 0) {
@@ -1096,24 +1122,57 @@ function dropBook(s: BookSession): void {
  * if it were the book.
  */
 function sendUpdate(s: BookSession): void {
-  const dirty = s.doc.isDirty;
-  if (dirty && s.doc.getText().includes('\uFFFD') && !s.warnedEncoding) {
-    s.warnedEncoding = true;
-    channel.appendLine(
-      `${s.id}: this file is not valid UTF-8, and the editor replaced the bytes it ` +
-      `could not decode. Saving lets the session read the file itself; until then ` +
-      `it is checking what the buffer holds, which is not what the file holds.`
-    );
+  // Measured, not assumed, and only when the buffer and the file are known
+  // to agree -- otherwise unsaved edits would be mistaken for an encoding
+  // the buffer cannot represent. Almost every book answers yes and keeps the
+  // behaviour it always had: the buffer is what gets sent.
+  if (s.carriesFile === undefined && !s.doc.isDirty) {
+    s.carriesFile = bufferCarriesFile(s.doc);
+    if (!s.carriesFile && !s.warnedEncoding) {
+      s.warnedEncoding = true;
+      channel.appendLine(
+        `${s.id}: this file is not valid UTF-8. ACL2 reads bytes, and the editor ` +
+        `decoded them, so the buffer is not the file. The session will read the ` +
+        `file itself; while there are unsaved edits it cannot, and what it checks ` +
+        `will not be what the file holds until you save.`
+      );
+    }
   }
+  // Omitting the text tells the daemon to read the file, whose bytes are the
+  // truth. Only worth doing for a file the buffer cannot carry, and only
+  // sound while there is nothing unsaved.
+  const fromFile = s.carriesFile === false && !s.doc.isDirty;
   client?.notify('update', {
     book: s.id,
-    // Omitted on purpose when the buffer is the file -- see above.
-    text: dirty ? s.doc.getText() : undefined,
+    text: fromFile ? undefined : s.doc.getText(),
     target_line: s.target,
     // The document's own monotone version is exactly the revision the
     // protocol wants stamped back on events.
     revision: s.doc.version,
   });
+}
+
+/**
+ * Whether this document's text, encoded as UTF-8, is this file's bytes.
+ *
+ * ACL2's model is Latin-1: it reads bytes, and each byte is one character.
+ * VSCode hands an extension characters -- it decoded the file at
+ * `files.encoding` first -- so for a book that is not UTF-8 the bytes are
+ * already gone by the time `getText()` is called, and no string sent from
+ * here can carry them back. One file in a community checkout is like that
+ * (`books/kestrel/acl2pl/reader-tests.lisp`, which writes `#\<byte>` for all
+ * 256), and it is unreadable through the buffer.
+ *
+ * Called only when the document is clean, so a difference means the encoding
+ * and not an unsaved edit. A file that cannot be read is treated as carried:
+ * the buffer is then the only thing there is.
+ */
+function bufferCarriesFile(doc: vscode.TextDocument): boolean {
+  try {
+    return readFileSync(doc.fileName).equals(Buffer.from(doc.getText(), 'utf8'));
+  } catch {
+    return true;
+  }
 }
 
 /** Retract so that `keep` units remain, and hold the target there. */
