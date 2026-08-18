@@ -18,6 +18,7 @@ pub mod cert;
 pub mod image;
 pub mod induction;
 pub mod output;
+pub mod pretty;
 pub mod pty;
 pub mod registry;
 pub mod session;
