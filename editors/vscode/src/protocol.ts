@@ -144,7 +144,14 @@ export class DaemonClient extends EventEmitter {
 
   constructor(command: string, args: string[]) {
     super();
-    this.proc = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    // ACL2_FRONTEND reaches the ACL2 under the daemon, which inherits this
+    // environment, and is there for an acl2-customization.lsp to read: a
+    // session driven from here has its output captured and re-rendered by
+    // the extension, so settings a person would want at a terminal -- gag
+    // mode, inhibited output -- are the wrong ones here. Only the frontend
+    // knows which it is; the daemon serves several.
+    const env = { ...process.env, ACL2_FRONTEND: 'vscode' };
+    this.proc = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'], env });
     this.proc.stdout.on('data', (b: Buffer) => this.feed(b));
     this.proc.stderr.on('data', (b: Buffer) => this.emit('stderr', b.toString('utf8')));
     this.proc.on('exit', (code, signal) => {
