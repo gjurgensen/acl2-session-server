@@ -1597,6 +1597,61 @@ fn skip_proofs_admits_without_proving_and_says_so() {
 ///
 /// Eagerly, and that is the point: a session serialises on one ACL2, so a
 /// question asked during a proof cannot reach the prover -- which is exactly
+/// A form that outruns its deadline is scraped too.
+///
+/// The scrape used to live only on the path where a unit finishes inside the
+/// budget a caller gave it. Everything slower lands through `resume` instead,
+/// and that path recorded the unit, made its package stick and reported its
+/// inner events without ever asking the world what any of it was -- so a
+/// book's *fast* forms could be described and its slow ones could not, which
+/// is the wrong way round: the long proof is the one an editor is looking at.
+///
+/// Measured before the fix, on kestrel/c/syntax/validator.lisp: the `defines`
+/// at line 2775 proves for 193 seconds and introduces 620 names, and every
+/// one of them read as unknown, while every other form in the book scraped
+/// clean.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_form_that_outran_its_deadline_is_scraped_when_it_lands() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("rules-resume");
+    let file = dir.join("r.lisp");
+    // Real work before the name appears, so a ~zero deadline genuinely puts
+    // it in flight: a trivial defun finishes inside any budget and never
+    // reaches the resume path at all.
+    write(&file, &["(in-package \"ACL2\")", FIB,
+                   "(defthm rr-slow (equal (fib 30) 832040))"]);
+    let mut b = Book::open(&acl2, &file).unwrap();
+    b.sync(Some(3), D).expect("prefix");
+
+    let o = b.sync(None, Duration::from_millis(1)).expect("tiny sync");
+    assert!(
+        o.failed.as_ref().is_some_and(|f| f.still_running),
+        "the theorem must be in flight, not already landed: {o:?}"
+    );
+    let mut landed = false;
+    for _ in 0..120 {
+        match b.resume(Duration::from_secs(5)).expect("resume") {
+            Some(Resumed::StillRunning { .. }) => continue,
+            Some(Resumed::Admitted(u)) => {
+                assert_eq!(u.index, 2, "{u:?}");
+                landed = true;
+                break;
+            }
+            other => panic!("expected the resumed unit to be admitted, got {other:?}"),
+        }
+    }
+    assert!(landed, "the theorem never landed");
+
+    let t = b.rules_for("rr-slow").expect("a resumed form's names are scraped too");
+    assert!(
+        t.runes.iter().any(|r| r.rune.contains("rr-slow")),
+        "the scrape must carry what the form introduced: {t:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// when an editor wants to describe an earlier form. The scrape is taken
 /// while the form is in hand and served from memory afterwards.
 #[test]

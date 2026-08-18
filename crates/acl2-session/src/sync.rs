@@ -3204,6 +3204,16 @@ impl Book {
             if let Some(target) = p.in_package.clone() {
                 self.make_package_stick(&target, deadline.max(PROBE_FLOOR))?;
             }
+            // Exactly as `admit_bytes` does, and for exactly its reason: this
+            // is the moment the session is free, and the next thing it does
+            // may be a proof. Missing here, the scrape was taken only for
+            // units that finished inside their deadline -- so a book's fast
+            // forms could be described and its slow ones could not, which is
+            // the wrong way round. A `defines` in
+            // kestrel/c/syntax/validator.lisp ran for 193 seconds and
+            // introduced 620 names, and every one of them read as unknown.
+            let introduced = inner_names(&sub);
+            self.scrape_rules(&introduced, p.index, deadline);
             let (inner, inner_total, clique) = parse_inner(&sub);
             return Ok(Some(Resumed::Admitted(UnitReport {
                 index: p.index,
