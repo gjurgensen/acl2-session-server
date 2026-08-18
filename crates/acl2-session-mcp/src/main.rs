@@ -654,7 +654,12 @@ impl Acl2Mcp {
         Read from the log, because ACL2 prints the scheme and records it \
         nowhere: expect fields to be missing rather than wrong, and nothing \
         at all from an ACL2 that words it differently. Cheap and safe to call \
-        while the session is busy.")]
+        while the session is busy. A `scheme` is truncated when ACL2 printed \
+        more than this reply should carry -- a mutual recursion inducts over \
+        its whole clique, and one such scheme ran to 6.8 million characters. \
+        Truncation is always visible: the text ends in a `;; TRUNCATED` line \
+        and `scheme_chars` gives the real length. Read the whole announcement \
+        with acl2_output on the same output_ref.")]
     async fn acl2_induction(
         &self,
         Parameters(a): Parameters<InductionArgs>,

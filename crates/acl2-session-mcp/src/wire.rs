@@ -630,8 +630,18 @@ pub struct InductionWire {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attribution: Option<String>,
     /// The scheme, with `:p` standing for the conjecture.
+    ///
+    /// **May be truncated.** ACL2 prints this whole, and for a mutual
+    /// recursion the scheme covers the entire clique -- one measured at 6.8
+    /// million characters. When it is cut, the text ends with a `;; TRUNCATED`
+    /// line saying so and `scheme_chars` gives the real length; read the whole
+    /// announcement with `acl2_output` on this form's `output_ref`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scheme: Option<String>,
+    /// Present **only when `scheme` was truncated**: how long the whole scheme
+    /// is, in characters. Absent means `scheme` is complete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheme_chars: Option<usize>,
     /// The function whose admission licenses the induction. Absent when ACL2
     /// justified it by the scheme's own measure conjectures instead.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -648,12 +658,73 @@ pub struct InductionReply {
     pub inductions: Vec<InductionWire>,
 }
 
+/// How much of an induction scheme this surface returns.
+///
+/// Tighter than the editor's, because this one pays per token. ACL2 prints
+/// the scheme with the gag-mode evisc tuple, which is `nil` under this
+/// crate's settings, so nothing is abbreviated -- and for a mutual recursion
+/// the scheme *is* the clique. One measured on
+/// `books/kestrel/c/syntax/validator.lisp` ran to 6,831,709 characters, three
+/// of them in a single reply. Returning that does not merely cost: it evicts
+/// whatever the caller was reasoning about.
+///
+/// Two kilobytes covers an ordinary scheme whole -- `binary-append`'s is two
+/// lines -- and cuts only the ones no reply should carry. The rest is not
+/// lost, and the truncation note says exactly where it went.
+const SCHEME_LIMIT: usize = 2 * 1024;
+
+/// The head of a scheme, with a note saying it was cut and where the rest is.
+///
+/// The note is **in the string**, not only in a sibling field. A caller
+/// reading this is a model reading prose, and a term that simply stops looks
+/// like a term that ended -- it would go on to reason about a scheme that has
+/// no base case because the base case was in the part that was dropped. A
+/// `;;` comment is inert if anything tries to read the text as Lisp, and
+/// unmissable if anything reads it as text.
+///
+/// Cut on a line boundary, because the scheme's indentation is its structure;
+/// falling back to a character boundary covers the scheme that is one long
+/// line, which must still be cut and must not be cut through a character.
+fn cut_scheme(s: &str) -> (String, Option<usize>) {
+    if s.len() <= SCHEME_LIMIT {
+        return (s.to_string(), None);
+    }
+    let mut cut = SCHEME_LIMIT;
+    while !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let head = match s[..cut].rfind('\n') {
+        Some(nl) => &s[..nl],
+        None => &s[..cut],
+    };
+    let full = s.chars().count();
+    (
+        format!(
+            "{head}\n\
+             ;; TRUNCATED: {} of {full} characters. ACL2 printed this scheme in\n\
+             ;; full and the rest is not shown here -- a mutual recursion inducts\n\
+             ;; over its whole clique. Nothing below this line has been read.\n\
+             ;; Use acl2_output on this form's output_ref for the whole thing.",
+            head.chars().count()
+        ),
+        Some(full),
+    )
+}
+
 pub fn induction(i: &acl2_session::Induction) -> InductionWire {
+    let (scheme, scheme_chars) = match &i.scheme {
+        Some(s) => {
+            let (head, full) = cut_scheme(s);
+            (Some(head), full)
+        }
+        None => (None, None),
+    };
     InductionWire {
         goal: i.goal.clone(),
         suggested_by: i.suggested_by.clone(),
         attribution: i.attribution.clone(),
-        scheme: i.scheme.clone(),
+        scheme,
+        scheme_chars,
         justified_by: i.justified_by.clone(),
         subgoals: i.subgoals.clone(),
     }
@@ -910,6 +981,42 @@ pub fn certified(r: &acl2_session::cert::CertReport) -> CertifyReply {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_ordinary_scheme_is_returned_whole_and_unmarked() {
+        let s = "(and (implies (and (not (endp x)) (:p (cdr x) y)) (:p x y))\n     \
+                 (implies (endp x) (:p x y)))";
+        let (out, full) = cut_scheme(s);
+        assert_eq!(out, s);
+        assert_eq!(full, None);
+        assert!(!out.contains("TRUNCATED"));
+    }
+
+    #[test]
+    fn a_clique_sized_scheme_says_so_in_the_text_itself() {
+        let line = "     (implies (not (equal flag 'valid-expr)) (:p flag term))\n";
+        let s = line.repeat(20_000);
+        let (out, full) = cut_scheme(&s);
+        assert_eq!(full, Some(s.chars().count()));
+        // The note is what a caller actually reads, so it has to carry both
+        // facts: that this stops early, and what to call for the rest.
+        assert!(out.contains(";; TRUNCATED:"), "{out}");
+        assert!(out.contains("acl2_output"), "{out}");
+        assert!(out.contains(&s.chars().count().to_string()), "{out}");
+        // Small enough to be worth returning at all.
+        assert!(out.len() < SCHEME_LIMIT + 400, "note ran long: {}", out.len());
+        // Whole lines above the note, so the shape that *is* shown reads.
+        let body = out.split("\n;; TRUNCATED").next().unwrap();
+        assert!(body.split('\n').all(|l| l.is_empty() || l == line.trim_end()));
+    }
+
+    #[test]
+    fn one_long_line_is_cut_at_a_character_boundary() {
+        let s = "\u{2192}".repeat(SCHEME_LIMIT);
+        let (out, full) = cut_scheme(&s);
+        assert_eq!(full, Some(SCHEME_LIMIT));
+        assert!(out.contains(";; TRUNCATED:"));
+    }
 
     /// Real tuples from the field session, plus the shapes that must fail
     /// closed. The first component is prove time in seconds.
