@@ -1493,8 +1493,6 @@ function onUnit(p: UnitEvent): void {
   }
 }
 
-/** Guards the live output read: at most one request outstanding. */
-let outputInFlight = false;
 
 
 function onTail(p: TailEvent): void {
@@ -1511,26 +1509,21 @@ function onTail(p: TailEvent): void {
     s.runningUnit = p.unit;
     s.runningRef = p.output_ref;
     if (outputView.shownBook === s.id && outputView.shownUnit === p.unit) {
-      // Ask for the depth this view shows rather than settling for the tail
-      // the event carries: the handle reads live, so there is no reason to
-      // watch forty lines of a proof printing thousands.
-      // Read the deeper slice only when someone can actually see it, and no
-      // faster than the renderer can take. Otherwise fall back to the tail
-      // the event already carries, which costs nothing extra.
-      // Only when someone can see it: refreshing a virtual document
-      // re-tokenises it in the renderer, and doing that for a view nobody has
-      // open is pure waste. One request outstanding at a time -- a view
-      // showing the newest tail has no use for the ones it skipped.
-      if (p.output_ref && outputView.visible) {
-        if (!outputInFlight) {
-          outputInFlight = true;
-          void showUnitOutput(s, p.unit).finally(() => {
-            outputInFlight = false;
-          });
-        }
-      } else {
-        outputView.set(s.id, p.unit, p.text);
-      }
+      // The text the event already carries, never a fresh request. Asking the
+      // daemon for a deeper slice on every tick looks harmless -- it is one
+      // request, throttled to one in flight -- but the reply is proportional
+      // to the *lines*, and a book like kestrel/c/syntax/validator.lisp
+      // prints long ones: 400 lines came back as ~117 KB, twice a second, for
+      // as long as the form ran. Measured on a live session: 245 MB pushed
+      // from the daemon in eleven minutes against ~1.5 MB of real events for
+      // the whole book, with the daemon's writer thread blocked on a socket
+      // the client could no longer drain and the extension host spending its
+      // life parsing JSON and re-tokenising a virtual document.
+      //
+      // A live view is for watching output go by, which is what the pushed
+      // tail is. Depth on demand still works: opening the view, or the form
+      // landing, calls `showUnitOutput`, which reads the handle properly.
+      outputView.set(s.id, p.unit, p.text);
     }
     panel.tail(p.book, p.unit, p.elapsed_ms, p.text);
   }
