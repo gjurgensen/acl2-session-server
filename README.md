@@ -1,9 +1,10 @@
 # acl2-session-server
 
-A file-anchored, structured interface to a live ACL2 session, exposed over MCP.
+A file-anchored, structured interface to a live ACL2 session — for agents (over
+MCP) and for people (in VSCode).
 
 Status: **early**, but working end to end: a book syncs, failures come back
-structured, and the MCP server speaks the protocol over stdio.
+structured, and both front-ends drive it.
 
 ## What it is
 
@@ -27,50 +28,61 @@ costs nothing.
 **Read ACL2's state, don't scrape its output.** Key checkpoints, the rules a
 proof used, warnings, timings and abort causes all come from `get-event-data`
 and `gag-state`, without adding anything to the ACL2 world. A failed proof comes
-back with its checkpoints as terms and a typed reason, not a wall of text.
-
-Concretely, the `failed` object of a sync reply, for a theorem whose proof
-reverts to induction and runs out of depth (abridged: the induction-step term
-and ten more runes are elided):
-
-```json
-"failed": {
-  "status": "proof_failure",
-  "abort_cause": "induction-depth-limit-exceeded",
-  "failed_event": "car-of-my-rev",
-  "failed_kind": "defthm",
-  "error_line": "ACL2 Error [Failure] in ( defthm car-of-my-rev ...):  See :DOC failure.",
-  "index": 2, "line_start": 8, "line_end": 9,
-  "prover_steps": 1178,
-  "checkpoints": {
-    "pre_revert": true, "forced": false, "n_top": 1, "n_sub": 1,
-    "top": [ { "goal": "Goal",
-               "term": "(equal (car (my-rev x)) (car x))" } ],
-    "sub": [ { "goal": "Subgoal *1/2''",
-               "term": "(implies (and (consp x) ..." } ]
-  },
-  "inner": [ { "name": "car-of-my-rev", "kind": "defthm",
-               "abort_causes": "(induction-depth-limit-exceeded revert)",
-               "prove_ms": 2, "prover_steps": 1178,
-               "rules": [ "(:definition my-rev)",
-                          "(:induction my-rev)", "..." ] } ],
-  "inner_detail_through": 1,
-  "output_ref": "s653-0:f3", "output_lines": 94
-}
-```
-
-A checkpoint's `goal` is exactly what `acl2_output mode:"goal"` takes, so
-"show me what the prover did under `Subgoal *1/2''`" is one call, with no
-names guessed out of a log.
+back with its checkpoints as terms and a typed reason, not a wall of text — and
+a checkpoint's goal name is exactly the handle for pulling what the prover
+printed under it, so there is nothing to guess out of a log. The concrete
+failure envelope is shown field by field in the
+[MCP README](crates/acl2-session-mcp/README.md#tools).
 
 The complete log is still captured and retrievable by handle, because some
 things — the induction scheme the prover chose, per-goal rewriting detail,
 arbitrary macro output — exist only in the printed narrative. The structured
 result is a fast path over a complete log, never a replacement for it.
 
-## Trying it
+## Interfaces
 
-Without MCP, to see the structured output directly:
+Two front-ends over one transport-neutral core:
+
+- **[MCP server](crates/acl2-session-mcp/README.md)** (`crates/acl2-session-mcp`)
+  — an agent drives the session as a set of tools. Its README has the install,
+  the client configuration, the tool list, and the structured failure envelope.
+- **[VSCode extension](editors/vscode/README.md)** (`editors/vscode`) — live
+  form-by-form checking for a person, as a client of the editor daemon
+  (`crates/acl2-session-editor`) over JSON-RPC. Its README has the commands,
+  the rendering, and the settings.
+
+The core is transport-neutral, and the two front-ends are its two clients.
+Both resolve their ACL2 image the same way.
+
+## Choosing the ACL2 image
+
+Both front-ends run a book under a specific ACL2, and which one is a matter of
+**trust**, because a book's image is the image it was certified against and
+running it means running whatever that checkout's code does.
+
+The set of runnable images is an **allowlist**, not a search path. An image
+runs only if it is the configured default or lives under a trusted directory,
+and that holds for images named explicitly at open time too — so neither a
+repository nor a client can supply its own "ACL2".
+
+- **`--trusted <dir>`** (repeatable) vouches for the ACL2 checkouts under a
+  directory: a book inside one runs under **its own checkout's image**, and one
+  entry covers every build there, including ones added later. Trust is
+  subtree-wide and forward-open — it covers checkouts cloned under the root
+  *after* you granted it, and an inner checkout wins over the one above it — so
+  trust a directory whose contents you control.
+- **`--default <image>`** is used for books outside every trusted directory.
+- `ACL2_TRUSTED` (colon-separated) and `ACL2_DEFAULT` set the same two from the
+  environment.
+
+The MCP server takes these as `args`; the VSCode extension takes them as the
+`acl2-session.trusted` and `acl2-session.defaultImage` settings. Each front-end
+reports which image a session actually got, and the MCP `acl2_images` tool
+lists what is permitted.
+
+## Trying it without a client
+
+To see the structured output directly, with no MCP or editor in the loop:
 
 ```
 cargo build
@@ -79,67 +91,6 @@ cargo build
 
 Syncs a book and prints the structured report for each top-level form. Add
 `--find <text>` or `--goal "Subgoal *1/2"` to slice a form's captured log.
-
-As an MCP server, install it:
-
-```
-cargo install --path crates/acl2-session-mcp
-```
-
-Then configure your client. The server is started as a subprocess, so it is
-configured through `args` (or `env`). With a single ACL2, that is one path:
-
-```json
-{
-  "mcpServers": {
-    "acl2": {
-      "command": "/home/you/.cargo/bin/acl2-session-mcp",
-      "args": ["/home/you/acl2/saved_acl2"]
-    }
-  }
-}
-```
-
-If you keep several ACL2 builds side by side — a release and a development
-tree, or a set of git worktrees — name the directory holding them instead:
-
-```json
-"args": ["--trusted", "/home/you/acl2-builds",
-         "--default", "/home/you/acl2-builds/release/saved_acl2"]
-```
-
-`--trusted` vouches for the ACL2 checkouts under a directory: a book inside one
-runs under **its own checkout's image** — the image it was certified against —
-and one entry covers every build there, including ones added later. `--default`
-is used for books outside every trusted directory. `ACL2_TRUSTED`
-(colon-separated) and `ACL2_DEFAULT` work too, for clients where editing `args`
-is awkward.
-
-The trusted set is an allowlist, not a search path: an image runs only if it is
-the default or lives under a trusted directory, and that holds for images named
-explicitly in `acl2_session_open` too — so neither a repository nor a client
-can supply its own "ACL2". `acl2_images` lists what is permitted, and every
-open reports which image it got. Trust is subtree-wide and forward-open — it
-covers checkouts cloned under the root *after* you granted it, and an inner
-checkout wins over the one above it — so trust a directory whose contents you
-control.
-
-Thirteen tools: `session_open`, `session_close`, `sessions`, `images`, `sync`,
-`eval`, `certify`, `resume`, `status`, `interrupt`, `health`, `output`,
-`induction`.
-
-`induction` answers why a proof inducted: the scheme, the term that suggested
-it, the rule credited, and how many subgoals it produced. Call it for a form
-whose `rules` carry an `:induction` rune. Alone among these it is a *parse of
-ACL2's prose* — the scheme is printed and recorded nowhere, not in
-`get-event-data` and not in `gag-state` — so it is best effort: fields go
-missing rather than wrong, and a reworded ACL2 returns nothing at all.
-
-`certify` runs `cert.pl` on the session's book, with the same ACL2 image the
-session runs and the `cert.pl` from that image's own checkout. It runs outside
-the session, so the world is untouched — and because certification chases
-dependencies, the reply says *which* book failed, which is usually not the one
-you asked for.
 
 ## Tests
 
@@ -164,12 +115,12 @@ crates/
 editors/
   vscode/               VSCode client of the daemon: live coloring,
                         diagnostics from failure envelopes, an output view
-                        following the cursor. No runtime dependencies.
+                        following the cursor. Two small deps, for the panel.
 ```
 
-The core is transport-neutral, and the editor daemon is its second client.
 The split is a workspace boundary rather than a naming convention, so the
-compiler enforces it.
+compiler enforces it. Each interface has its own README beside its code
+(`crates/acl2-session-mcp`, `editors/vscode`).
 
 ## Runtime
 

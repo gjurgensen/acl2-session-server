@@ -102,9 +102,9 @@ puts a *variable* in head position, and in real books single letters are
 among the most frequent things sitting there.
 
 The grammar is lexical, so it cannot know that a project's own macro defines
-a theorem, or that a name refers to something admitted. That is the semantic
-token layer's job, and the daemon already knows the answers; it is not built
-yet.
+a theorem, or that a name refers to something admitted. The daemon knows both
+-- that is what the language features below answer from -- but *recoloring* the
+buffer from that knowledge, the semantic-token layer's job, is not built yet.
 
 The panel's terms and runes go through *the same grammar*, so a term in the
 panel and the same term in the buffer are tokenized identically rather than
@@ -129,6 +129,32 @@ Verified by tokenizing the 10,712 books of a full ACL2 checkout (5.0M lines)
 under the real TextMate engine: no file ends with an unterminated string or
 comment, and of 244,608 definer heads none went unrecognized outside of the
 4,024 that sit inside comments or strings, where silence is correct.
+
+## Language features
+
+The grammar above is lexical. Everything that needs to know what a name *is* --
+rather than what it looks like -- is answered by the daemon instead, from the
+world the session has actually admitted:
+
+- **Hover** shows what a name is in that world: a function's signature and
+  guard, a theorem's statement, where it came from (this file, a named book, or
+  built into ACL2), and an xdoc one-liner when there is one. A name the world
+  does not know has no hover, which is itself the answer.
+- **Go to Definition** jumps to a name defined in this book, and says whether
+  the target is exact -- read there by the daemon -- or a lexical best guess.
+- **Include-book links** turn each `(include-book "...")` path into a link to
+  the file it resolves to, under the same `:dir` rules ACL2 uses.
+- **Completion** offers names the world holds, so it proposes what you can
+  actually call rather than every token that has appeared in the buffer.
+- **Outline** (the breadcrumb, and `ctrl+shift+o`) lists the book's events in
+  order, the names macros generated included.
+
+These answer from the live world, so while the session is busy proving, a query
+that would need it **declines cleanly** rather than blocking or reporting a name
+falsely absent -- the session's ACL2 is occupied exactly when you are most
+likely to be reading an earlier form. **ACL2: Show Documentation** (no key)
+opens the full xdoc topic for the name at the cursor in a read-only view, where
+the hover shows only its first sentence.
 
 ## The mark
 
@@ -197,6 +223,15 @@ To keep another Lisp extension on `.lisp` instead, override the association:
 "files.associations": { "*.lisp": "lisp" }
 ```
 
+## Certifying
+
+**ACL2: Certify Book** (no key) runs `cert.pl` on the book *outside* the
+session, so the world it has built is left untouched. The status bar shows a
+running clock and becomes an interrupt button while it works. Because
+certification chases dependencies, a failure names *which* book failed, which
+is often a dependency rather than the one in front of you.
+`acl2-session.certifyJobs` sets the `cert.pl -j` parallelism (default 4).
+
 ## Build
 
 ```sh
@@ -227,8 +262,38 @@ and restart VSCode (recompile with `npm run compile` after pulling changes).
 
 - `acl2-session.daemonPath` -- the daemon binary (default: on `PATH`).
 - `acl2-session.defaultImage` / `acl2-session.trusted` -- the daemon's
-  `--default` and `--trusted` trust flags; `ACL2_DEFAULT` and `ACL2_TRUSTED`
-  in the environment work too.
+  `--default` and `--trusted` image-trust flags; `ACL2_DEFAULT` and
+  `ACL2_TRUSTED` in the environment work too. See the top-level README for what
+  trust means here.
+- `acl2-session.decorations` -- `minimal` (the gutter status column, the
+  default) or `wash` (whole-form background washes).
+- `acl2-session.gutterAdmitted` -- in minimal mode, mark admitted forms with a
+  green gutter bar (olive for conditional). Off, absence means admitted.
+- `acl2-session.highlightOutput` -- highlight the output log (above); off, it
+  is plain text.
+- `acl2-session.termWidth` -- the ceiling width, in characters, that panel
+  terms are laid out to (default 60); the pane's own width is used when it is
+  narrower.
+- `acl2-session.certifyJobs` -- `cert.pl -j` parallelism when certifying
+  (default 4).
+- `acl2-session.warnOnProveOutputOverride` -- warn once per window when the
+  server re-enables PROVE output (below); off, only the output channel records
+  it.
+
+## When the server re-enables PROVE output
+
+If your `acl2-customization.lsp` inhibits `prove` output -- a common way to
+quiet the waterfall at a terminal -- the server turns it back on for the
+session, because inhibiting it *also* disables the output saving that the
+panel's checkpoints and induction narrative depend on. Nothing reaches a
+terminal here, so this changes only what the session captures, never what your
+file admits.
+
+Because it silently reverses a setting you wrote, the extension discloses it: a
+line in the output channel every time, and one warning toast the first time per
+window. The toast's **Don't show again** (or
+`acl2-session.warnOnProveOutputOverride`) silences the toast for good; the
+channel line stays.
 
 ## Commands
 
@@ -257,8 +322,9 @@ retract; the rest are first letters.
 | `ctrl+alt+r` | Go to Frontier |
 
 All are scoped to `editorLangId == acl2`, so they are inert everywhere else.
-Stop Live Checking has no key: the title-bar button covers it, and it is not
-something you want a keystroke away.
+Three commands have no key and live in the command palette: **Stop Live
+Checking** (the title-bar button covers it), **Certify Book**, and **Show
+Documentation** -- none is something you want a keystroke away.
 
 Deliberately avoided: `ctrl+alt+t`, `ctrl+alt+l` and `ctrl+alt+d` (GNOME's
 terminal, lock and show-desktop), `ctrl+alt+<arrows>` (workspace switching),
