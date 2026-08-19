@@ -51,6 +51,20 @@ fn laid_opt(term: &Option<String>) -> Option<String> {
     term.as_deref().map(laid)
 }
 
+/// Lay a term out for a box that is not the panel.
+///
+/// A hover is the case: it has a width, but nothing can measure it. The
+/// extension API exposes no pixel geometry at all -- not for the hover
+/// widget, not even for the editor -- and a webview, the one place an
+/// extension *can* measure, is not where a tooltip lives. So the client says
+/// what it wants and this obeys, rather than borrowing the panel's width,
+/// which belongs to a different box and moves when a different pane is
+/// dragged.
+fn laid_at(term: &Option<String>, cols: Option<usize>) -> Option<String> {
+    let cols = cols.unwrap_or(DEFAULT_COLS);
+    term.as_deref().map(|t| acl2_session::pretty::pretty(t, cols))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct LayoutParams {
     /// The pane width in characters, as the client measured it.
@@ -150,6 +164,11 @@ pub struct EvalParams {
 #[derive(Debug, Deserialize)]
 pub struct DescribeParams {
     pub book: String,
+    /// How wide to lay the terms out, in characters. Absent falls back to
+    /// ACL2's own margin: the client is the only one who can have an opinion
+    /// here, and one that offers none gets what a terminal would have shown.
+    #[serde(default)]
+    pub cols: Option<usize>,
     /// The token under the cursor, as the client read it out of the buffer.
     /// Not a position: coordinates never cross this
     /// wire. A token that is not a plain symbol simply answers "not found".
@@ -215,7 +234,7 @@ pub fn kind_str(k: NameKind) -> &'static str {
     }
 }
 
-pub fn described(name: &str, d: Option<&NameDetail>) -> DescribeReply {
+pub fn described(name: &str, d: Option<&NameDetail>, cols: Option<usize>) -> DescribeReply {
     match d {
         None => DescribeReply {
             available: true,
@@ -237,8 +256,10 @@ pub fn described(name: &str, d: Option<&NameDetail>) -> DescribeReply {
             kind: Some(kind_str(d.kind)),
             origin: Some(origin_str(d.origin)),
             formals: d.formals.clone(),
-            guard: d.guard.clone(),
-            statement: d.statement.clone(),
+            // Laid out, like the panel's. `formals` is not: a short list ACL2
+            // never wraps anyway.
+            guard: laid_at(&d.guard, cols),
+            statement: laid_at(&d.statement, cols),
             book: d.book.clone(),
             path: d.book_path.as_ref().map(|p| p.display().to_string()),
             short: None,

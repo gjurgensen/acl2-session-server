@@ -245,6 +245,64 @@ fn terms_arrive_laid_out_for_the_width_the_client_asked_for() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A hover's terms are laid out for the hover, not for the panel.
+///
+/// Two things at once. The world stores terms translated, so a `defthm` whose
+/// statement was written with `and` is held as `(if x y 'nil)` and used to be
+/// shown that way. And a hover has a width but nothing can measure it -- the
+/// extension API exposes no geometry for a tooltip -- so the client says what
+/// it wants rather than inheriting the panel's, which is a different box.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_hover_lays_terms_out_at_the_width_it_asked_for() {
+    let Some(acl2) = acl2() else {
+        eprintln!("ACL2 not set; skipping");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("acl2-editord-hov-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let book_path: PathBuf = dir.join("hov.lisp");
+    let text = "(in-package \"ACL2\")\n\n\
+                (defun hv-f (x y)\n  (declare (xargs :guard (and (natp x) (natp y))))\n  \
+                (let ((z (+ x y))) (* z z)))\n\n\
+                (defthm hv-thm\n  (implies (and (natp xxxxxxxxxx) (natp yyyyyyyyyy))\n\
+                \x20          (equal (hv-f xxxxxxxxxx yyyyyyyyyy)\n\
+                \x20                 (* (+ xxxxxxxxxx yyyyyyyyyy) (+ xxxxxxxxxx yyyyyyyyyy)))))\n";
+    std::fs::write(&book_path, text).expect("write book");
+
+    let mut d = Daemon::start(&acl2);
+    let opened = d.request("open", json!({ "path": book_path.to_str().unwrap() }));
+    let book = opened["book"].as_str().expect("book id").to_string();
+    // A wide panel, so inheriting its width would be visible.
+    d.notify("layout", json!({ "cols": 200 }));
+    d.notify("update", json!({ "book": book, "text": text, "revision": 1 }));
+    let events = d.events_until_settled();
+    assert_eq!(events.last().expect("settled").1["reason"], "reached_target");
+
+    let g = d.request("describe", json!({ "book": book, "name": "hv-f", "cols": 40 }));
+    let guard = g["guard"].as_str().expect("a guard");
+    assert!(guard.contains("(and "), "the guard is untranslated: {guard}");
+    assert!(!guard.contains("'nil"), "{guard}");
+
+    let t = d.request("describe", json!({ "book": book, "name": "hv-thm", "cols": 40 }));
+    let narrow = t["statement"].as_str().expect("a statement").to_string();
+    assert!(narrow.contains("(and "), "the statement is untranslated: {narrow}");
+    let widest = narrow.lines().map(str::len).max().unwrap_or(0);
+    assert!(widest <= 40, "laid out to {widest} columns, not the 40 asked for: {narrow}");
+
+    // The same name at a different width: the number is used, and it is the
+    // hover's rather than the panel's 200.
+    let t2 = d.request("describe", json!({ "book": book, "name": "hv-thm", "cols": 100 }));
+    let wide = t2["statement"].as_str().expect("a statement").to_string();
+    assert!(wide.lines().count() < narrow.lines().count(), "wide:\n{wide}\nnarrow:\n{narrow}");
+    let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert_eq!(flat(&wide), flat(&narrow));
+
+    d.request("close", json!({ "book": book }));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A term already sent can be laid out again at a new width.
 ///
 /// The gap `reflow` fills: checkpoints ride on `unit` events, which are pushed

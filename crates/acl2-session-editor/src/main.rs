@@ -246,7 +246,8 @@ impl Daemon {
                 let p: wire::DescribeParams = args(params)?;
                 let id = id.clone();
                 self.handle_of(&p.book, |h| {
-                    h.tx.send(Cmd::Describe { id, name: p.name }).map_err(|e| e.to_string())
+                    h.tx.send(Cmd::Describe { id, name: p.name, cols: p.cols })
+                        .map_err(|e| e.to_string())
                 })
                 .map_err(fail)?
                 .map_err(fail)?;

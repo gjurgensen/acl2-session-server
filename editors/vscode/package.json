@@ -262,6 +262,12 @@
           "minimum": 20,
           "description": "Maximum width, in characters, that terms in the panel are laid out to. The pane's own width is used when it is narrower; this is a ceiling, not a target. ACL2 prints for a 77-column terminal, so a wide pane would otherwise leave every term on one long line."
         },
+        "acl2-session.hoverWidth": {
+          "type": "number",
+          "default": 60,
+          "minimum": 20,
+          "description": "Width, in characters, that terms in a hover are laid out to. A fixed number rather than a measurement: VSCode tells an extension nothing about the size of a hover, and a tooltip is not a webview, so nothing can measure it. Matches the panel's default so a term reads the same in both."
+        },
         "acl2-session.certifyJobs": {
           "type": "integer",
           "default": 4,

@@ -39,7 +39,7 @@ pub enum Cmd {
     /// What does the world know about this name? Answered from the cache, or
     /// from a 10 ms probe when the session is free, and otherwise declined --
     /// never queued. See [`Driver::describe`].
-    Describe { id: Value, name: String },
+    Describe { id: Value, name: String, cols: Option<usize> },
     /// Where is this name defined? Same never-queue policy as `Describe`,
     /// which it is built on. See [`Driver::definition`].
     Definition { id: Value, name: String },
@@ -436,8 +436,8 @@ impl Driver {
                 self.eval_queue.push_back((id, form));
                 Flow::Continue
             }
-            Cmd::Describe { id, name } => {
-                self.describe(&id, &name);
+            Cmd::Describe { id, name, cols } => {
+                self.describe(&id, &name, cols);
                 Flow::Continue
             }
             Cmd::Definition { id, name } => {
@@ -535,10 +535,10 @@ impl Driver {
         self.out.reply(id, to_value(wire::RulesBatchReply { rules: out }));
     }
 
-    fn describe(&mut self, id: &Value, name: &str) {
+    fn describe(&mut self, id: &Value, name: &str, cols: Option<usize>) {
         match self.cached_detail(name) {
             Ok(d) => {
-                let mut r = wire::described(name, d.as_ref());
+                let mut r = wire::described(name, d.as_ref(), cols);
                 r.short = self.doc_short(name);
                 self.out.reply(id, to_value(r))
             }

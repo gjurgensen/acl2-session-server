@@ -195,6 +195,18 @@ function gutterAdmitted(): boolean {
   return vscode.workspace.getConfiguration('acl2-session').get<boolean>('gutterAdmitted', true);
 }
 
+/**
+ * How wide a hover's terms are laid out.
+ *
+ * A setting rather than a measurement, and it has to be: the extension API
+ * exposes no geometry for a hover -- or for the editor -- and only a webview
+ * can measure anything, which a tooltip is not. Defaults to the panel's own
+ * ceiling so a term reads the same in both places.
+ */
+function hoverWidth(): number {
+  return vscode.workspace.getConfiguration('acl2-session').get<number>('hoverWidth', 60);
+}
+
 export function activate(context: vscode.ExtensionContext): void {
   decorations = new Decorations(context);
   outputView = new OutputView(
@@ -462,7 +474,7 @@ const hoverProvider: vscode.HoverProvider = {
     const name = doc.getText(range);
     let reply: DescribeReply;
     try {
-      reply = await client.request('describe', { book: s.id, name });
+      reply = await client.request('describe', { book: s.id, name, cols: hoverWidth() });
     } catch {
       // A daemon that went away is reported by the session machinery; a
       // tooltip is not the place to say so a second time.
