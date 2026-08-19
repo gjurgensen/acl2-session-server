@@ -5,55 +5,29 @@ Model Context Protocol, so an agent drives a live ACL2 session as a set of
 tools. It is a thin mapping onto the core's `Book`/`Registry` and adds no logic
 of its own beyond the protocol.
 
-For what a session *is* — the file-prefix invariant, why failures come back as
-structure rather than text — see the [top-level README](../../README.md). This
-document is the interface: how to install it, how to point it at an ACL2, and
-what the tools are.
-
 ## Install
 
-```
+Install the MCP server with the following `cargo` command, run from the
+repository root. This builds the server and installs it to
+`~/.cargo/bin/acl2-session-mcp`.
+
+```sh
 cargo install --path crates/acl2-session-mcp
 ```
 
-The server is started as a subprocess by the client, so it is configured
-entirely through `args` (or the environment) — there is no config file of its
-own. With a single ACL2, that is one path:
-
-```json
-{
-  "mcpServers": {
-    "acl2": {
-      "command": "/home/you/.cargo/bin/acl2-session-mcp",
-      "args": ["/home/you/acl2/saved_acl2"]
-    }
-  }
-}
+Then register it with your MCP client. With Claude Code (user scoped):
+```sh
+claude mcp add -s user acl2 -- ~/.cargo/bin/acl2-session-mcp --default <saved_acl2> --trusted <dir>
 ```
 
-If you keep several ACL2 builds side by side — a release and a development
-tree, or a set of git worktrees — name the directory holding them instead of a
-single image:
-
-```json
-"args": ["--trusted", "/home/you/acl2-builds",
-         "--default", "/home/you/acl2-builds/release/saved_acl2"]
+or with Codex:
+```sh
+codex mcp add acl2 -- ~/.cargo/bin/acl2-session-mcp --default <saved_acl2> --trusted <dir>
 ```
-
-`--trusted` and `--default` are the shared image-trust flags, described under
-[Choosing the ACL2 image](../../README.md#choosing-the-acl2-image) in the
-top-level README; `ACL2_TRUSTED` (colon-separated) and `ACL2_DEFAULT` work too,
-for clients where editing `args` is awkward. The short version: a book runs
-under its own trusted checkout's image, `--default` covers books outside every
-trusted directory, and `acl2_images` reports what is permitted.
-
-**Restarting matters.** `cargo install ... --force` does not restart a running
-server — the client keeps talking to the old subprocess until the client is
-restarted, which looks exactly like a fix that did not take.
+See the [top-level README](../../README.md#choosing-the-acl2-image) for
+explanation of the `--default` and `--trusted` arguments.
 
 ## Tools
-
-Thirteen, each returning structured JSON:
 
 | tool | what it does |
 | --- | --- |
@@ -71,10 +45,8 @@ Thirteen, each returning structured JSON:
 | `acl2_output` | Read part of a form's captured output, by handle. |
 | `acl2_induction` | Why the prover inducted, for a form whose `rules` carry an `:induction` rune. |
 
-Three of these carry caveats worth stating once.
-
-**`acl2_sync` stops at the first failure** and reports it as structure. The
-reply's `failed` object, for a theorem whose proof reverts to induction and
+Note that `acl2_sync` stops at the first failure and reports it as structure.
+The reply's `failed` object, for a theorem whose proof reverts to induction and
 runs out of depth (abridged — the induction-step term and ten more runes are
 elided):
 
@@ -112,26 +84,25 @@ rewriting detail, arbitrary macro output — exist only in the printed narrative
 The structured result is a fast path over a complete log, never a replacement
 for it.
 
-**`acl2_induction`** is alone among the tools in being a *parse of ACL2's
+`acl2_induction` is alone among the tools in being a *parse of ACL2's
 prose*: the scheme it returns is printed and recorded nowhere — not in
 `get-event-data`, not in `gag-state` — so it is best effort. Fields go missing
 rather than wrong, and a reworded ACL2 returns nothing at all. Call it only for
 a form whose `rules` carry an `:induction` rune.
 
-**`acl2_certify`** runs `cert.pl` on the session's book, with the same ACL2
+`acl2_certify` runs `cert.pl` on the session's book, with the same ACL2
 image the session runs and the `cert.pl` from that image's own checkout. It
 runs outside the session, so the world is untouched — and because certification
-chases dependencies, the reply says *which* book failed, which is usually not
-the one you asked for.
+chases dependencies, the reply says *which* book failed.
 
-## The PROVE-output disclosure
+## Inhibited output
 
 `acl2_session_open` may return a `prove_output_overridden` field. The session
-inherits the user's `acl2-customization.lsp`, and a common thing to put there
-is `prove` on `inhibit-output-lst`, which silences the waterfall at a terminal
-— but it also disables output *saving*, which would cost every proof its
-checkpoints and induction narrative. So the server removes `prove` (and only
-`prove`) from the inherited list, and reports what it inherited in this field.
+inherits the user's `acl2-customization.lsp`, which may have `prove` on
+`inhibit-output-lst`, which silences the waterfall at a terminal — but it also
+disables output *saving*, which would cost every proof its checkpoints and
+induction narrative. So the server removes `prove` (and only `prove`) from the
+inherited list, and reports what it inherited in this field.
 
 It is present only when an override happened. When set, prover output in the
 captured log is output the user's own interactive session would have
@@ -145,6 +116,6 @@ The wire is covered end to end by
 drives it over real stdio JSON against a real ACL2. Run it with the workspace
 live suite:
 
-```
+```sh
 ACL2=/path/to/saved_acl2 cargo test -p acl2-session-mcp -- --ignored --test-threads=1
 ```
