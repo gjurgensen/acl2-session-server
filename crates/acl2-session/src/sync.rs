@@ -119,6 +119,30 @@ pub struct Budget {
 /// the thing their next sync is blocked behind.
 const PROBE_FLOOR: Duration = Duration::from_secs(10);
 
+/// How long the rules scrape may run before it is called off.
+///
+/// Fixed, and deliberately not derived from the caller's deadline the way
+/// every other probe's is. The caller's deadline is for the *form*, which may
+/// legitimately prove for minutes; this is optional bookkeeping, and taking a
+/// proof's patience for it is how a best-effort probe ends up owning a
+/// session for the hour an agent asked for.
+///
+/// Two seconds is about ten times the largest real scrape measured -- 668
+/// names from `kestrel/c/syntax/validator.lisp`'s `defines` took 190-207 ms,
+/// of which untranslation was 5-21 ms -- and about fourteen hundred times the
+/// slowest single term: 1.4 ms, for the flag-equivalences theorem of that
+/// file's thirty-way mutual recursion. Untranslating *every* term in that
+/// book's whole world, all 39,192 of them, takes 0.80 s.
+///
+/// Not smaller, though the waste on a hang is the obvious thing to minimise,
+/// because the costs are not symmetric. Recovery from a timeout is an
+/// interrupt handshake of up to four 1.5-second rounds plus a second probe,
+/// and it leaves that form's terms translated until it is admitted again. So
+/// being wrong in the "too short" direction costs more than being wrong in
+/// the other, and only the "too short" direction is reachable by anything
+/// anyone has run.
+const SCRAPE_BUDGET: Duration = Duration::from_secs(2);
+
 impl Budget {
     pub fn new(total: Duration) -> Budget {
         Budget { total, started: Instant::now() }
@@ -3110,7 +3134,7 @@ impl Book {
             // option: the next thing the session does may be a proof, and
             // then nothing can be asked of ACL2 at all.
             let introduced = inner_names(&sub);
-            self.scrape_rules(&introduced, index, deadline);
+            self.scrape_rules(&introduced, index);
         }
         Ok((sub, output_ref))
     }
@@ -3215,7 +3239,7 @@ impl Book {
             // kestrel/c/syntax/validator.lisp ran for 193 seconds and
             // introduced 620 names, and every one of them read as unknown.
             let introduced = inner_names(&sub);
-            self.scrape_rules(&introduced, p.index, deadline);
+            self.scrape_rules(&introduced, p.index);
             let (inner, inner_total, clique) = parse_inner(&sub);
             return Ok(Some(Resumed::Admitted(UnitReport {
                 index: p.index,
@@ -3660,21 +3684,21 @@ impl Book {
     /// stores, because what it stores is not what anyone wrote: a guard of
     /// `(and (natp x) (natp y))` is held as `(if (natp x) (natp y) 'nil)` and
     /// a `let` as a lambda application. If that pass does not answer inside
-    /// its budget the session is taken back and the same names are asked for
-    /// raw, because a translated term is worse to read than an untranslated
-    /// one and far better than the nothing this used to report.
+    /// [`SCRAPE_BUDGET`] the session is taken back and the same names are
+    /// asked for raw, because a translated term is worse to read than an
+    /// untranslated one and far better than the nothing this used to
+    /// report.
     ///
     /// The retry is insurance rather than an expected path. ACL2 untranslates
     /// every goal it prints, so a hang here would be a famous bug -- but
     /// `untranslate1` carries its own warning that it "may not terminate",
     /// and this is a probe with a deadline, so the honest thing is to have
     /// somewhere to fall back to.
-    fn scrape_rules(&mut self, names: &[String], unit: usize, deadline: Duration) {
+    fn scrape_rules(&mut self, names: &[String], unit: usize) {
         if names.is_empty() {
             return;
         }
-        let budget = deadline.max(PROBE_FLOOR);
-        if self.scrape_rules_pass(names, unit, budget, true) != Scrape::TimedOut {
+        if self.scrape_rules_pass(names, unit, SCRAPE_BUDGET, true) != Scrape::TimedOut {
             return;
         }
         // The probe is still running in there, and until it stops nothing
@@ -3682,7 +3706,7 @@ impl Book {
         // `Book::interrupt`: this is not the user calling off a proof, and it
         // must not take a `certify` down with it.
         if self.session.interrupt().unwrap_or(false) {
-            self.scrape_rules_pass(names, unit, budget, false);
+            self.scrape_rules_pass(names, unit, SCRAPE_BUDGET, false);
         }
     }
 
