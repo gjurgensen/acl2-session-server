@@ -1618,9 +1618,11 @@ fn detail_probe(name: &str) -> String {
          margs ~x3~%thm ~x4~%const ~x5~%book ~x6~%evcmd ~x7~%<<<ASS-END detail>>>~%\"\n\
          (acl2::if acl2::ev acl2::t acl2::nil)\n\
          (acl2::getpropc acl2::nm 'acl2::formals :none acl2::wrld)\n\
-         (acl2::getpropc acl2::nm 'acl2::guard :none acl2::wrld)\n\
+         (acl2::untranslate\n\
+         (acl2::getpropc acl2::nm 'acl2::guard :none acl2::wrld) acl2::t acl2::wrld)\n\
          (acl2::getpropc acl2::nm 'acl2::macro-args :none acl2::wrld)\n\
-         (acl2::getpropc acl2::nm 'acl2::theorem :none acl2::wrld)\n\
+         (acl2::untranslate\n\
+         (acl2::getpropc acl2::nm 'acl2::theorem :none acl2::wrld) acl2::t acl2::wrld)\n\
          (acl2::getpropc acl2::nm 'acl2::const :none acl2::wrld)\n\
          (acl2::car acl2::bk)\n\
          (acl2::if acl2::ev (acl2::max-absolute-command-number acl2::ev) -1))\n\
@@ -3653,13 +3655,58 @@ impl Book {
     /// cannot answer should cost the caller nothing. A failure here leaves
     /// the store without those names, which the reader reports as "not
     /// known" rather than as an error.
+    ///
+    /// Two passes at most. The first asks ACL2 to `untranslate` what it
+    /// stores, because what it stores is not what anyone wrote: a guard of
+    /// `(and (natp x) (natp y))` is held as `(if (natp x) (natp y) 'nil)` and
+    /// a `let` as a lambda application. If that pass does not answer inside
+    /// its budget the session is taken back and the same names are asked for
+    /// raw, because a translated term is worse to read than an untranslated
+    /// one and far better than the nothing this used to report.
+    ///
+    /// The retry is insurance rather than an expected path. ACL2 untranslates
+    /// every goal it prints, so a hang here would be a famous bug -- but
+    /// `untranslate1` carries its own warning that it "may not terminate",
+    /// and this is a probe with a deadline, so the honest thing is to have
+    /// somewhere to fall back to.
     fn scrape_rules(&mut self, names: &[String], unit: usize, deadline: Duration) {
         if names.is_empty() {
             return;
         }
-        let probe = rules_probe(names);
-        let Ok(sub) = self.session.submit(&probe, deadline.max(PROBE_FLOOR)) else { return };
-        let Some(body) = sub.block("rules") else { return };
+        let budget = deadline.max(PROBE_FLOOR);
+        if self.scrape_rules_pass(names, unit, budget, true) != Scrape::TimedOut {
+            return;
+        }
+        // The probe is still running in there, and until it stops nothing
+        // else can be submitted. The session's own interrupt rather than
+        // `Book::interrupt`: this is not the user calling off a proof, and it
+        // must not take a `certify` down with it.
+        if self.session.interrupt().unwrap_or(false) {
+            self.scrape_rules_pass(names, unit, budget, false);
+        }
+    }
+
+    /// One pass of the scrape, with or without asking ACL2 to untranslate.
+    fn scrape_rules_pass(
+        &mut self,
+        names: &[String],
+        unit: usize,
+        budget: Duration,
+        untranslated: bool,
+    ) -> Scrape {
+        let probe = rules_probe(names, untranslated);
+        let Ok(sub) = self.session.submit(&probe, budget) else {
+            // Not a timeout: the session is in trouble, and asking it a
+            // second question is not the remedy.
+            return Scrape::Failed;
+        };
+        let Some(body) = sub.block("rules") else {
+            return if sub.outcome == Outcome::StillRunning {
+                Scrape::TimedOut
+            } else {
+                Scrape::Failed
+            };
+        };
         let keys = ["rname", "rrunes", "rclass", "rmeas", "rformals", "rguard",
                     "rthm", "rconst", "rmargs", "rrel", "rinfo"];
         let pairs = keyed_block(body, &keys);
@@ -3735,6 +3782,7 @@ impl Book {
                 },
             );
         }
+        Scrape::Answered
     }
 
     /// What the world knows about a name this file introduced, from memory.
@@ -4055,7 +4103,45 @@ impl Book {
 /// `get-event-data`: pinned to an ACL2 version, confined to this module, and
 /// loud rather than silent if they move -- a probe that no longer evaluates
 /// fails its submission instead of quietly reporting less.
-fn rules_probe(names: &[String]) -> String {
+/// How a pass of the rules scrape ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scrape {
+    /// The block came back; whatever it held is in the store.
+    Answered,
+    /// The probe outran its budget and is still running in the session.
+    TimedOut,
+    /// Anything else -- a dead session, a malformed answer. Not worth a
+    /// second question.
+    Failed,
+}
+
+fn rules_probe(names: &[String], untranslated: bool) -> String {
+    // ACL2 stores terms translated: `(and x y)` is `(if x y 'nil)` and a
+    // `let` is a lambda application. `untranslate` puts back what was
+    // written. `t` where the term is read as a proposition -- a guard, a
+    // theorem -- since that licenses `(if x 't y)` becoming `(or x y)`,
+    // which is only iff-equivalent; `nil` for a measure, whose value is the
+    // point rather than its truth.
+    let (meas, guard, thm) = if untranslated {
+        (
+            "(acl2::untranslate (acl2::if acl2::jst \
+               (acl2::access acl2::justification acl2::jst :measure) :none) \
+               acl2::nil acl2::wrld)",
+            "(acl2::untranslate \
+               (acl2::getpropc acl2::nm 'acl2::guard :none acl2::wrld) \
+               acl2::t acl2::wrld)",
+            "(acl2::untranslate \
+               (acl2::getpropc acl2::nm 'acl2::theorem :none acl2::wrld) \
+               acl2::t acl2::wrld)",
+        )
+    } else {
+        (
+            "(acl2::if acl2::jst \
+               (acl2::access acl2::justification acl2::jst :measure) :none)",
+            "(acl2::getpropc acl2::nm 'acl2::guard :none acl2::wrld)",
+            "(acl2::getpropc acl2::nm 'acl2::theorem :none acl2::wrld)",
+        )
+    };
     // Every form ends `(value :invisible)`: `ld` prints each top-level form's
     // value otherwise, and a stray `NIL` landing inside the block would be
     // read as part of the structure it follows.
@@ -4075,9 +4161,7 @@ fn rules_probe(names: &[String]) -> String {
              (acl2::w2 (acl2::decode-logical-name acl2::nm acl2::wrld)))\n\
              (acl2::prog2$\n\
              (acl2::cw \"rmeas ~x0~%rrel ~x1~%\"\n\
-             (acl2::if acl2::jst \
-               (acl2::access acl2::justification acl2::jst :measure) \
-               :none)\n\
+             {meas}\n\
              (acl2::if acl2::jst \
                (acl2::access acl2::justification acl2::jst :rel) \
                :none))\n\
@@ -4088,8 +4172,8 @@ fn rules_probe(names: &[String]) -> String {
              (acl2::strip-cdrs acl2::rmp)\n\
              (acl2::getpropc acl2::nm 'acl2::symbol-class :none acl2::wrld)\n\
              (acl2::getpropc acl2::nm 'acl2::formals :none acl2::wrld)\n\
-             (acl2::getpropc acl2::nm 'acl2::guard :none acl2::wrld)\n\
-             (acl2::getpropc acl2::nm 'acl2::theorem :none acl2::wrld)\n\
+             {guard}\n\
+             {thm}\n\
              (acl2::getpropc acl2::nm 'acl2::const :none acl2::wrld)\n\
              (acl2::getpropc acl2::nm 'acl2::macro-args :none acl2::wrld)\n\
              (acl2::if acl2::w2\n\
@@ -4228,7 +4312,7 @@ mod tests {
             let p = super::detail_probe(name);
             assert_eq!(paren_balance(&p), 0, "unbalanced probe for {name}: {p}");
         }
-        let p = super::rules_probe(&names.map(String::from));
+        let p = super::rules_probe(&names.map(String::from), true);
         assert_eq!(paren_balance(&p), 0, "unbalanced rules probe: {p}");
     }
 
@@ -4240,7 +4324,7 @@ mod tests {
     #[test]
     fn no_probe_asks_fmt_for_a_two_digit_argument() {
         let names = ["append".to_string()];
-        for p in [super::detail_probe("append"), super::rules_probe(&names),
+        for p in [super::detail_probe("append"), super::rules_probe(&names, true),
                   super::CMD_PROBE.to_string(), super::DEPS_PROBE.to_string()] {
             let b = p.as_bytes();
             for i in 0..b.len().saturating_sub(3) {

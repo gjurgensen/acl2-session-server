@@ -1593,10 +1593,46 @@ fn skip_proofs_admits_without_proving_and_says_so() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A form's names are scraped as it is admitted, in full `:pr` detail.
+/// The world stores terms translated; what we keep is what was written.
 ///
-/// Eagerly, and that is the point: a session serialises on one ACL2, so a
-/// question asked during a proof cannot reach the prover -- which is exactly
+/// ACL2 holds `(and x y)` as `(if x y 'nil)` and a `let` as a lambda
+/// application, so a scrape that stored the property verbatim showed a reader
+/// an internal form nobody typed. The probe asks ACL2 to `untranslate` -- once,
+/// as the form is admitted, since the answer cannot go stale under a book that
+/// is not trying to make it.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_scrape_stores_what_was_written_not_what_the_world_holds() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("untranslate");
+    let file = dir.join("u.lisp");
+    write(&file, &["(in-package \"ACL2\")",
+                   "(defun ut-f (x y)\n  (declare (xargs :guard (and (natp x) (natp y))))\n  \
+                    (let ((z (+ x y))) (* z z)))",
+                   "(defthm ut-thm\n  (implies (and (natp x) (natp y))\n           \
+                    (equal (ut-f x y) (let ((z (+ x y))) (* z z)))))"]);
+    let mut b = Book::open(&acl2, &file).unwrap();
+    let o = b.sync(None, D).expect("sync");
+    assert!(o.failed.is_none(), "{:?}", o.failed.as_ref().map(|f| &f.error_line));
+
+    let f = b.rules_for("ut-f").expect("the function was scraped");
+    let guard = f.guard.as_deref().unwrap_or("");
+    assert!(guard.contains("(and "), "the guard keeps its `and`: {guard}");
+    assert!(!guard.contains("'nil"), "not the `if` it is stored as: {guard}");
+
+    let t = b.rules_for("ut-thm").expect("the theorem was scraped");
+    let stmt = t.statement.as_deref().unwrap_or("");
+    assert!(stmt.contains("(and "), "the statement keeps its `and`: {stmt}");
+    assert!(!stmt.contains("'nil"), "{stmt}");
+    // The lambda a `let` translates to is put back, and the macro aliases
+    // with it: nobody wrote `binary-+`.
+    assert!(stmt.contains("(let "), "the let is restored: {stmt}");
+    assert!(!stmt.contains("lambda"), "{stmt}");
+    assert!(!stmt.contains("binary-"), "macro aliases are undone: {stmt}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A form that outruns its deadline is scraped too.
 ///
 /// The scrape used to live only on the path where a unit finishes inside the
@@ -1652,6 +1688,10 @@ fn a_form_that_outran_its_deadline_is_scraped_when_it_lands() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A form's names are scraped as it is admitted, in full `:pr` detail.
+///
+/// Eagerly, and that is the point: a session serialises on one ACL2, so a
+/// question asked during a proof cannot reach the prover -- which is exactly
 /// when an editor wants to describe an earlier form. The scrape is taken
 /// while the form is in hand and served from memory afterwards.
 #[test]
