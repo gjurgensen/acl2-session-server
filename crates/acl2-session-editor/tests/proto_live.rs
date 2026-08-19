@@ -1161,3 +1161,54 @@ fn an_update_without_text_reads_the_file_bytes() {
 
     d.request("close", json!({ "book": book }));
 }
+
+/// The `open` reply says when the server had to re-enable PROVE output.
+///
+/// The environment -- an `acl2-customization.lsp` that inhibits `prove`,
+/// usually -- turns it off, and the server turns it back on so proofs can be
+/// captured. The client shows a one-time notice, so the fact has to reach it;
+/// it rides on the `open` reply, present only when an override happened.
+///
+/// Both cases are pinned with a book-directory customization, so the outcome
+/// does not depend on whatever the machine's home `acl2-customization.lsp`
+/// does: one book's directory inhibits PROVE, the other clears it.
+#[test]
+#[ignore = "needs ACL2"]
+fn open_reports_when_prove_output_was_re_enabled() {
+    let Some(acl2) = acl2() else {
+        eprintln!("ACL2 not set; skipping");
+        return;
+    };
+    let root = std::env::temp_dir().join(format!("acl2-editord-inhibit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+
+    // A book-dir customization is found before the home one and suppresses it,
+    // so each of these directories decides its own PROVE inhibition.
+    let book = "(in-package \"ACL2\")\n\n\
+                (defun f (x) (if (consp x) (f (cdr x)) nil))\n";
+    let inhibiting = root.join("inhibits");
+    std::fs::create_dir_all(&inhibiting).expect("dir");
+    std::fs::write(inhibiting.join("acl2-customization.lsp"),
+        "(in-package \"ACL2\")\n(set-inhibit-output-lst '(prove proof-tree))\n").unwrap();
+    std::fs::write(inhibiting.join("b.lisp"), book).unwrap();
+
+    let clearing = root.join("clears");
+    std::fs::create_dir_all(&clearing).expect("dir");
+    std::fs::write(clearing.join("acl2-customization.lsp"),
+        "(in-package \"ACL2\")\n(set-inhibit-output-lst nil)\n").unwrap();
+    std::fs::write(clearing.join("b.lisp"), book).unwrap();
+
+    let mut d = Daemon::start(&acl2);
+
+    let on = d.request("open", json!({ "path": inhibiting.join("b.lisp").to_str().unwrap() }));
+    // ACL2 prints symbols uppercase, so the inherited list reads `(PROVE ...)`.
+    let field = on["prove_output_overridden"].as_str();
+    assert!(field.is_some_and(|s| s.to_ascii_lowercase().contains("prove")),
+            "an inhibiting environment is reported, with what it inherited: {on}");
+    d.request("close", json!({ "book": on["book"].as_str().unwrap() }));
+
+    let off = d.request("open", json!({ "path": clearing.join("b.lisp").to_str().unwrap() }));
+    assert!(off["prove_output_overridden"].is_null(),
+            "an environment that did not inhibit PROVE carries no notice: {off}");
+    d.request("close", json!({ "book": off["book"].as_str().unwrap() }));
+}

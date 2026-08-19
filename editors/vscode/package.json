@@ -215,6 +215,11 @@
           "default": "acl2-session-editor",
           "description": "Path to the acl2-session-editor binary."
         },
+        "acl2-session.warnOnProveOutputOverride": {
+          "type": "boolean",
+          "default": true,
+          "description": "Warn once when the server re-enables PROVE output because your ACL2 environment (e.g. acl2-customization.lsp) inhibits it. The override is needed to capture proofs and does not change what your file admits; turn this off to stop the notice. The output channel logs it regardless."
+        },
         "acl2-session.defaultImage": {
           "type": "string",
           "default": "",

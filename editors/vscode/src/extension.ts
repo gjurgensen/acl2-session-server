@@ -1064,6 +1064,7 @@ async function startCommand(): Promise<void> {
     status.show();
     status.text = '$(sync~spin) ACL2: starting';
     channel.appendLine(`opened ${doc.fileName} as ${s.id} under ${r.image}`);
+    void noteProveOverride(r.prove_output_overridden as string | undefined);
     sendUpdate(s);
     refreshContext();
     // Starting and opening the panel are one action, because there is no
@@ -1074,6 +1075,54 @@ async function startCommand(): Promise<void> {
     void followPanel(s);
   } catch (e) {
     report(e);
+  }
+}
+
+// Shown at most once per window, so opening several books does not stack up
+// several identical toasts before the reader gets to dismiss one. A window
+// reload shows it again; "Don't show again" silences it for good. The channel
+// note below is not gated by this -- the log keeps a line per book.
+let proveOverrideNoticed = false;
+
+/**
+ * Tell the user, once, that the server re-enabled PROVE output.
+ *
+ * Their environment -- an `acl2-customization.lsp` that inhibits `prove`,
+ * usually -- turned it off, and we turn it back on so proofs can be captured:
+ * checkpoints, the induction narrative and per-goal output all vanish without
+ * it. This changes nothing about what the file admits, and no flood reaches a
+ * terminal, so it is a notice rather than a problem -- logged always, shown
+ * once, and silenceable for good. `inherited` is the `inhibit-output-lst` we
+ * found, or undefined when nothing was overridden, in which case we say
+ * nothing at all.
+ */
+async function noteProveOverride(inherited: string | undefined): Promise<void> {
+  if (!inherited) {
+    return;
+  }
+  channel.appendLine(
+    `  note: this environment inhibits PROVE output (inherited inhibit-output-lst ` +
+    `${inherited}); re-enabled it so proofs can be captured. The file admits identically.`
+  );
+  const cfg = vscode.workspace.getConfiguration('acl2-session');
+  if (proveOverrideNoticed || !cfg.get<boolean>('warnOnProveOutputOverride', true)) {
+    return;
+  }
+  proveOverrideNoticed = true;
+  const why = 'Why?';
+  const hush = "Don't show again";
+  const choice = await vscode.window.showWarningMessage(
+    `ACL2 re-enabled PROVE output to capture proofs — your environment inhibits it ` +
+    `(${inherited}). The file admits identically; only what the session captures differs.`,
+    why,
+    hush
+  );
+  if (choice === hush) {
+    // Writes the same setting a user could edit by hand: one source of truth,
+    // reversible, and it travels with Settings Sync.
+    await cfg.update('warnOnProveOutputOverride', false, vscode.ConfigurationTarget.Global);
+  } else if (choice === why) {
+    channel.show();
   }
 }
 

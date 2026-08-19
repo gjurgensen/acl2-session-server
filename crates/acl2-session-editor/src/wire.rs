@@ -69,6 +69,14 @@ pub struct OpenParams {
 pub struct OpenReply {
     pub book: String,
     pub image: String,
+    /// The server re-enabled PROVE output so proofs could be captured, because
+    /// this environment (the user's `acl2-customization.lsp`, usually) inhibits
+    /// it. Holds the inherited `inhibit-output-lst` when that happened, and is
+    /// absent otherwise -- so the client both learns *that* it happened and can
+    /// show *what* was inherited. Mirrors the MCP server's field of the same
+    /// name; the editor tells a human, so the client decides whether to say so.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prove_output_overridden: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -368,6 +368,12 @@ impl Daemon {
         // The editor renders rather than pays per token: complete per-event
         // detail on compound units, not the agent-facing default slots.
         book.set_inner_detail(usize::MAX);
+        // Read before `book` is moved into the registry: the client shows a
+        // one-time notice when the environment inhibited PROVE and we turned
+        // it back on to capture proofs.
+        let overridden = book
+            .prove_output_overridden()
+            .then(|| book.inherited_inhibit_output().unwrap_or("?").to_string());
         let control = book.control();
         let outputs = book.output_store();
         let (id, shared) = {
@@ -387,6 +393,7 @@ impl Daemon {
         Ok(serde_json::to_value(wire::OpenReply {
             book: id.to_string(),
             image: acl2.display().to_string(),
+            prove_output_overridden: overridden,
         })
         .expect("serialize"))
     }
