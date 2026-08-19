@@ -1828,7 +1828,39 @@ function setLayout(cols: number): void {
   const shown = panel.shown();
   const s = shown && byId.get(shown.book);
   if (s && shown) {
-    void followPanel(s, shown.index);
+    void reflowCheckpoints(s, shown.index).then(() => followPanel(s, shown.index));
+  }
+}
+
+/**
+ * Re-flow the checkpoints of the form on show.
+ *
+ * Everything else the panel renders can be asked for again, so a width change
+ * just drops the caches. Checkpoints cannot: they ride on `unit` events, which
+ * are pushed when a form lands and never sent a second time. So the client
+ * sends back the text it already has and the daemon lays it out again -- which
+ * works because laying out is idempotent across widths, the reader having
+ * discarded the whitespace before it ever sees the layout.
+ *
+ * Best effort and in place: on any trouble the panel keeps the wrapping it
+ * had, which is the same thing it would have shown anyway.
+ */
+async function reflowCheckpoints(s: BookSession, index: number): Promise<void> {
+  const e = s.unitEvents.get(index);
+  const terms = (e?.checkpoints ?? []).map((c) => c.term);
+  if (!e || !terms.length) {
+    return;
+  }
+  try {
+    const r = await client?.request('reflow', { terms });
+    const laid = (r?.terms as string[] | undefined) ?? [];
+    // Positional, so a reply that lost or gained one is not usable.
+    if (laid.length !== terms.length) {
+      return;
+    }
+    e.checkpoints = (e.checkpoints ?? []).map((c, i) => ({ ...c, term: laid[i] }));
+  } catch (err) {
+    channel.appendLine(`reflow: form ${index} kept its old wrapping (${err})`);
   }
 }
 

@@ -225,6 +225,7 @@ impl Daemon {
             }
             "output" => now(self.output(args(params)?)),
             "induction" => now(self.induction(args(params)?)),
+            "reflow" => now(self.reflow(args(params)?)),
             "status" => {
                 let p: wire::BookParams = args(params)?;
                 now(self.status(&p.book))
@@ -414,6 +415,23 @@ impl Daemon {
         }
         let closed = self.registry.lock().expect("registry lock").close(&SessionId::from(book));
         Ok(json!({ "closed": closed && had }))
+    }
+
+    /// Lay terms out again, for a pane that changed width.
+    ///
+    /// No book and no session: laying out is a function of the text and the
+    /// width, and the client is sending text it already has. This exists
+    /// because terms ride on *pushed* events as well as on replies -- a
+    /// checkpoint arrives when a form lands and is never sent again -- so
+    /// after a drag the client holds text laid out for the old width with
+    /// nothing to ask for a new copy of.
+    ///
+    /// Sound because laying out is idempotent across widths: laying out
+    /// already-laid-out text gives what laying out the original would have,
+    /// since the reader discards whitespace. `acl2_session::pretty` holds a
+    /// test to that, because this depends on it.
+    fn reflow(&self, p: wire::ReflowParams) -> Result<Value, String> {
+        Ok(serde_json::to_value(wire::reflow(&p.terms)).expect("serialize"))
     }
 
     /// Served from the outputs handle, like `output` and for the same reason:

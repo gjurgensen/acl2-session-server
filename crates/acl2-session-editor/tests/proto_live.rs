@@ -245,6 +245,59 @@ fn terms_arrive_laid_out_for_the_width_the_client_asked_for() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A term already sent can be laid out again at a new width.
+///
+/// The gap `reflow` fills: checkpoints ride on `unit` events, which are pushed
+/// once and never re-sent, so after a pane drag the client holds text laid out
+/// for the width that is gone. It sends that text back rather than the
+/// original, which it no longer has -- and that works because laying out is
+/// idempotent across widths.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_term_can_be_laid_out_again_at_a_new_width() {
+    let Some(acl2) = acl2() else {
+        eprintln!("ACL2 not set; skipping");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("acl2-editord-rfl-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let book_path: PathBuf = dir.join("rfl.lisp");
+    let text = "(in-package \"ACL2\")\n\n\
+                (defun rfl-alpha (x) (if (consp x) (rfl-alpha (cdr x)) nil))\n\n\
+                (defthm rfl-bad\n  (implies (and (true-listp xxxxxxxxxx) (consp yyyyyyyyyy))\n\
+                \x20          (equal (rfl-alpha xxxxxxxxxx) (cons yyyyyyyyyy xxxxxxxxxx))))\n";
+    std::fs::write(&book_path, text).expect("write book");
+
+    let mut d = Daemon::start(&acl2);
+    let opened = d.request("open", json!({ "path": book_path.to_str().unwrap() }));
+    let book = opened["book"].as_str().expect("book id").to_string();
+
+    // A form lands at one width; the pane then becomes another.
+    d.notify("layout", json!({ "cols": 30 }));
+    d.notify("update", json!({ "book": book, "text": text, "revision": 1 }));
+    let events = d.events_until_settled();
+    let narrow = checkpoint_of(&events).expect("the failed form has a checkpoint");
+    assert!(narrow.lines().count() > 1, "{narrow}");
+
+    d.notify("layout", json!({ "cols": 200 }));
+    let r = d.request("reflow", json!({ "terms": [narrow.clone()] }));
+    let wide = r["terms"][0].as_str().expect("one term back").to_string();
+
+    assert!(wide.lines().count() < narrow.lines().count(), "wide:\n{wide}\nnarrow:\n{narrow}");
+    let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert_eq!(flat(&wide), flat(&narrow), "re-flowing must not change the term");
+
+    // And back again: the width is the only thing that decides the answer, so
+    // the original width gives the original text.
+    d.notify("layout", json!({ "cols": 30 }));
+    let back = d.request("reflow", json!({ "terms": [wide] }));
+    assert_eq!(back["terms"][0].as_str(), Some(narrow.as_str()));
+
+    d.request("close", json!({ "book": book }));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The first checkpoint term of the first failed unit in an event stream.
 fn checkpoint_of(events: &[(String, Value)]) -> Option<String> {
     events

@@ -58,6 +58,23 @@ pub struct LayoutParams {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ReflowParams {
+    /// Terms to lay out again, exactly as the client already holds them.
+    pub terms: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReflowReply {
+    /// One per term sent, in the same order.
+    pub terms: Vec<String>,
+}
+
+/// Lay terms out again at the width the client last reported.
+pub fn reflow(terms: &[String]) -> ReflowReply {
+    ReflowReply { terms: terms.iter().map(|t| laid(t)).collect() }
+}
+
+#[derive(Debug, Deserialize)]
 pub struct OpenParams {
     pub path: String,
     pub image: Option<String>,
