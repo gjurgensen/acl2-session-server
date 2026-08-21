@@ -7,8 +7,21 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use serde_json::{json, Value};
 
+/// The ACL2 to drive, or `None` to skip. See `acl2-session/tests/live.rs`
+/// for which version these suites expect.
 fn acl2() -> Option<String> {
     std::env::var("ACL2").ok()
+}
+
+/// Read a file of ACL2 source, for the tests that check where a jump landed.
+///
+/// Never `read_to_string`. ACL2 source is ISO-8859-1: `axioms.lisp` credits
+/// a `Mart\u{ed}n` whose byte is not valid UTF-8, and a `read_to_string`
+/// fails on the whole file for it -- so a test that reads one is asserting
+/// about the encoding as much as about the jump. `split::decode` is the
+/// decoder the daemon reads these same files with.
+fn acl2_source(path: &str) -> String {
+    acl2_session::split::decode(&std::fs::read(path).unwrap_or_else(|e| panic!("read {path}: {e}")))
 }
 
 struct Daemon {
@@ -403,7 +416,7 @@ fn definition_crosses_into_an_included_book() {
     assert!(path.ends_with("bstar.lisp"), "into bstar, got {path}");
     assert!(std::path::Path::new(path).is_file(), "which exists: {path}");
     let line = m["line"].as_u64().expect("and a line") as usize;
-    let src = std::fs::read_to_string(path).expect("read bstar");
+    let src = acl2_source(path);
     let at = src.lines().nth(line - 1).expect("that line exists");
     assert!(
         at.contains("b*"),
@@ -463,9 +476,7 @@ fn definition_crosses_into_an_included_book() {
     let bap = ba["path"].as_str().expect("a path into the checkout");
     assert!(bap.ends_with("axioms.lisp"), "into axioms.lisp, got {bap}");
     let bal = ba["line"].as_u64().expect("and a line") as usize;
-    // Not `read_to_string`: axioms.lisp is ISO-8859-1, like all ACL2 source,
-    // and carries a `Mart\u{ed}n` in its credits that is not valid UTF-8.
-    let bsrc = acl2_session::split::decode(&std::fs::read(bap).expect("read axioms"));
+    let bsrc = acl2_source(bap);
     assert!(
         bsrc.lines().nth(bal - 1).is_some_and(|l| l.contains("binary-append")),
         "line {bal} of axioms.lisp should define binary-append"
@@ -480,7 +491,7 @@ fn definition_crosses_into_an_included_book() {
     assert_eq!(prim["found"], true, "the *1* form is what a primitive has: {prim}");
     let pp = prim["path"].as_str().expect("a path");
     let pl = prim["line"].as_u64().expect("a line") as usize;
-    let psrc = std::fs::read_to_string(pp).expect("read source");
+    let psrc = acl2_source(pp);
     assert!(
         psrc.lines().nth(pl - 1).is_some_and(|l| l.contains("symbolp")),
         "line {pl} of {pp} should mention symbolp"
@@ -564,7 +575,7 @@ fn definition_crosses_into_an_included_book() {
     let gl = g["line"].as_u64().expect("with a line, now that the census is up") as usize;
     let how = g["how"].as_str().unwrap_or("");
     assert!(how == "decomposed" || how == "anchored", "and says how it got there: {g}");
-    let gsrc = std::fs::read_to_string(gp).expect("read bstar");
+    let gsrc = acl2_source(gp);
     let at = gsrc.lines().nth(gl - 1).expect("that line exists");
     assert!(
         at.contains("unless-casematch"),

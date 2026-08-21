@@ -36,7 +36,9 @@ fn main() {
         eprintln!("usage: ppr-diff <corpus> <width>");
         std::process::exit(2);
     };
-    let corpus = std::fs::read_to_string(path).expect("corpus");
+    // Bytes, not a `String`: a corpus cut from real books carries whatever
+    // bytes those books do, and ACL2 source is ISO-8859-1.
+    let corpus = acl2_session::split::decode(&std::fs::read(path).expect("corpus"));
     let width: usize = width.parse().expect("width");
     for line in corpus.lines().filter(|l| !l.trim().is_empty()) {
         println!("<<<TERM>>>");

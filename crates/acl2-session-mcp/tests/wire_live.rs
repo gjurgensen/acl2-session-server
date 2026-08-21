@@ -25,6 +25,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+/// The ACL2 to drive, or `None` to skip. See `acl2-session/tests/live.rs`
+/// for which version these suites expect.
 fn acl2() -> Option<PathBuf> {
     std::env::var("ACL2").ok().map(PathBuf::from)
 }

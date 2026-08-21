@@ -25,6 +25,25 @@ use acl2_session::{SyncOptions,
 };
 
 /// The ACL2 to drive, or `None` to skip.
+///
+/// **Expects ACL2 8.7 or later.** An older image does not say so: it fails a
+/// handful of tests for no visible reason. With several ACL2 builds to hand,
+/// check which one `ACL2` names before reading anything into a failure.
+///
+/// The dependency is one symbol. `rules_probe` asks for
+/// `world-to-next-non-deeper-event`, which ACL2 8.7 introduced and moved
+/// `:pr` onto (from `world-to-next-event`) to fix runes introduced by
+/// `defstobj`. Below 8.7 the name does not translate, and because the probe
+/// is one form, that takes the whole scrape down silently -- see
+/// `rules_probe` for why nothing says so.
+///
+/// Measured rather than assumed: on 8.6 this suite fails exactly three
+/// tests, the three that read `Book::rules_for`, and the other 46 pass. So
+/// as of this writing the *whole* project's version floor is that one
+/// symbol -- `get-event-data`, `gag-state`, the `justification` accessors,
+/// `ubu!` and the rest of the probes are all older than 8.6. That is a
+/// measurement of today's probes, not a policy: nothing enforces it, and a
+/// probe added tomorrow can raise the floor without anything noticing.
 fn acl2() -> Option<PathBuf> {
     std::env::var("ACL2").ok().map(PathBuf::from)
 }
