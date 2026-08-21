@@ -2454,3 +2454,40 @@ fn two_forms_on_one_line_are_selected_by_column() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A failing certification explains itself even when the log is Latin-1.
+///
+/// `.cert.out` is ACL2's own output, and ACL2 echoes the source's bytes: a
+/// book that prints an ISO-8859-1 character makes the whole log invalid
+/// UTF-8. Reading it as a `String` failed on the file, and the failure was
+/// silent in the worst way -- the certification was still reported as
+/// failed, with its error message replaced by nothing at all.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_failed_certification_reports_its_error_from_a_latin1_log() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("certify-latin1");
+    let book = dir.join("bad.lisp");
+    let mut src: Vec<u8> = Vec::new();
+    src.extend_from_slice(b"(in-package \"ACL2\")\n(defconst *who* \"Mart\xedn\")\n");
+    // Printed, so the byte reaches the log rather than only the source.
+    src.extend_from_slice(
+        b"(make-event (prog2$ (cw \"MARK ~s0 MARK~%\" *who*) '(value-triple :ok)))\n",
+    );
+    src.extend_from_slice(b"(defthm cl-nope (equal (cons *who* x) x))\n");
+    std::fs::write(&book, &src).expect("write book");
+
+    let mut b = Book::open(&acl2, &book).unwrap();
+    let r = b.certify(Duration::from_secs(300), 2).unwrap();
+    assert_eq!(r.status, acl2_session::cert::CertStatus::Failed, "the theorem is false");
+
+    // The premise: this really is a log no `read_to_string` could read.
+    let log = std::fs::read(book.with_extension("cert.out")).expect("cert.out");
+    assert!(std::str::from_utf8(&log).is_err(), "the log must be the awkward case");
+
+    let msg = r.error_line.as_deref().unwrap_or("");
+    assert!(msg.contains("ACL2 Error"), "the failure still says why: {:?}", r.error_line);
+    assert!(msg.to_ascii_lowercase().contains("cl-nope"), "and names the event: {msg}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

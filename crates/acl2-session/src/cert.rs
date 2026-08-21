@@ -233,9 +233,15 @@ pub fn blamed_books(log: &str) -> Vec<PathBuf> {
 ///
 /// Each book certified gets its own `.cert.out`, so a dependency's failure is
 /// readable even though no session was ever open on it.
+/// Read as bytes, not as a `String`: this file is ACL2's own output, and
+/// ACL2 echoes the source's bytes back. A book carrying an ISO-8859-1
+/// character anywhere ACL2 prints -- a `defconst` string, a doc topic, a
+/// `cw` -- makes the log invalid UTF-8, and `read_to_string` then fails on
+/// the whole file. The cost was silent and exact: the certification failure
+/// was still reported, with its error message replaced by nothing.
 pub fn cert_out_error(book: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(cert_out_path(book)).ok()?;
-    crate::sync::error_message(&text)
+    let bytes = std::fs::read(cert_out_path(book)).ok()?;
+    crate::sync::error_message(&crate::split::decode(&bytes))
 }
 
 /// `foo.lisp` -> `foo.cert.out`.
