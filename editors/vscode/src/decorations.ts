@@ -12,12 +12,21 @@
 // `wash` draws whole-form background washes, reds included, and no
 // diagnostics (the extension suppresses them in this mode).
 //
+// Both renderers are line-granular by nature -- one gutter cell per line, and
+// a wash that reaches the viewport edge -- so a line holding two forms needs
+// each of them to say something it cannot say by default. The wash paints
+// that line to its columns instead, changing colour where the forms do; the
+// gutter keeps its cell for the form that owns the start of the line and
+// draws the second form's bar between the two, at the column it begins in.
+// `paintmap.ts` decides all of that; this module only draws it.
+//
 // Both fill the scrollbar through the overview ruler's left lane; diagnostics
 // mark the right lane on their own.
 
 import * as vscode from 'vscode';
 import { UnitState } from './protocol';
 import { charOffset } from './positions';
+import { paintMap, Span } from './paintmap';
 
 export type DecorationMode = 'minimal' | 'wash';
 
@@ -34,6 +43,39 @@ const WASH_COLORS: Record<string, { light: string; dark: string }> = {
   failed: { light: '#ffb3b3', dark: '#3d1e19' },
   running: { light: '#fff59d', dark: '#1a2841' },
 };
+
+/**
+ * The gutter bars' own colours, for drawing one as text.
+ *
+ * Taken from `media/<icon>-{light,dark}.svg`, which are a single filled
+ * rectangle each: a form that cannot have a gutter cell gets the same bar
+ * inline, so the two readings match rather than merely coexist.
+ */
+const BAR_COLORS: Record<string, { light: string; dark: string }> = {
+  pending: { light: 'rgba(97, 97, 97, 0.4)', dark: 'rgba(204, 204, 204, 0.35)' },
+  running: { light: 'rgba(21, 101, 192, 0.85)', dark: 'rgba(106, 159, 221, 0.85)' },
+  admitted: { light: 'rgba(46, 125, 50, 0.55)', dark: 'rgba(142, 192, 124, 0.5)' },
+  cond: { light: 'rgba(212, 172, 13, 0.75)', dark: 'rgba(255, 214, 51, 0.7)' },
+  red: { light: 'rgba(198, 40, 40, 0.7)', dark: 'rgba(251, 73, 52, 0.65)' },
+};
+
+/**
+ * The gutter bar, drawn between two forms that share a line.
+ *
+ * A left border rather than a glyph: it is the same shape as the gutter's
+ * rectangle, it takes no width from the text, and it sits exactly at the
+ * column where the second form starts -- so the line reads as two forms with
+ * a status each, which is what it is.
+ */
+function inlineBarType(status: string): vscode.TextEditorDecorationType {
+  const c = BAR_COLORS[status];
+  return vscode.window.createTextEditorDecorationType({
+    light: { borderColor: c.light },
+    dark: { borderColor: c.dark },
+    borderStyle: 'solid',
+    borderWidth: '0 0 0 3px',
+  });
+}
 
 function gutterType(
   context: vscode.ExtensionContext,
@@ -57,6 +99,10 @@ function gutterType(
 
 export class Decorations {
   private washes = new Map<string, vscode.TextEditorDecorationType>();
+  /** The same washes, bounded by column: for a line two forms share. */
+  private washParts = new Map<string, vscode.TextEditorDecorationType>();
+  /** The gutter bar as an inline mark, for a form with no gutter cell. */
+  private inlineBars = new Map<string, vscode.TextEditorDecorationType>();
   private pendingBar: vscode.TextEditorDecorationType;
   private runningBar: vscode.TextEditorDecorationType;
   private admittedBar: vscode.TextEditorDecorationType;
@@ -75,17 +121,26 @@ export class Decorations {
             : status === 'running'
               ? 'rgba(255, 204, 51, 0.6)'
               : undefined;
+      const paint = {
+        ...(ruler
+          ? { overviewRulerLane: vscode.OverviewRulerLane.Left, overviewRulerColor: ruler }
+          : {}),
+        light: { backgroundColor: c.light },
+        dark: { backgroundColor: c.dark },
+      };
+      // Two types, one colour. Whole-line is the look this mode is for --
+      // the wash reaching the edge of the viewport is what makes a form read
+      // as a block. It is also the one thing that cannot express a line
+      // holding two forms, so that line, and only that line, is painted to
+      // its columns instead and the colour changes where the forms do.
       this.washes.set(
         status,
-        vscode.window.createTextEditorDecorationType({
-          isWholeLine: true,
-          ...(ruler
-            ? { overviewRulerLane: vscode.OverviewRulerLane.Left, overviewRulerColor: ruler }
-            : {}),
-          light: { backgroundColor: c.light },
-          dark: { backgroundColor: c.dark },
-        })
+        vscode.window.createTextEditorDecorationType({ isWholeLine: true, ...paint })
       );
+      this.washParts.set(status, vscode.window.createTextEditorDecorationType(paint));
+    }
+    for (const status of Object.keys(BAR_COLORS)) {
+      this.inlineBars.set(status, inlineBarType(status));
     }
     // The bars: pending neutral gray, running BLUE (true blue, hue 262),
     // admitted green, conditional YELLOW, red for the reds.
@@ -136,47 +191,99 @@ export class Decorations {
   }
 
   apply(editor: vscode.TextEditor, units: UnitState[], opts: DecorationOptions): void {
-    // Whole lines, columns and all: a gutter has one cell per line and a wash
-    // is `isWholeLine`, so neither can show two statuses on one line however
-    // exactly the forms are located. Two forms on a line therefore paint over
-    // each other -- rare, and the panel and the target glyph, which *can* be
-    // exact, are where that line's forms are told apart.
-    const span = (u: UnitState) => new vscode.Range(u.line_start - 1, 0, u.line_end - 1, 0);
-    const of = (status: string) => units.filter((u) => u.status === status);
+    const doc = editor.document;
+    // Where each form's paint goes, decided in `paintmap.ts` -- which form
+    // owns which gutter cell, and which lines have to be painted to their
+    // columns because two forms share them.
+    const painted = paintMap(units);
+
+    const range = (sp: Span): vscode.Range => {
+      if (sp.kind === 'lines') {
+        return new vscode.Range(sp.from - 1, 0, sp.to - 1, 0);
+      }
+      const line = Math.min(Math.max(sp.line, 1), doc.lineCount) - 1;
+      const text = doc.lineAt(line).text;
+      const from = charOffset(text, sp.col);
+      const to = sp.endCol === null ? text.length : charOffset(text, sp.endCol);
+      return new vscode.Range(line, from, line, Math.max(from, to));
+    };
+    const at = (p: { line: number; col: number }): vscode.Range => {
+      const line = Math.min(Math.max(p.line, 1), doc.lineCount) - 1;
+      const c = charOffset(doc.lineAt(line).text, p.col);
+      return new vscode.Range(line, c, line, c);
+    };
 
     const washRanges = new Map<string, vscode.Range[]>();
-    for (const s of this.washes.keys()) {
-      washRanges.set(s, []);
+    const partRanges = new Map<string, vscode.Range[]>();
+    for (const st of this.washes.keys()) {
+      washRanges.set(st, []);
+      partRanges.set(st, []);
     }
-    let pending: vscode.Range[] = [];
-    let running: vscode.Range[] = [];
-    let admitted: vscode.Range[] = [];
-    let cond: vscode.Range[] = [];
-    let red: vscode.Range[] = [];
+    const bars = new Map<string, vscode.Range[]>();
+    const inline = new Map<string, vscode.Range[]>();
+    for (const st of this.inlineBars.keys()) {
+      bars.set(st, []);
+      inline.set(st, []);
+    }
 
-    if (opts.mode === 'wash') {
-      for (const u of units) {
-        washRanges.get(u.status)?.push(span(u));
+    // Which bar a status wears, and whether it wears one at all.
+    const barOf = (status: string): string | undefined => {
+      switch (status) {
+        case 'pending':
+          return 'pending';
+        case 'running':
+          return 'running';
+        case 'admitted':
+          return opts.gutterAdmitted ? 'admitted' : undefined;
+        case 'conditional':
+          return opts.gutterAdmitted ? 'cond' : undefined;
+        case 'skipped':
+        case 'failed':
+          return 'red';
+        default:
+          return undefined;
       }
-    } else {
-      pending = of('pending').map(span);
-      running = of('running').map(span);
-      if (opts.gutterAdmitted) {
-        admitted = of('admitted').map(span);
-        cond = of('conditional').map(span);
+    };
+
+    for (const p of painted) {
+      if (opts.mode === 'wash') {
+        for (const sp of p.spans) {
+          const into = sp.kind === 'lines' ? washRanges : partRanges;
+          into.get(p.status)?.push(range(sp));
+        }
+        continue;
       }
-      red = [...of('skipped'), ...of('failed')].map(span);
+      const bar = barOf(p.status);
+      if (bar === undefined) {
+        continue;
+      }
+      if (p.gutter) {
+        bars.get(bar)?.push(new vscode.Range(p.gutter.from - 1, 0, p.gutter.to - 1, 0));
+      }
+      // No gutter cell of its own: the bar goes between the two forms, at
+      // the column this one starts in. A form that has both -- it opens on
+      // a line it does not own and runs on past it -- gets both, which is
+      // right: the mark says where it starts, the cells say how far it runs.
+      if (p.inlineAt) {
+        inline.get(bar)?.push(at(p.inlineAt));
+      }
     }
 
     // Every type is always set, so switching modes cleans up after itself.
     for (const [status, t] of this.washes) {
       editor.setDecorations(t, washRanges.get(status) ?? []);
     }
-    editor.setDecorations(this.pendingBar, pending);
-    editor.setDecorations(this.runningBar, running);
-    editor.setDecorations(this.admittedBar, admitted);
-    editor.setDecorations(this.condBar, cond);
-    editor.setDecorations(this.redBar, red);
+    for (const [status, t] of this.washParts) {
+      editor.setDecorations(t, partRanges.get(status) ?? []);
+    }
+    editor.setDecorations(this.pendingBar, bars.get('pending') ?? []);
+    editor.setDecorations(this.runningBar, bars.get('running') ?? []);
+    editor.setDecorations(this.admittedBar, bars.get('admitted') ?? []);
+    editor.setDecorations(this.condBar, bars.get('cond') ?? []);
+    editor.setDecorations(this.redBar, bars.get('red') ?? []);
+    for (const [status, t] of this.inlineBars) {
+      editor.setDecorations(t, inline.get(status) ?? []);
+    }
   }
 
   /**
@@ -206,27 +313,24 @@ export class Decorations {
   }
 
   clear(editor: vscode.TextEditor): void {
-    for (const t of this.washes.values()) {
-      editor.setDecorations(t, []);
-    }
-    for (const t of this.bars()) {
+    for (const t of this.everyType()) {
       editor.setDecorations(t, []);
     }
     editor.setDecorations(this.unreadable, []);
   }
 
   dispose(): void {
-    for (const t of this.washes.values()) {
-      t.dispose();
-    }
-    for (const t of this.bars()) {
+    for (const t of this.everyType()) {
       t.dispose();
     }
     this.unreadable.dispose();
   }
 
-  private bars(): vscode.TextEditorDecorationType[] {
+  private everyType(): vscode.TextEditorDecorationType[] {
     return [
+      ...this.washes.values(),
+      ...this.washParts.values(),
+      ...this.inlineBars.values(),
       this.pendingBar,
       this.runningBar,
       this.admittedBar,

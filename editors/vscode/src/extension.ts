@@ -1260,7 +1260,21 @@ function sendUpdate(s: BookSession): void {
     book: s.id,
     text: fromFile ? undefined : s.doc.getText(),
     target_line: s.target?.line ?? null,
-    target_column: s.target?.column ?? null,
+    // The column only means anything if the daemon is splitting the same
+    // bytes this column was measured against.
+    //
+    // Normally it is, by construction: the text sent above *is* the buffer,
+    // the daemon splits its UTF-8 encoding, and `byteColumn` measures the
+    // UTF-8 encoding of the same buffer. That holds whatever the file's own
+    // encoding is, because the file is not what either side is reading.
+    //
+    // `fromFile` is the case where it does not hold -- the buffer could not
+    // carry the file's bytes, so the daemon reads the file instead, and its
+    // columns are offsets into bytes this buffer no longer has. Sending one
+    // then would point at the wrong place in the wrong units. Lines survive
+    // that, since a newline is a newline in any encoding, so the target
+    // falls back to naming a whole line: less precise, and not wrong.
+    target_column: fromFile ? null : (s.target?.column ?? null),
     // The document's own monotone version is exactly the revision the
     // protocol wants stamped back on events.
     revision: s.doc.version,

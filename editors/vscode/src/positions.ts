@@ -10,9 +10,21 @@
 // string literal or a comment holds anything above U+007F.
 //
 // Kept free of `vscode`, like `protocol.ts`, so both sides of the conversion
-// are testable without an editor. The encoding is UTF-8 because that is what
-// the extension sends: `sendUpdate` encodes the buffer that way, and
-// `bufferCarriesFile` compares it to the file that way.
+// are testable without an editor.
+//
+// The encoding is UTF-8, and the reason it is *safe* to fix it here is worth
+// stating, because ACL2's own model is ISO-8859-1 and the file on disk may
+// well be. The file is not what either side of this conversion is reading.
+// `sendUpdate` sends the buffer, the daemon splits the UTF-8 encoding of
+// that same buffer, and this measures the UTF-8 encoding of that same
+// buffer again -- so the two agree by construction, for any file encoding at
+// all, including one VSCode decoded wrongly. What matters is only that both
+// sides are looking at the same string, and they are.
+//
+// The exception is the case `bufferCarriesFile` exists to find: a file whose
+// bytes the buffer *cannot* carry, where the extension sends no text and the
+// daemon reads the file itself. Then the two sides are looking at different
+// bytes, and `sendUpdate` sends no column at all rather than a wrong one.
 
 /**
  * The 1-based byte column of a character offset within one line's text.
