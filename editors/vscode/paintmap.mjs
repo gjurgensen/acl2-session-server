@@ -119,5 +119,33 @@ const unit = (index, line_start, col_start, line_end, col_end, status = 'admitte
 
 check('an empty book paints nothing', paintMap([]), []);
 
+// The inline bar is a coloured rectangle and the gutter bar is an SVG, so the
+// colour exists twice: once as a value in `bars.ts` and once as a fill in
+// `media/`. Nothing in the type system connects them, and an earlier version
+// of this feature drifted apart exactly here -- a hand-copied table that
+// could not notice if the files moved. So compare them.
+{
+  const { BARS } = require('./out/bars.js');
+  const { readFileSync } = require('fs');
+  for (const bar of BARS) {
+    for (const theme of ['light', 'dark']) {
+      const svg = readFileSync(`media/${bar.icon}-${theme}.svg`, 'utf8');
+      const fill = /fill="#([0-9a-fA-F]{6})"/.exec(svg);
+      const alpha = /fill-opacity="([0-9.]+)"/.exec(svg);
+      if (!fill || !alpha) {
+        failures++;
+        console.log(`FAIL: media/${bar.icon}-${theme}.svg has no single fill to compare`);
+        continue;
+      }
+      const [r, g, b] = [0, 2, 4].map((i) => parseInt(fill[1].slice(i, i + 2), 16));
+      check(
+        `${bar.icon} (${theme}) matches its gutter SVG`,
+        bar[theme],
+        `rgba(${r}, ${g}, ${b}, ${alpha[1]})`
+      );
+    }
+  }
+}
+
 console.log(failures === 0 ? 'paintmap: all green' : `paintmap: ${failures} failed`);
 process.exit(failures === 0 ? 0 : 1);
