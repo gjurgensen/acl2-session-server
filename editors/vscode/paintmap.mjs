@@ -51,11 +51,14 @@ const unit = (index, line_start, col_start, line_end, col_end, status = 'admitte
 // the second's bar goes between them.
 {
   const p = paintMap([unit(0, 2, 1, 2, 18, 'admitted'), unit(1, 2, 19, 2, 36, 'failed')]);
-  check('the first form is painted to its columns', p[0].spans, [
-    { kind: 'part', line: 2, col: 1, endCol: 18 },
+  check('the first form is painted up to where the second starts', p[0].spans, [
+    { kind: 'part', line: 2, col: 1, endCol: 19 },
   ]);
-  check('the second picks up where it left off', p[1].spans, [
-    { kind: 'part', line: 2, col: 19, endCol: 36 },
+  // The *last* form on the line keeps the whole-line run, so the wash still
+  // reaches the edge of the viewport as it does on every other line, and the
+  // colour changes once -- at the boundary -- rather than twice.
+  check('and the last one washes the whole line', p[1].spans, [
+    { kind: 'lines', from: 2, to: 2 },
   ]);
   check('the gutter speaks for the first', p[0].gutter, { from: 2, to: 2 });
   check('and the second has no cell to claim', p[1].gutter, null);
@@ -68,12 +71,12 @@ const unit = (index, line_start, col_start, line_end, col_end, status = 'admitte
 // closing paren, the second from there on.
 {
   const p = paintMap([unit(0, 1, 1, 2, 5), unit(1, 2, 6, 2, 24)]);
-  check('the form that ends on the line keeps its whole first line', p[0].spans, [
-    { kind: 'part', line: 2, col: 1, endCol: 5 },
+  check('the form that ends on the line stops where the next begins', p[0].spans, [
+    { kind: 'part', line: 2, col: 1, endCol: 6 },
     { kind: 'lines', from: 1, to: 1 },
   ]);
-  check('the one that starts there is painted from its column', p[1].spans, [
-    { kind: 'part', line: 2, col: 6, endCol: 24 },
+  check('and the one that starts there owns the rest of the line', p[1].spans, [
+    { kind: 'lines', from: 2, to: 2 },
   ]);
   check('the earlier form owns both gutter cells', p[0].gutter, { from: 1, to: 2 });
   check('the later one owns none', p[1].gutter, null);
@@ -84,9 +87,11 @@ const unit = (index, line_start, col_start, line_end, col_end, status = 'admitte
 // both an inline mark, where it begins, and gutter cells for the rest.
 {
   const p = paintMap([unit(0, 1, 1, 1, 10), unit(1, 1, 12, 4, 3)]);
-  check('its opening line is painted to the end of the line', p[1].spans, [
-    { kind: 'part', line: 1, col: 12, endCol: null },
-    { kind: 'lines', from: 2, to: 4 },
+  check('it washes whole lines from the one it opens on', p[1].spans, [
+    { kind: 'lines', from: 1, to: 4 },
+  ]);
+  check('and the form beside it is painted over that', p[0].spans, [
+    { kind: 'part', line: 1, col: 1, endCol: 12 },
   ]);
   check('the gutter picks it up on the next line', p[1].gutter, { from: 2, to: 4 });
   check('and the mark says where it began', p[1].inlineAt, { line: 1, col: 12 });
@@ -95,6 +100,11 @@ const unit = (index, line_start, col_start, line_end, col_end, status = 'admitte
 // Three on one line, which nothing forbids.
 {
   const p = paintMap([unit(0, 1, 1, 1, 6), unit(1, 1, 7, 1, 12), unit(2, 1, 13, 1, 18)]);
+  check('each stops where the next starts, and the last takes the line', p.map((x) => x.spans), [
+    [{ kind: 'part', line: 1, col: 1, endCol: 7 }],
+    [{ kind: 'part', line: 1, col: 7, endCol: 13 }],
+    [{ kind: 'lines', from: 1, to: 1 }],
+  ]);
   check('only the first owns the cell', p.map((x) => x.gutter), [
     { from: 1, to: 1 },
     null,

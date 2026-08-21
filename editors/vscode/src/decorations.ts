@@ -14,11 +14,21 @@
 //
 // Both renderers are line-granular by nature -- one gutter cell per line, and
 // a wash that reaches the viewport edge -- so a line holding two forms needs
-// each of them to say something it cannot say by default. The wash paints
-// that line to its columns instead, changing colour where the forms do; the
-// gutter keeps its cell for the form that owns the start of the line and
-// draws the second form's bar between the two, at the column it begins in.
+// each of them to say something it cannot say by default. The last form on
+// such a line keeps the whole-line wash, so it still reaches the edge like
+// every other line, and the forms before it are painted over it, each ending
+// where the next begins; the gutter keeps its cell for the form that owns the
+// start of the line and draws the second form's bar between the two.
 // `paintmap.ts` decides all of that; this module only draws it.
+//
+// That overlap is deliberate and is the only way to say "from this column to
+// the viewport edge": a whole-line decoration always begins at column 0, and
+// `DecorationRenderOptions` has no z-index. What puts the column-bounded
+// pieces on top is that their decoration types are created *after* the
+// whole-line ones, which is the order VSCode renders them in -- unspecified,
+// but relied on widely. If it ever renders the other way the symptom is
+// visible and confined: on a line holding two forms, and only there, the
+// earlier form's colour is swallowed by the later one's.
 //
 // Both fill the scrollbar through the overview ruler's left lane; diagnostics
 // mark the right lane on their own.
@@ -204,13 +214,16 @@ export class Decorations {
       const line = Math.min(Math.max(sp.line, 1), doc.lineCount) - 1;
       const text = doc.lineAt(line).text;
       const from = charOffset(text, sp.col);
-      const to = sp.endCol === null ? text.length : charOffset(text, sp.endCol);
+      const to = charOffset(text, sp.endCol);
       return new vscode.Range(line, from, line, Math.max(from, to));
     };
+    // One character wide, not zero: the mark is a *border* on the left of
+    // the second form's opening paren, and a border wants a box to sit on.
     const at = (p: { line: number; col: number }): vscode.Range => {
       const line = Math.min(Math.max(p.line, 1), doc.lineCount) - 1;
-      const c = charOffset(doc.lineAt(line).text, p.col);
-      return new vscode.Range(line, c, line, c);
+      const text = doc.lineAt(line).text;
+      const c = charOffset(text, p.col);
+      return new vscode.Range(line, c, line, Math.min(c + 1, text.length));
     };
 
     const washRanges = new Map<string, vscode.Range[]>();

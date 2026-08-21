@@ -32,16 +32,17 @@ export interface WholeLines {
 }
 
 /**
- * Part of one line, from `col` to `endCol`.
+ * Part of one line, from `col` up to (not including) `endCol`.
  *
- * `endCol` of `null` means "to the end of the line" -- the opening line of a
- * form that runs on past it.
+ * Always a form that has a later form beside it on that line, so `endCol` is
+ * where that one starts -- never the end of the text, which is the whole
+ * point: the form on the right owns the rest of the line.
  */
 export interface PartOfLine {
   kind: 'part';
   line: number;
   col: number;
-  endCol: number | null;
+  endCol: number;
 }
 
 export type Span = WholeLines | PartOfLine;
@@ -69,32 +70,6 @@ export interface Painted {
 }
 
 /**
- * Lines touched by more than one unit.
- *
- * Units are contiguous and non-overlapping, so only a *first* or *last* line
- * can be shared -- an interior line of a multi-line form is that form's
- * alone. Sharing therefore comes in two shapes, and both matter: two forms
- * written side by side, and a form that ends where the next one begins.
- */
-function sharedLines(units: Placed[]): Set<number> {
-  const seen = new Set<number>();
-  const shared = new Set<number>();
-  for (const u of units) {
-    // A one-line form must not collide with *itself*: its first and last
-    // lines are the same line, and counting both would mark every ordinary
-    // form's line as shared and cost the whole book its whole-line wash.
-    const ends = u.line_start === u.line_end ? [u.line_start] : [u.line_start, u.line_end];
-    for (const line of ends) {
-      if (seen.has(line)) {
-        shared.add(line);
-      }
-      seen.add(line);
-    }
-  }
-  return shared;
-}
-
-/**
  * The unit that owns the start of each line: the first one, in file order,
  * whose extent covers it. That is the form a reader's eye starts the line
  * on, so it is the one the gutter should speak for.
@@ -114,36 +89,43 @@ function lineOwners(units: Placed[]): Map<number, number> {
 /**
  * Lay the units out for painting.
  *
- * A unit whose first and last lines are both its own is one whole-line run,
- * exactly as before this existed. A unit sharing either end is split, so the
- * wash changes colour mid-line at the boundary between the two forms rather
- * than one of them silently painting over the other.
+ * A unit whose lines are all its own is one whole-line run, exactly as
+ * before this existed. On a line two forms share, the **last** form keeps
+ * the whole-line run -- so the wash still reaches the edge of the viewport,
+ * as it does on every other line in the book -- and the forms before it are
+ * painted over it, each ending where the next begins. The colour therefore
+ * changes once per boundary and not once more at the end of the text.
+ *
+ * That overlap is the only way to say "from this column to the edge": a
+ * whole-line decoration always starts at column 0, and the API has no
+ * z-index. The pieces are drawn by decoration types created after the
+ * whole-line ones, which is what puts them on top. See `decorations.ts`.
  */
 export function paintMap(units: Placed[]): Painted[] {
-  const shared = sharedLines(units);
   const owner = lineOwners(units);
+  // The next form to begin on a given line, which is where the form before
+  // it stops: the gap between `)` and `(` belongs to the form on its left,
+  // so the colour changes at a form boundary rather than a space.
+  const nextStartOn = (line: number, after: number): Placed | undefined =>
+    units.find((v) => v.index > after && v.line_start === line);
+
   return units.map((u) => {
     const spans: Span[] = [];
-    const firstShared = shared.has(u.line_start);
-    const lastShared = shared.has(u.line_end);
-    if (!firstShared && !lastShared) {
+    // A form is painted as pieces only where a *later* form starts on one of
+    // its lines. Only its last line can be in that position: an interior
+    // line is its own, and a later form starting on its first line would
+    // have to start after it, which the file order forbids.
+    const next = nextStartOn(u.line_end, u.index);
+    if (next === undefined) {
       spans.push({ kind: 'lines', from: u.line_start, to: u.line_end });
-    } else if (u.line_start === u.line_end) {
-      spans.push({ kind: 'part', line: u.line_start, col: u.col_start, endCol: u.col_end });
     } else {
-      // The opening line runs to its end; the closing line starts at its
-      // own. Only the ends can be shared, so the block between them is
-      // whole lines whatever happens at the edges.
-      if (firstShared) {
-        spans.push({ kind: 'part', line: u.line_start, col: u.col_start, endCol: null });
-      }
-      if (lastShared) {
-        spans.push({ kind: 'part', line: u.line_end, col: 1, endCol: u.col_end });
-      }
-      const from = firstShared ? u.line_start + 1 : u.line_start;
-      const to = lastShared ? u.line_end - 1 : u.line_end;
-      if (from <= to) {
-        spans.push({ kind: 'lines', from, to });
+      // Leading indentation belongs to the form that owns the line, the
+      // same as a whole-line wash would give it.
+      const col =
+        u.line_start === u.line_end && owner.get(u.line_end) !== u.index ? u.col_start : 1;
+      spans.push({ kind: 'part', line: u.line_end, col, endCol: next.col_start });
+      if (u.line_start < u.line_end) {
+        spans.push({ kind: 'lines', from: u.line_start, to: u.line_end - 1 });
       }
     }
     // A unit can only ever lose its *first* line: a later line of its own is
