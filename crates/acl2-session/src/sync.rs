@@ -4177,23 +4177,26 @@ impl Book {
 /// untranslated term (for display) and the translated one, and we keep the
 /// first.
 ///
-/// The world-segment dance mirrors `pr-fn`, call for call:
-/// `decode-logical-name` to the event, `world-to-next-event` on its `cdr`
-/// for the segment, `actual-props` for the rules it laid down, filtered to
-/// this name's numes. Following `pr-fn` literally is the point -- these are
-/// `:program`-mode system internals in the same category as
-/// `get-event-data`, and the only guarantee about them is that ACL2's own
-/// caller keeps working.
+/// The world-segment dance mirrors `pr-fn` exactly: `decode-logical-name` to
+/// the event, `world-to-next-non-deeper-event` for its segment,
+/// `actual-props` for the rules it laid down, filtered to this name's numes.
 ///
-/// A name ACL2 does not have takes the whole probe down with it, not just
-/// the field that used it: the probe is one form, so a translate error means
-/// nothing is printed at all, and `scrape_rules` is best-effort, so the
-/// store is simply left empty. That is quiet -- quiet enough that
-/// `world-to-next-non-deeper-event`, a name no ACL2 has ever had, sat here
-/// disabling the entire scrape while every test that read
-/// `Book::rules_for` failed and every test that read a sync's own
-/// `event_data` went on passing. The live tests are what catch this; there
-/// is nothing at compile time that can.
+/// These are `:program`-mode system internals, in the same category as
+/// `get-event-data`: pinned to an ACL2 version and confined to this module.
+/// `world-to-next-non-deeper-event` dates the pin precisely -- ACL2 8.7
+/// introduced it, and `:pr` itself moved to it from `world-to-next-event`,
+/// to fix runes introduced by `defstobj`. Against an older ACL2 the name
+/// does not translate.
+///
+/// And that is *quiet*, which is worth knowing before debugging it. The
+/// probe is one form, so an unknown name takes all of it down rather than
+/// the one field that used it, and nothing is printed at all;
+/// `scrape_rules` is best-effort, so the store is simply left empty and
+/// every `Book::rules_for` answers `None`. On an older image the whole
+/// scrape is therefore off, with no error anywhere -- and the live tests
+/// divide accordingly: the ones reading a sync's own `event_data` pass,
+/// and only the ones reading `rules_for` fail. If they are failing, check
+/// the ACL2 version before reading any further.
 /// How a pass of the rules scrape ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scrape {
@@ -4270,7 +4273,9 @@ fn rules_probe(names: &[String], untranslated: bool) -> String {
              (acl2::if acl2::w2\n\
                (acl2::info-for-rules\n\
                  (acl2::actual-props\n\
-                   (acl2::world-to-next-event (acl2::cdr acl2::w2))\n\
+                   (acl2::world-to-next-non-deeper-event\n\
+                     (acl2::access-event-tuple-depth (acl2::cddr (acl2::car acl2::w2)))\n\
+                     (acl2::cdr acl2::w2))\n\
                    acl2::nil acl2::nil)\n\
                  (acl2::strip-cars acl2::rmp)\n\
                  (acl2::ens-maybe-brr acl2::state)\n\
