@@ -463,7 +463,9 @@ fn definition_crosses_into_an_included_book() {
     let bap = ba["path"].as_str().expect("a path into the checkout");
     assert!(bap.ends_with("axioms.lisp"), "into axioms.lisp, got {bap}");
     let bal = ba["line"].as_u64().expect("and a line") as usize;
-    let bsrc = std::fs::read_to_string(bap).expect("read axioms");
+    // Not `read_to_string`: axioms.lisp is ISO-8859-1, like all ACL2 source,
+    // and carries a `Mart\u{ed}n` in its credits that is not valid UTF-8.
+    let bsrc = acl2_session::split::decode(&std::fs::read(bap).expect("read axioms"));
     assert!(
         bsrc.lines().nth(bal - 1).is_some_and(|l| l.contains("binary-append")),
         "line {bal} of axioms.lisp should define binary-append"
