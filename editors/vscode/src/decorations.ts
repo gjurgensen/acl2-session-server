@@ -55,35 +55,35 @@ const WASH_COLORS: Record<string, { light: string; dark: string }> = {
 };
 
 /**
- * The gutter bars' own colours, for drawing one as text.
- *
- * Taken from `media/<icon>-{light,dark}.svg`, which are a single filled
- * rectangle each: a form that cannot have a gutter cell gets the same bar
- * inline, so the two readings match rather than merely coexist.
- */
-const BAR_COLORS: Record<string, { light: string; dark: string }> = {
-  pending: { light: 'rgba(97, 97, 97, 0.4)', dark: 'rgba(204, 204, 204, 0.35)' },
-  running: { light: 'rgba(21, 101, 192, 0.85)', dark: 'rgba(106, 159, 221, 0.85)' },
-  admitted: { light: 'rgba(46, 125, 50, 0.55)', dark: 'rgba(142, 192, 124, 0.5)' },
-  cond: { light: 'rgba(212, 172, 13, 0.75)', dark: 'rgba(255, 214, 51, 0.7)' },
-  red: { light: 'rgba(198, 40, 40, 0.7)', dark: 'rgba(251, 73, 52, 0.65)' },
-};
-
-/**
  * The gutter bar, drawn between two forms that share a line.
  *
- * A left border rather than a glyph: it is the same shape as the gutter's
- * rectangle, it takes no width from the text, and it sits exactly at the
- * column where the second form starts -- so the line reads as two forms with
- * a status each, which is what it is.
+ * The *same asset* the gutter draws, not a CSS imitation of it. An earlier
+ * version was a 3px left border in a hand-copied colour, which was the right
+ * shape and the right colour and still visibly not the same mark: the SVG
+ * scales with the line and a border in pixels does not, so the two agreed
+ * only at one font size. Sharing the file removes the question -- and with
+ * it the colour table that had to be kept in step with `media/*.svg` by
+ * hand.
+ *
+ * It costs the width of the icon, which pushes the second form right by
+ * about a character. That is the trade: an inline attachment is content, and
+ * content takes room. It reads as a separator between the two forms, which
+ * is what it is.
  */
-function inlineBarType(status: string): vscode.TextEditorDecorationType {
-  const c = BAR_COLORS[status];
+function inlineBarType(
+  context: vscode.ExtensionContext,
+  icon: string
+): vscode.TextEditorDecorationType {
+  const bar = (theme: string) => ({
+    before: {
+      contentIconPath: context.asAbsolutePath(`media/${icon}-${theme}.svg`),
+      // As tall as the line, so it matches the gutter cell's `contain`.
+      height: '100%',
+    },
+  });
   return vscode.window.createTextEditorDecorationType({
-    light: { borderColor: c.light },
-    dark: { borderColor: c.dark },
-    borderStyle: 'solid',
-    borderWidth: '0 0 0 3px',
+    light: bar('light'),
+    dark: bar('dark'),
   });
 }
 
@@ -107,17 +107,29 @@ function gutterType(
   });
 }
 
+/**
+ * The five bars, their gutter ruler colours, and nothing else.
+ *
+ * One list, because each of these is drawn *twice* -- as a gutter cell, and
+ * as an inline mark for a form with no cell to claim -- and the two are only
+ * reliably the same mark if one list names them both.
+ */
+const BARS: [icon: string, ruler: string][] = [
+  ['pending', 'rgba(136, 136, 136, 0.35)'],
+  ['running', 'rgba(90, 140, 210, 0.6)'],
+  ['admitted', 'rgba(80, 160, 90, 0.35)'],
+  ['cond', 'rgba(212, 172, 13, 0.5)'],
+  ['red', 'rgba(220, 60, 60, 0.6)'],
+];
+
 export class Decorations {
   private washes = new Map<string, vscode.TextEditorDecorationType>();
   /** The same washes, bounded by column: for a line two forms share. */
   private washParts = new Map<string, vscode.TextEditorDecorationType>();
-  /** The gutter bar as an inline mark, for a form with no gutter cell. */
+  /** The status column: one gutter cell per line. */
+  private gutterBars = new Map<string, vscode.TextEditorDecorationType>();
+  /** The same bar inline, for a form with no gutter cell to claim. */
   private inlineBars = new Map<string, vscode.TextEditorDecorationType>();
-  private pendingBar: vscode.TextEditorDecorationType;
-  private runningBar: vscode.TextEditorDecorationType;
-  private admittedBar: vscode.TextEditorDecorationType;
-  private condBar: vscode.TextEditorDecorationType;
-  private redBar: vscode.TextEditorDecorationType;
   private target: vscode.TextEditorDecorationType;
   private unreadable: vscode.TextEditorDecorationType;
 
@@ -149,16 +161,12 @@ export class Decorations {
       );
       this.washParts.set(status, vscode.window.createTextEditorDecorationType(paint));
     }
-    for (const status of Object.keys(BAR_COLORS)) {
-      this.inlineBars.set(status, inlineBarType(status));
-    }
     // The bars: pending neutral gray, running BLUE (true blue, hue 262),
     // admitted green, conditional YELLOW, red for the reds.
-    this.pendingBar = gutterType(context, 'pending', 'rgba(136, 136, 136, 0.35)');
-    this.runningBar = gutterType(context, 'running', 'rgba(90, 140, 210, 0.6)');
-    this.admittedBar = gutterType(context, 'admitted', 'rgba(80, 160, 90, 0.35)');
-    this.condBar = gutterType(context, 'cond', 'rgba(212, 172, 13, 0.5)');
-    this.redBar = gutterType(context, 'red', 'rgba(220, 60, 60, 0.6)');
+    for (const [icon, ruler] of BARS) {
+      this.gutterBars.set(icon, gutterType(context, icon, ruler));
+      this.inlineBars.set(icon, inlineBarType(context, icon));
+    }
     // The held-target indicator: a Q.E.D.-style box.
     this.target = vscode.window.createTextEditorDecorationType({
       after: { contentText: ' □', color: '#fabd2f', fontWeight: 'bold' },
@@ -217,13 +225,13 @@ export class Decorations {
       const to = charOffset(text, sp.endCol);
       return new vscode.Range(line, from, line, Math.max(from, to));
     };
-    // One character wide, not zero: the mark is a *border* on the left of
-    // the second form's opening paren, and a border wants a box to sit on.
+    // A point, not a span: the mark is a `before` attachment on the second
+    // form's opening paren, so the icon is the content and the range only
+    // says where to hang it.
     const at = (p: { line: number; col: number }): vscode.Range => {
       const line = Math.min(Math.max(p.line, 1), doc.lineCount) - 1;
-      const text = doc.lineAt(line).text;
-      const c = charOffset(text, p.col);
-      return new vscode.Range(line, c, line, Math.min(c + 1, text.length));
+      const c = charOffset(doc.lineAt(line).text, p.col);
+      return new vscode.Range(line, c, line, c);
     };
 
     const washRanges = new Map<string, vscode.Range[]>();
@@ -234,9 +242,9 @@ export class Decorations {
     }
     const bars = new Map<string, vscode.Range[]>();
     const inline = new Map<string, vscode.Range[]>();
-    for (const st of this.inlineBars.keys()) {
-      bars.set(st, []);
-      inline.set(st, []);
+    for (const [icon] of BARS) {
+      bars.set(icon, []);
+      inline.set(icon, []);
     }
 
     // Which bar a status wears, and whether it wears one at all.
@@ -289,13 +297,11 @@ export class Decorations {
     for (const [status, t] of this.washParts) {
       editor.setDecorations(t, partRanges.get(status) ?? []);
     }
-    editor.setDecorations(this.pendingBar, bars.get('pending') ?? []);
-    editor.setDecorations(this.runningBar, bars.get('running') ?? []);
-    editor.setDecorations(this.admittedBar, bars.get('admitted') ?? []);
-    editor.setDecorations(this.condBar, bars.get('cond') ?? []);
-    editor.setDecorations(this.redBar, bars.get('red') ?? []);
-    for (const [status, t] of this.inlineBars) {
-      editor.setDecorations(t, inline.get(status) ?? []);
+    for (const [icon, t] of this.gutterBars) {
+      editor.setDecorations(t, bars.get(icon) ?? []);
+    }
+    for (const [icon, t] of this.inlineBars) {
+      editor.setDecorations(t, inline.get(icon) ?? []);
     }
   }
 
@@ -343,12 +349,8 @@ export class Decorations {
     return [
       ...this.washes.values(),
       ...this.washParts.values(),
+      ...this.gutterBars.values(),
       ...this.inlineBars.values(),
-      this.pendingBar,
-      this.runningBar,
-      this.admittedBar,
-      this.condBar,
-      this.redBar,
       this.target,
     ];
   }
