@@ -88,7 +88,25 @@ struct SyncArgs {
     /// usual call. Resolved forgivingly: a line inside a form selects that
     /// form. On its own it bounds how far forward to admit and never undoes
     /// anything; pair it with `retract` to move the frontier back.
+    ///
+    /// A line that two forms share selects the later of the two — the whole
+    /// line, since that is all a line can mean. Pass `through_column` to say
+    /// which.
     through_line: Option<usize>,
+    /// The column on `through_line`, 1-based, counted in bytes.
+    ///
+    /// Only ever needed when two forms share a line: `(defun foo (x) x)
+    /// (defun bar (x) x)` is two forms, and a line cannot say which. Omit it
+    /// otherwise — it refines `through_line` and is ignored without one.
+    through_column: Option<usize>,
+    /// Report a column beside every line in the reply.
+    ///
+    /// Off by default, because a line names a form exactly in a file that
+    /// writes one form per line, which is nearly all of them, and the
+    /// columns are then a number per record that says nothing new. Turn it
+    /// on when a file does put two forms on a line — the give-away is a
+    /// `through_line` that selected a form you did not mean.
+    columns: Option<bool>,
     /// Report dependency staleness without acting on it.
     ///
     /// By default, a book this file includes whose source changed under the
@@ -139,6 +157,8 @@ struct EvalArgs {
 struct ResumeArgs {
     session_id: String,
     deadline_seconds: Option<u64>,
+    /// Report a column beside every line in the reply. See `acl2_sync`.
+    columns: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -361,6 +381,7 @@ impl Acl2Mcp {
         }
         let opts = acl2_session::SyncOptions {
             through_line: a.through_line,
+            through_column: a.through_column,
             retract,
             ignore_stale_includes: a.ignore_stale_includes.unwrap_or(false),
             skip_proofs: a.skip_proofs.unwrap_or(false),
@@ -370,7 +391,7 @@ impl Acl2Mcp {
             b.sync_with(&opts, d).map_err(|e| e.to_string())
         })
         .map_err(fail)?;
-        json(wire::SyncReply::from(out))
+        json(wire::sync_reply(out, a.columns.unwrap_or(false)))
     }
 
     #[tool(description = "Evaluate a one-off form without changing the logical \
@@ -406,6 +427,7 @@ impl Acl2Mcp {
     ) -> Result<CallToolResult, ErrorData> {
         let book = self.book(&a.session_id)?;
         let d = secs(a.deadline_seconds);
+        let columns = a.columns.unwrap_or(false);
         let r = blocking!({
             let mut b = book.lock().map_err(|e| e.to_string())?;
             b.resume(d).map_err(|e| e.to_string())
@@ -430,7 +452,7 @@ impl Acl2Mcp {
             Some(Resumed::Admitted(u)) => wire::ResumeReply {
                 outcome: "admitted".into(),
                 elapsed_ms: u.elapsed.as_millis(),
-                admitted: Some(wire::admitted(&u)),
+                admitted: Some(wire::admitted(&u, columns)),
                 failed: None,
                 evaluated: None,
             },
@@ -438,7 +460,7 @@ impl Acl2Mcp {
                 outcome: "failed".into(),
                 elapsed_ms: 0,
                 admitted: None,
-                failed: Some(wire::failed(&f)),
+                failed: Some(wire::failed(&f, columns)),
                 evaluated: None,
             },
             // Unreachable today -- this server never sets ContinuePastFailure
@@ -447,7 +469,7 @@ impl Acl2Mcp {
                 outcome: "skipped".into(),
                 elapsed_ms: 0,
                 admitted: None,
-                failed: Some(wire::failed(&f)),
+                failed: Some(wire::failed(&f, columns)),
                 evaluated: None,
             },
             Some(Resumed::Evaluated(r)) => wire::ResumeReply {

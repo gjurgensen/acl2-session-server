@@ -101,6 +101,14 @@ pub struct UpdateParams {
     /// Auto-admit only through this 1-based line. Omitted means the whole
     /// book; 0 holds before the first unit.
     pub target_line: Option<usize>,
+    /// The column on that line, 1-based and in bytes.
+    ///
+    /// An editor always knows it, and should always send it: a line names a
+    /// form exactly until two of them share one, and then the column is the
+    /// only thing that says which. Omitted, the line means the whole line
+    /// and takes the last form on it.
+    #[serde(default)]
+    pub target_column: Option<usize>,
     /// Stamped back on every event this snapshot produces, so the client can
     /// drop stale ones. Defaults to a daemon counter when the client has no
     /// document version to offer.
@@ -265,6 +273,10 @@ pub struct DefinitionReply {
     /// -- open it at the top rather than pointing at a form we did not find.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line: Option<usize>,
+    /// 1-based byte column on that line. Tracks `line`: both are set or
+    /// neither is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column: Option<usize>,
     /// How the line was reached, so the client can say how sure it is:
     /// `definer` (the name is written there -- exact) or `unit` (the file's
     /// own envelope said so -- exact). Generated names in *other* books wait
@@ -274,20 +286,38 @@ pub struct DefinitionReply {
 }
 
 pub fn definition_busy() -> DefinitionReply {
-    DefinitionReply { available: false, found: false, unit: None, path: None, line: None, how: None }
+    DefinitionReply {
+        available: false,
+        found: false,
+        unit: None,
+        path: None,
+        line: None,
+        column: None,
+        how: None,
+    }
 }
 
 pub fn definition_missing() -> DefinitionReply {
-    DefinitionReply { available: true, found: false, unit: None, path: None, line: None, how: None }
+    DefinitionReply {
+        available: true,
+        found: false,
+        unit: None,
+        path: None,
+        line: None,
+        column: None,
+        how: None,
+    }
 }
 
 /// Every `include-book` in the snapshot, resolved to a file where possible.
 ///
 /// LSP's `DocumentLink` in payload, minus the range: the reply says *which
 /// line* and *which book name*, and the client finds the quoted name on that
-/// line itself. That keeps the standing rule that coordinates never cross
-/// this wire — a single line is UTF-16 native in TypeScript, so the byte
-/// offsets the daemon deals in never have to be translated.
+/// line itself. Lines cross this wire untranslated, because a line is a line
+/// in any encoding; a *column* is the one coordinate that is not, since the
+/// daemon counts bytes and TypeScript counts UTF-16 units. Columns are sent
+/// in bytes and converted by the client over the one line's text it already
+/// holds — cheap, exact, and equal on the ASCII these forms are written in.
 #[derive(Debug, Serialize)]
 pub struct LinksReply {
     pub links: Vec<BookLink>,
@@ -297,6 +327,9 @@ pub struct LinksReply {
 pub struct BookLink {
     /// 1-based line of the `include-book` form.
     pub line: usize,
+    /// 1-based byte column of its opening paren, which is what separates two
+    /// includes written on one line.
+    pub column: usize,
     /// The book as written, without quotes: what to look for on that line.
     pub book: String,
     /// The file it resolves to. Absent when it could not be resolved — a
@@ -328,6 +361,13 @@ pub struct BookSymbol {
     pub unit: Option<usize>,
     pub line_start: usize,
     pub line_end: usize,
+    /// The two columns, 1-based and counted in **bytes**.
+    ///
+    /// The one place a coordinate has to be translated (see `BookLink`), and
+    /// the translation is over a single line's text, which the client holds.
+    /// For the ASCII a definer head is written in they are equal anyway.
+    pub col_start: usize,
+    pub col_end: usize,
     /// Definers nested inside -- an `encapsulate`'s or `mutual-recursion`'s
     /// members, which a flat outline would hide entirely.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -709,6 +749,10 @@ pub struct UnitState {
     pub index: usize,
     pub line_start: usize,
     pub line_end: usize,
+    /// The two columns, 1-based and in bytes: `col_end` is one past the
+    /// closing paren, so the pair reads as a range. See `BookSymbol`.
+    pub col_start: usize,
+    pub col_end: usize,
     /// `pending`, `admitted`, `conditional`, `skipped`, `failed`, `running`.
     pub status: &'static str,
 }
@@ -722,6 +766,8 @@ pub struct UnitEvent {
     pub outcome: &'static str,
     pub line_start: usize,
     pub line_end: usize,
+    pub col_start: usize,
+    pub col_end: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub elapsed_ms: Option<u128>,
     pub output_ref: String,
@@ -1040,6 +1086,8 @@ pub fn unit_admitted(book: &str, revision: u64, u: &UnitReport) -> UnitEvent {
         outcome: "admitted",
         line_start: u.line_start,
         line_end: u.line_end,
+        col_start: u.col_start,
+        col_end: u.col_end,
         elapsed_ms: Some(u.elapsed.as_millis()),
         output_ref: u.output_ref.as_str().to_string(),
         output_lines: u.output_lines,
@@ -1090,6 +1138,8 @@ pub fn unit_failure(
         outcome,
         line_start: f.line_start,
         line_end: f.line_end,
+        col_start: f.col_start,
+        col_end: f.col_end,
         elapsed_ms: None,
         output_ref: f.output_ref.as_str().to_string(),
         output_lines: f.output_lines,

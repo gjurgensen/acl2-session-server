@@ -7,6 +7,19 @@ use std::time::Duration;
 
 use acl2_session::{Book, Slice};
 
+/// A form's extent, with columns only when they say something.
+///
+/// A form that starts in column 1 is the only one on its line, and the line
+/// numbers alone name it. One that does not is sharing a line with a
+/// neighbour, and then the columns are the whole difference between them.
+fn span(line_start: usize, col_start: usize, line_end: usize, col_end: usize) -> String {
+    if col_start == 1 {
+        format!("{line_start}-{line_end}")
+    } else {
+        format!("{line_start}:{col_start}-{line_end}:{col_end}")
+    }
+}
+
 fn wrap(label: &str, s: &str, indent: usize, width: usize) {
     let pad = " ".repeat(indent);
     let mut line = String::new();
@@ -51,9 +64,9 @@ fn main() {
              o.admitted.len() + usize::from(o.failed.is_some()));
 
     for u in &o.admitted {
-        println!("unit {}  lines {}-{}  OK  {} ms  [{} | {} lines]",
-                 u.index, u.line_start, u.line_end, u.elapsed.as_millis(),
-                 u.output_ref, u.output_lines);
+        println!("unit {}  lines {}  OK  {} ms  [{} | {} lines]",
+                 u.index, span(u.line_start, u.col_start, u.line_end, u.col_end),
+                 u.elapsed.as_millis(), u.output_ref, u.output_lines);
         let e = &u.event_data;
         if let Some(s) = e.prover_steps { println!("    {:<14}{s}", "steps"); }
         if let Some(t) = &e.time { wrap("time", t, 4, 70); }
@@ -80,9 +93,9 @@ fn main() {
     }
 
     if let Some(f) = &o.failed {
-        println!("unit {}  lines {}-{}  {:?}  [{} | {} lines]",
-                 f.index, f.line_start, f.line_end, f.status,
-                 f.output_ref, f.output_lines);
+        println!("unit {}  lines {}  {:?}  [{} | {} lines]",
+                 f.index, span(f.line_start, f.col_start, f.line_end, f.col_end),
+                 f.status, f.output_ref, f.output_lines);
         if let Some(e) = &f.error_line { wrap("error", e, 4, 70); }
         let c = &f.checkpoints;
         if let Some(x) = &c.abort_cause { println!("    {:<14}{x}", "abort-cause"); }

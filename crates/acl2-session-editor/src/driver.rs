@@ -2,7 +2,8 @@
 //! turning snapshot updates into the event stream an editor paints from.
 //!
 //! This is the stepping loop, verbatim: split the snapshot, sync one unit
-//! at a time (`through_line` = the next unit's last line), follow an
+//! at a time (the target is the next unit's last position, line and column
+//! both -- a line alone cannot name a unit that shares one), follow an
 //! in-flight proof with short resumes, and let each outcome's counts advance
 //! the frontier. Commands are polled between steps and between slices, so an
 //! edit lands within a slice of arriving -- and only an edit that touches the
@@ -25,7 +26,12 @@ use crate::Out;
 
 /// One instruction from the protocol loop.
 pub enum Cmd {
-    Update { bytes: Vec<u8>, target_line: Option<usize>, revision: u64 },
+    Update {
+        bytes: Vec<u8>,
+        target_line: Option<usize>,
+        target_column: Option<usize>,
+        revision: u64,
+    },
     Retract { keep: usize },
     /// A form to run outside the file. `id` is the JSON-RPC request's, since
     /// the driver owns the session and therefore sends the reply itself.
@@ -135,6 +141,9 @@ pub struct Driver {
     bytes: Vec<u8>,
     units: Vec<Form>,
     target_line: Option<usize>,
+    /// The column on `target_line`, when the client sent one. Only ever
+    /// decides anything when two forms share that line.
+    target_column: Option<usize>,
     revision: u64,
     /// Set by an interrupt, a terminal failure, or a split error; cleared by
     /// the next update. A parked driver reconciles nothing and proves
@@ -177,7 +186,7 @@ pub struct Driver {
     details: HashMap<String, Option<NameDetail>>,
     /// Names ACL2's own sources define, mapped to file and line. Built on the
     /// first jump into a built-in and kept: see [`Driver::builtin_definition`].
-    builtins: Option<HashMap<String, (String, usize)>>,
+    builtins: Option<HashMap<String, (String, usize, usize)>>,
     /// Every name in the world, once someone has needed it.
     ///
     /// Built on an *idle tick* rather than on the request that wants it: the
@@ -255,6 +264,7 @@ impl Driver {
             bytes: Vec::new(),
             units: Vec::new(),
             target_line: None,
+            target_column: None,
             revision: 0,
             parked: true,
             stale_seen: Vec::new(),
@@ -368,9 +378,10 @@ impl Driver {
 
     fn apply(&mut self, cmd: Cmd) -> Flow {
         match cmd {
-            Cmd::Update { bytes, target_line, revision } => {
+            Cmd::Update { bytes, target_line, target_column, revision } => {
                 self.revision = revision;
                 self.target_line = target_line;
+                self.target_column = target_column;
                 self.parked = false;
                 self.failed_unit = None;
                 self.reconciled = false;
@@ -399,10 +410,12 @@ impl Driver {
                 self.reconciled = false;
                 // Hold the target where the retraction puts the world, so the
                 // drive that follows does not immediately re-admit.
-                self.target_line = Some(match keep.checked_sub(1).and_then(|k| self.units.get(k)) {
-                    Some(u) => u.line_end,
-                    None => 0,
-                });
+                let kept = keep.checked_sub(1).and_then(|k| self.units.get(k));
+                // The end of the kept form, column included: held at its line
+                // alone, a form sharing that line would be re-admitted at
+                // once and the retraction would appear to bounce off.
+                self.target_line = Some(kept.map_or(0, |u| u.line_end));
+                self.target_column = kept.map(|u| u.col_end);
                 let r = {
                     let mut book = self.book.lock().expect("book lock");
                     book.retract_to(&self.bytes, keep, RETRACT_DEADLINE)
@@ -586,6 +599,7 @@ impl Driver {
                 unit,
                 path: None,
                 line: Some(s.line),
+                column: Some(s.column),
                 how: Some("definer"),
             }));
         }
@@ -614,6 +628,7 @@ impl Driver {
             unit: None,
             path: Some(p.display().to_string()),
             line: found.map(|f| f.line),
+            column: found.map(|f| f.column),
             how: found.map(|f| f.how.as_str()),
         }));
     }
@@ -671,7 +686,7 @@ impl Driver {
                     .map(|b| b.join(&rel))
                     .filter(|p| p.is_file())
                     .map(|p| p.display().to_string());
-                wire::BookLink { line: s.line, book: s.book, path }
+                wire::BookLink { line: s.line, column: s.column, book: s.book, path }
             })
             .collect();
         self.out.reply(id, to_value(wire::LinksReply { links }));
@@ -835,6 +850,11 @@ impl Driver {
                     unit: None,
                     line_start: d.line,
                     line_end: d.line,
+                    // A child is located by its opening paren alone -- the
+                    // scan reads the head and the name, never the whole form
+                    // -- so it has no end of its own to report.
+                    col_start: d.column,
+                    col_end: d.column,
                     children: Vec::new(),
                 })
                 .collect();
@@ -844,6 +864,8 @@ impl Driver {
                 unit: Some(i),
                 line_start: u.line_start,
                 line_end: u.line_end,
+                col_start: u.col_start,
+                col_end: u.col_end,
                 children,
             });
         }
@@ -1063,12 +1085,13 @@ impl Driver {
         }
         let hit = self.builtins.as_ref().and_then(|m| m.get(&fold(name))).cloned();
         match hit {
-            Some((path, line)) => self.out.reply(id, to_value(wire::DefinitionReply {
+            Some((path, line, column)) => self.out.reply(id, to_value(wire::DefinitionReply {
                 available: true,
                 found: true,
                 unit: None,
                 path: Some(path),
                 line: Some(line),
+                column: Some(column),
                 how: Some("builtin"),
             })),
             None => self.out.reply(id, to_value(wire::definition_missing())),
@@ -1076,7 +1099,7 @@ impl Driver {
     }
 
     /// Scan the ACL2 checkout's own sources once. See [`Driver::builtin_definition`].
-    fn index_builtins(&self) -> HashMap<String, (String, usize)> {
+    fn index_builtins(&self) -> HashMap<String, (String, usize, usize)> {
         let mut out = HashMap::new();
         let Some(books) = self.book.lock().expect("book lock").books_dir().map(Path::to_path_buf)
         else {
@@ -1099,7 +1122,7 @@ impl Driver {
         // whichever file order happens to present them in. It is still worth
         // keeping, because for a primitive like `symbolp`, axiomatised rather
         // than defined, the `*1*` form is the only source ACL2 has.
-        let mut fallback: HashMap<String, (String, usize)> = HashMap::new();
+        let mut fallback: HashMap<String, (String, usize, usize)> = HashMap::new();
         for f in files {
             let Ok(bytes) = std::fs::read(&f) else { continue };
             let shown = f.display().to_string();
@@ -1108,7 +1131,7 @@ impl Driver {
                 // Otherwise first wins: ACL2 redefines a few names in later
                 // files (raw-Lisp shadows, `verify-termination` reruns), and
                 // the original is the one worth reading.
-                target.entry(fold(&s.name)).or_insert((shown.clone(), s.line));
+                target.entry(fold(&s.name)).or_insert((shown.clone(), s.line, s.column));
             }
         }
         for (k, v) in fallback {
@@ -1254,12 +1277,20 @@ impl Driver {
             // after an edit -- one reconcile rolled the suffix back to
             // pending, nothing re-admitted it, and the book sat gray.
             let goal = self.goal_unit();
+            // One unit per step, named by the position its last character
+            // ends at. The column belongs there as much as on the target: at
+            // its line alone, a unit sharing that line with an *earlier* one
+            // would resolve back to the earlier form, and the step would
+            // admit nothing and go round again.
             let through = if !self.reconciled {
-                Some(0)
+                Some((0, None))
             } else {
                 let frontier = self.frontier();
                 match goal {
-                    Some(g) if frontier <= g => Some(self.units[frontier].line_end),
+                    Some(g) if frontier <= g => {
+                        let u = &self.units[frontier];
+                        Some((u.line_end, Some(u.col_end)))
+                    }
                     _ => {
                         self.emit_state(None);
                         self.settle("reached_target", None);
@@ -1270,7 +1301,12 @@ impl Driver {
             let reconciling = !self.reconciled;
             let o = {
                 let mut book = self.book.lock().expect("book lock");
-                book.sync_bytes(&self.bytes, through, STEP)
+                let opts = acl2_session::SyncOptions {
+                    through_line: through.map(|t| t.0),
+                    through_column: through.and_then(|t| t.1),
+                    ..Default::default()
+                };
+                book.sync_bytes_with(&self.bytes, &opts, STEP)
             };
             let o = match o {
                 Ok(o) => o,
@@ -1429,11 +1465,17 @@ impl Driver {
     }
 
     /// The unit the target selects, or `None` when it selects nothing.
+    ///
+    /// The last unit at or before the target, which with a column is exact
+    /// and without one takes the whole line -- the same forgiving reading the
+    /// core's `through_line` has, and for the same reason: a target is a
+    /// number that every edit above it goes on invalidating.
     fn goal_unit(&self) -> Option<usize> {
-        match self.target_line {
-            None => self.units.len().checked_sub(1),
-            Some(l) => self.units.iter().rposition(|u| u.line_start <= l),
-        }
+        let Some(line) = self.target_line else {
+            return self.units.len().checked_sub(1);
+        };
+        let col = self.target_column;
+        self.units.iter().rposition(|u| u.covers(line, col) || u.ends_by(line, col))
     }
 
     /// Units currently in the world (skipped ones included).
@@ -1488,6 +1530,8 @@ impl Driver {
                     index: i,
                     line_start: u.line_start,
                     line_end: u.line_end,
+                    col_start: u.col_start,
+                    col_end: u.col_end,
                     status,
                 }
             })

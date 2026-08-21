@@ -25,8 +25,7 @@ use crate::split::{split, Form, SplitError};
 #[derive(Debug, Clone)]
 struct Admitted {
     hash: u64,
-    line_start: usize,
-    line_end: usize,
+    at: Span,
     /// Generation of the `deflabel` planted just after this unit; the rollback
     /// target for restoring the prefix that ends here.
     label: u64,
@@ -88,8 +87,17 @@ pub struct StaleInclude {
     /// That unit's first line, for callers that speak in lines rather than
     /// indices. Tracks `unit` exactly: both are set or neither is.
     pub line: Option<usize>,
+    /// And its column, which is what tells it from a form sharing its line.
+    pub column: Option<usize>,
     /// The file is gone entirely, rather than merely different.
     pub missing: bool,
+}
+
+/// What [`Book::includer_of`] found: the unit, and where it starts.
+struct Includer {
+    unit: Option<usize>,
+    line: Option<usize>,
+    column: Option<usize>,
 }
 
 /// How far the deadline of one call has been spent.
@@ -319,6 +327,9 @@ pub struct UnitReport {
     pub index: usize,
     pub line_start: usize,
     pub line_end: usize,
+    /// Columns of the same two positions. See [`Form::col_start`].
+    pub col_start: usize,
+    pub col_end: usize,
     /// The names this form writes, from the split. A label, not a key: a
     /// compound form writes several and an `include-book` writes none.
     pub names: Vec<String>,
@@ -458,6 +469,9 @@ pub struct FailureReport {
     pub index: usize,
     pub line_start: usize,
     pub line_end: usize,
+    /// Columns of the same two positions. See [`Form::col_start`].
+    pub col_start: usize,
+    pub col_end: usize,
     pub status: Status,
     /// True when the deadline expired rather than ACL2 rejecting the unit.
     pub still_running: bool,
@@ -526,6 +540,9 @@ pub struct SyncOutcome {
     /// to is usually one that was *reused*, and reused units are reported as
     /// a count with no records to look it up in.
     pub resolved_through_line: Option<usize>,
+    /// That unit's first column, which is what tells it from a neighbour
+    /// sharing its line.
+    pub resolved_through_column: Option<usize>,
     /// Prefix units left untouched because their hashes still matched.
     pub reused: usize,
     /// Units undone -- because the snapshot changed beneath them, or
@@ -1761,6 +1778,16 @@ fn parse_event_data(sub: &crate::session::Submission) -> EventData {
 pub struct SyncOptions {
     /// Admit only as far as this line. `None` means the end of the snapshot.
     pub through_line: Option<usize>,
+    /// The column on that line, for a caller that knows it.
+    ///
+    /// Only ever needed when two forms share a line, which is rare enough
+    /// that a caller who cannot supply one loses nothing by omitting it: the
+    /// line alone then means the whole line, and takes the last form on it.
+    /// A client reading a real cursor -- an editor -- should always send it,
+    /// since it is the only thing that can say *which* of the two.
+    ///
+    /// Ignored without `through_line`, which is the thing being refined.
+    pub through_column: Option<usize>,
     /// Also undo everything after `through_line`. See [`Book::sync_with`].
     pub retract: bool,
     /// Report dependency staleness without acting on it.
@@ -1923,6 +1950,31 @@ pub struct Book {
     build: Option<crate::cert::Build>,
 }
 
+/// Where a unit sat in the snapshot it was submitted from.
+///
+/// Four `usize`s that a positional argument list would happily transpose,
+/// travelling as one value instead. Carried rather than re-derived for the
+/// reason `PendingUnit::names` is: by the time a unit finishes, the file may
+/// have changed under it.
+#[derive(Debug, Clone, Copy)]
+struct Span {
+    line_start: usize,
+    line_end: usize,
+    col_start: usize,
+    col_end: usize,
+}
+
+impl Span {
+    fn of(u: &Form) -> Span {
+        Span {
+            line_start: u.line_start,
+            line_end: u.line_end,
+            col_start: u.col_start,
+            col_end: u.col_end,
+        }
+    }
+}
+
 /// Enough to finish recording a unit whose deadline expired mid-flight.
 #[derive(Debug, Clone)]
 struct PendingUnit {
@@ -1932,8 +1984,7 @@ struct PendingUnit {
     /// may have changed under it, so the split that produced it is the only
     /// place these names were ever right.
     names: Vec<String>,
-    line_start: usize,
-    line_end: usize,
+    at: Span,
     label: u64,
     /// The package this unit switches to, when it is a top-level
     /// `(in-package ...)` that will need its second phase on completion.
@@ -2711,7 +2762,7 @@ impl Book {
         // file changed are the same operation, reported the same way. A
         // target that resolves to nothing -- a line above the first unit, or
         // a snapshot with no units at all -- retracts everything.
-        let target = resolve_target(&units, through_line);
+        let target = resolve_target(&units, through_line, opts.through_column);
         if retract {
             keep = keep.min(target.map_or(0, |t| t + 1));
         }
@@ -2752,6 +2803,7 @@ impl Book {
         // resolves to a reused form, and reused forms leave no record to look
         // a line up in.
         out.resolved_through_line = units.get(target).map(|u| u.line_start);
+        out.resolved_through_column = units.get(target).map(|u| u.col_start);
 
         for (i, u) in units.iter().enumerate().take(target + 1).skip(keep) {
             let (sub, output_ref) =
@@ -2764,6 +2816,8 @@ impl Book {
                         index: i,
                         line_start: u.line_start,
                         line_end: u.line_end,
+                        col_start: u.col_start,
+                        col_end: u.col_end,
                         names: u.names.clone(),
                         elapsed: sub.elapsed,
                         event_data: parse_event_data(&sub),
@@ -2798,6 +2852,8 @@ impl Book {
                         index: i,
                         line_start: u.line_start,
                         line_end: u.line_end,
+                        col_start: u.col_start,
+                        col_end: u.col_end,
                         status,
                         still_running: sub.outcome == Outcome::StillRunning,
                         error_line,
@@ -2818,7 +2874,7 @@ impl Book {
                     {
                         let (rsub, rref) = self.admit_bytes(
                             &bytes[u.start..u.end],
-                            u.hash, u.line_start, u.line_end, &u.names, i, true,
+                            u.hash, Span::of(u), &u.names, i, true,
                             budget.floored(),
                         )?;
                         report.retry_output_ref = Some(rref);
@@ -3034,8 +3090,7 @@ impl Book {
         self.admit_bytes(
             &bytes[u.start..u.end],
             u.hash,
-            u.line_start,
-            u.line_end,
+            Span::of(u),
             &u.names,
             index,
             skip_proofs,
@@ -3054,8 +3109,7 @@ impl Book {
         &mut self,
         text: &[u8],
         hash: u64,
-        line_start: usize,
-        line_end: usize,
+        at: Span,
         names: &[String],
         index: usize,
         skipped: bool,
@@ -3100,8 +3154,7 @@ impl Book {
                 index,
                 hash,
                 names: names.to_vec(),
-                line_start,
-                line_end,
+                at,
                 label,
                 in_package: in_package_target(text),
                 text: text.to_vec(),
@@ -3112,8 +3165,7 @@ impl Book {
         if sub.outcome == Outcome::Ok {
             self.admitted.push(Admitted {
                 hash,
-                line_start,
-                line_end,
+                at,
                 label,
                 command_number: sub.get("cmd").and_then(|v| v.parse().ok()),
                 package: sub.get("pkg").and_then(unquote),
@@ -3214,8 +3266,7 @@ impl Book {
         if sub.outcome == Outcome::Ok {
             self.admitted.push(Admitted {
                 hash: p.hash,
-                line_start: p.line_start,
-                line_end: p.line_end,
+                at: p.at,
                 label: p.label,
                 command_number: sub.get("cmd").and_then(|v| v.parse().ok()),
                 package: sub.get("pkg").and_then(unquote),
@@ -3243,8 +3294,10 @@ impl Book {
             let (inner, inner_total, clique) = parse_inner(&sub);
             return Ok(Some(Resumed::Admitted(UnitReport {
                 index: p.index,
-                line_start: p.line_start,
-                line_end: p.line_end,
+                line_start: p.at.line_start,
+                line_end: p.at.line_end,
+                col_start: p.at.col_start,
+                col_end: p.at.col_end,
                 names: p.names.clone(),
                 elapsed: sub.elapsed,
                 event_data: parse_event_data(&sub),
@@ -3259,8 +3312,10 @@ impl Book {
         let error_line = error_message(&sub.output);
         let mut report = FailureReport {
             index: p.index,
-            line_start: p.line_start,
-            line_end: p.line_end,
+            line_start: p.at.line_start,
+            line_end: p.at.line_end,
+            col_start: p.at.col_start,
+            col_end: p.at.col_end,
             status: if cp.proof_ran { Status::ProofFailure } else { Status::Rejected },
             still_running: false,
             error_line,
@@ -3280,8 +3335,7 @@ impl Book {
             let (rsub, rref) = self.admit_bytes(
                 &p.text,
                 p.hash,
-                p.line_start,
-                p.line_end,
+                p.at,
                 &p.names,
                 p.index,
                 true,
@@ -3582,13 +3636,14 @@ impl Book {
                 }
                 continue;
             };
-            let (unit, line) = self.includer_of(pos, total);
+            let Includer { unit, line, column } = self.includer_of(pos, total);
             let Some(m) = meta else {
                 stale.push(StaleInclude {
                     book: name.clone(),
                     path,
                     unit,
                     line,
+                    column,
                     missing: true,
                 });
                 continue;
@@ -3611,6 +3666,7 @@ impl Book {
                 path,
                 unit,
                 line,
+                column,
                 missing: false,
             });
         }
@@ -3657,10 +3713,11 @@ impl Book {
     /// length `total`. See `Admitted::dep_count`.
     /// The unit that included the dependency at `pos`, as both an index and
     /// that unit's first line. Returned together so the two can never drift.
-    fn includer_of(&self, pos: usize, total: usize) -> (Option<usize>, Option<usize>) {
+    /// The unit an included book came in under, and where that unit starts.
+    fn includer_of(&self, pos: usize, total: usize) -> Includer {
         let unit = self.unit_that_included(pos, total);
-        let line = unit.and_then(|i| self.admitted.get(i)).map(|a| a.line_start);
-        (unit, line)
+        let at = unit.and_then(|i| self.admitted.get(i)).map(|a| a.at);
+        Includer { unit, line: at.map(|a| a.line_start), column: at.map(|a| a.col_start) }
     }
 
     fn unit_that_included(&self, pos: usize, total: usize) -> Option<usize> {
@@ -3954,8 +4011,7 @@ impl Book {
             let (sub, output_ref) = self.admit_bytes(
                 &bytes[u.start..u.end],
                 u.hash,
-                u.line_start,
-                u.line_end,
+                Span::of(u),
                 &u.names,
                 i,
                 skipped.get(i).copied().unwrap_or(false),
@@ -3969,6 +4025,8 @@ impl Book {
                         index: i,
                         line_start: u.line_start,
                         line_end: u.line_end,
+                        col_start: u.col_start,
+                        col_end: u.col_end,
                         status: Status::DeadlineExceeded,
                         still_running: true,
                         error_line: None,
@@ -4070,7 +4128,7 @@ impl Book {
 
     /// Lines currently believed to be admitted, for reporting.
     pub fn admitted_lines(&self) -> Vec<(usize, usize)> {
-        self.admitted.iter().map(|a| (a.line_start, a.line_end)).collect()
+        self.admitted.iter().map(|a| (a.at.line_start, a.at.line_end)).collect()
     }
 
     /// How many books the world currently rests on.
@@ -4283,27 +4341,30 @@ fn common_prefix(admitted: &[u64], units: &[Form]) -> usize {
     n
 }
 
-/// Resolve `through_line` to a unit index, forgivingly.
+/// Resolve a target position to a unit index, forgivingly.
 ///
 /// Never fails on misalignment. Line numbers shift on every edit above, so a
 /// strict boundary check would burn client turns on off-by-one errors it cannot
-/// see. A line inside a unit selects that unit -- if you pointed at a `defthm`,
-/// you meant that `defthm`. A line between units selects everything ending at
-/// or before it.
-fn resolve_target(units: &[Form], through_line: Option<usize>) -> Option<usize> {
+/// see. A position inside a unit selects that unit -- if you pointed at a
+/// `defthm`, you meant that `defthm`. A position between units selects
+/// everything ending at or before it.
+///
+/// The **last** unit the position touches, not the first, which matters only
+/// when two forms share a line and the caller named no column: "through line
+/// 5" then means through everything on line 5, the reading that makes the
+/// target an upper bound rather than a trap. With a column the two agree
+/// except at the zero-width seam of `)(`, where either answer is defensible.
+fn resolve_target(units: &[Form], line: Option<usize>, column: Option<usize>) -> Option<usize> {
     if units.is_empty() {
         return None;
     }
-    let Some(line) = through_line else {
+    let Some(line) = line else {
         return Some(units.len() - 1);
     };
-    if let Some(i) = units
-        .iter()
-        .position(|u| u.line_start <= line && line <= u.line_end)
-    {
+    if let Some(i) = units.iter().rposition(|u| u.covers(line, column)) {
         return Some(i);
     }
-    units.iter().rposition(|u| u.line_end <= line)
+    units.iter().rposition(|u| u.ends_by(line, column))
 }
 
 #[cfg(test)]
@@ -4533,32 +4594,68 @@ mod tests {
 
     const SRC: &str = "(alpha)\n\n(beta\n  gamma)\n\n(delta)\n";
 
+    /// The line-only call, which is what a caller with no cursor can make.
+    fn at_line(u: &[Form], line: usize) -> Option<usize> {
+        resolve_target(u, Some(line), None)
+    }
+
     #[test]
     fn no_target_means_end_of_file() {
-        assert_eq!(resolve_target(&units(SRC), None), Some(2));
-        assert_eq!(resolve_target(&[], None), None);
+        assert_eq!(resolve_target(&units(SRC), None, None), Some(2));
+        assert_eq!(resolve_target(&[], None, None), None);
+        // A column without a line refines nothing, and is ignored.
+        assert_eq!(resolve_target(&units(SRC), None, Some(3)), Some(2));
     }
 
     #[test]
     fn a_line_inside_a_unit_selects_that_unit() {
         let u = units(SRC);
-        assert_eq!(resolve_target(&u, Some(3)), Some(1)); // first line of beta
-        assert_eq!(resolve_target(&u, Some(4)), Some(1)); // last line of beta
-        assert_eq!(resolve_target(&u, Some(1)), Some(0));
+        assert_eq!(at_line(&u, 3), Some(1)); // first line of beta
+        assert_eq!(at_line(&u, 4), Some(1)); // last line of beta
+        assert_eq!(at_line(&u, 1), Some(0));
     }
 
     #[test]
     fn a_line_between_units_selects_everything_before_it() {
         let u = units(SRC);
-        assert_eq!(resolve_target(&u, Some(2)), Some(0)); // blank line after alpha
-        assert_eq!(resolve_target(&u, Some(5)), Some(1)); // blank line after beta
+        assert_eq!(at_line(&u, 2), Some(0)); // blank line after alpha
+        assert_eq!(at_line(&u, 5), Some(1)); // blank line after beta
     }
 
     #[test]
     fn a_line_before_any_unit_selects_nothing() {
         // A file that opens with blank lines: line 1 precedes every unit.
         let u = units("\n\n(alpha)\n");
-        assert_eq!(resolve_target(&u, Some(1)), None);
+        assert_eq!(at_line(&u, 1), None);
+    }
+
+    /// Two forms on one line, which is the whole reason a column exists: a
+    /// line alone cannot say which, and the answer differs by ten characters
+    /// of cursor.
+    #[test]
+    fn a_column_picks_between_two_forms_on_one_line() {
+        //                      1         2         3
+        //             1234567890123456789012345678901234
+        let u = units("(defun foo (x) x) (defun bar (x) x)\n");
+        assert_eq!(resolve_target(&u, Some(1), Some(1)), Some(0));
+        assert_eq!(resolve_target(&u, Some(1), Some(17)), Some(0));
+        assert_eq!(resolve_target(&u, Some(1), Some(18)), Some(0));
+        assert_eq!(resolve_target(&u, Some(1), Some(19)), Some(1));
+        assert_eq!(resolve_target(&u, Some(1), Some(35)), Some(1));
+        // Past the end of the line: everything on it, which is also what the
+        // line alone means.
+        assert_eq!(resolve_target(&u, Some(1), Some(80)), Some(1));
+        assert_eq!(at_line(&u, 1), Some(1));
+    }
+
+    /// A column is forgiven exactly as a line is, and for the same reason:
+    /// it goes stale on the edit above it.
+    #[test]
+    fn a_column_between_units_selects_everything_before_it() {
+        let u = units("(alpha) (beta)\n\n(gamma)\n");
+        assert_eq!(resolve_target(&u, Some(1), Some(9)), Some(1)); // on beta
+        assert_eq!(resolve_target(&u, Some(2), Some(1)), Some(1)); // the blank line
+        assert_eq!(resolve_target(&u, Some(1), Some(0)), None); // before alpha
     }
 
     #[test]

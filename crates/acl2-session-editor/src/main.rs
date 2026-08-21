@@ -485,7 +485,12 @@ impl Daemon {
                                 format!("{}: {e}", h.path.display())
                             })?,
                         };
-                        h.tx.send(Cmd::Update { bytes, target_line: p.target_line, revision })
+                        h.tx.send(Cmd::Update {
+                            bytes,
+                            target_line: p.target_line,
+                            target_column: p.target_column,
+                            revision,
+                        })
                             .map_err(|e| e.to_string())
                     })?
                 }),

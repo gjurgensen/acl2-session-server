@@ -31,6 +31,20 @@ pub struct Form {
     pub line_start: usize,
     /// 1-based line of the last character.
     pub line_end: usize,
+    /// 1-based column of `start` within `line_start`.
+    ///
+    /// Columns are counted in **bytes**, like every other offset here, which
+    /// for ACL2's ISO-8859-1 source is also the count of characters (see
+    /// [`split`]). A client whose buffer is UTF-8 converts at its own edge,
+    /// where it holds the line's text; only it knows how it encoded them.
+    pub col_start: usize,
+    /// 1-based column *one past* the last character, on `line_end`.
+    ///
+    /// One past rather than the last character's own column, so that
+    /// `(line_end, col_end)` reads as a position -- the one immediately
+    /// following the form -- and pairs with `end` being exclusive. Two forms
+    /// on one line are told apart by these and by nothing else.
+    pub col_end: usize,
     /// Hash of the *normalised* text (see [`normalize`]). Reformatting and
     /// comment-only edits leave this unchanged, so they cost no re-proving.
     pub hash: u64,
@@ -42,6 +56,45 @@ pub struct Form {
     /// written one is what a reader means by "that form". Empty for
     /// `include-book`, `in-theory` and anything else that defines nothing.
     pub names: Vec<String>,
+}
+
+impl Form {
+    /// The position of the first character, as `(line, column)`.
+    pub fn from(&self) -> (usize, usize) {
+        (self.line_start, self.col_start)
+    }
+
+    /// The position just past the last character, as `(line, column)`.
+    pub fn to(&self) -> (usize, usize) {
+        (self.line_end, self.col_end)
+    }
+
+    /// Whether a cursor at `line` (and `column`, when the caller knows it)
+    /// falls within this form.
+    ///
+    /// A `column` of `None` means "anywhere on that line", which is all a
+    /// caller who speaks in lines can mean. That reading is exact until two
+    /// forms share a line, and then it is the ambiguity itself: both forms
+    /// cover the line, and only a column separates them.
+    ///
+    /// Both ends are inclusive of the position, so a cursor resting against
+    /// either edge of a form is on it -- an editor's caret sits *between*
+    /// characters, and the one just past a closing paren belongs to the form
+    /// it closes.
+    pub fn covers(&self, line: usize, column: Option<usize>) -> bool {
+        match column {
+            None => self.line_start <= line && line <= self.line_end,
+            Some(c) => self.from() <= (line, c) && (line, c) <= self.to(),
+        }
+    }
+
+    /// Whether this form ends at or before the given position.
+    pub fn ends_by(&self, line: usize, column: Option<usize>) -> bool {
+        match column {
+            None => self.line_end <= line,
+            Some(c) => self.to() <= (line, c),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,6 +167,8 @@ pub struct DefinerSite {
     pub offset: usize,
     /// 1-based line of that paren.
     pub line: usize,
+    /// 1-based column of that paren, in bytes. See [`Form::col_start`].
+    pub column: usize,
 }
 
 /// Whether a head symbol looks like something that introduces a name.
@@ -221,6 +276,8 @@ pub struct IncludeSite {
     pub dir: Option<String>,
     /// 1-based line of the opening paren.
     pub line: usize,
+    /// 1-based column of that paren, in bytes. See [`Form::col_start`].
+    pub column: usize,
 }
 
 /// Every `(include-book …)` in `text`, at any depth.
@@ -279,12 +336,17 @@ impl<'a> Splitter<'a> {
             // One cursor serves both bounds: start offsets and end offsets
             // interleave monotonically (i <= j-1 < next i).
             let line_start = lines.advance(self.s, i);
-            let line_end = lines.advance(self.s, j.saturating_sub(1));
+            let col_start = lines.column(i);
+            let last = j.saturating_sub(1);
+            let line_end = lines.advance(self.s, last);
+            let col_end = lines.column(last) + 1;
             out.push(Form {
                 start: i,
                 end: j,
                 line_start,
                 line_end,
+                col_start,
+                col_end,
                 hash: fnv1a(&normalize(&self.s[i..j])),
                 names: Vec::new(), // filled by `attach_names`
             });
@@ -377,6 +439,7 @@ impl<'a> Splitter<'a> {
                     book: self.text_at(*name).trim_matches('"').to_string(),
                     dir,
                     line: line_of(self.s, start),
+                    column: column_of(self.s, start),
                 });
             }
         }
@@ -420,7 +483,8 @@ impl<'a> Splitter<'a> {
         // The cursor only moves forward, and the scan visits opening parens
         // in increasing order, so counting newlines stays linear too --
         // `line_of` from scratch per site would put the quadratic cost back.
-        Some(DefinerSite { head, name, offset: at, line: lines.advance(self.s, at) })
+        let line = lines.advance(self.s, at);
+        Some(DefinerSite { head, name, offset: at, line, column: lines.column(at) })
     }
 
     /// Return the offset just past the datum starting at or after `i`.
@@ -559,6 +623,13 @@ fn line_of(s: &[u8], offset: usize) -> usize {
     s[..offset.min(s.len())].iter().filter(|&&b| b == b'\n').count() + 1
 }
 
+/// The 1-based byte column of `offset` within its line.
+fn column_of(s: &[u8], offset: usize) -> usize {
+    let o = offset.min(s.len());
+    let begin = s[..o].iter().rposition(|&b| b == b'\n').map_or(0, |k| k + 1);
+    o - begin + 1
+}
+
 /// Offset just past the `#\...` character literal starting at `i`.
 ///
 /// Shared by the splitter and [`normalize`] so the two can never disagree
@@ -581,20 +652,33 @@ fn char_literal_end(s: &[u8], i: usize) -> usize {
 struct LineCursor {
     pos: usize,
     line: usize,
+    begin: usize,
 }
 
 impl LineCursor {
     fn new() -> LineCursor {
-        LineCursor { pos: 0, line: 1 }
+        LineCursor { pos: 0, line: 1, begin: 0 }
     }
 
     /// The 1-based line of `to`, which must be `>=` every earlier argument.
     fn advance(&mut self, s: &[u8], to: usize) -> usize {
         let to = to.min(s.len());
         debug_assert!(to >= self.pos, "LineCursor must advance monotonically");
-        self.line += s[self.pos..to].iter().filter(|&&b| b == b'\n').count();
+        let seg = &s[self.pos..to];
+        self.line += seg.iter().filter(|&&b| b == b'\n').count();
+        if let Some(k) = seg.iter().rposition(|&b| b == b'\n') {
+            self.begin = self.pos + k + 1;
+        }
         self.pos = to;
         self.line
+    }
+
+    /// The 1-based column of the offset just handed to [`LineCursor::advance`].
+    ///
+    /// Separate from `advance` rather than returned beside the line, because
+    /// most callers want the line alone and would have to take the pair apart.
+    fn column(&self, to: usize) -> usize {
+        to.saturating_sub(self.begin) + 1
     }
 }
 
@@ -891,6 +975,56 @@ mod tests {
         assert_eq!((f[0].line_start, f[0].line_end), (1, 1));
         assert_eq!((f[1].line_start, f[1].line_end), (3, 4));
         assert_eq!(&src[f[1].start..f[1].end], "(beta\n  gamma)");
+        assert_eq!((f[0].from(), f[0].to()), ((1, 1), (1, 8)));
+        assert_eq!((f[1].from(), f[1].to()), ((3, 1), (4, 9)));
+    }
+
+    /// Two forms on one line: rare, legal, and the case line numbers cannot
+    /// name. The split itself is offset-driven and was always right; what the
+    /// columns add is the ability for a caller to say *which* of the two.
+    #[test]
+    fn forms_sharing_a_line_are_told_apart_by_column() {
+        let src = "(defun foo (x) x) (defun bar (x) x)\n";
+        let f = split_str(src).unwrap();
+        assert_eq!(f.len(), 2);
+        assert_eq!(f.iter().map(|u| u.line_start).collect::<Vec<_>>(), vec![1, 1]);
+        assert_eq!((f[0].from(), f[0].to()), ((1, 1), (1, 18)));
+        assert_eq!((f[1].from(), f[1].to()), ((1, 19), (1, 36)));
+        assert_eq!(f[0].names, ["foo"]);
+        assert_eq!(f[1].names, ["bar"]);
+
+        // Every position in the line, and which form it selects.
+        let who = |c: usize| (f[0].covers(1, Some(c)), f[1].covers(1, Some(c)));
+        assert_eq!(who(1), (true, false), "the opening paren of foo");
+        assert_eq!(who(17), (true, false), "foo's closing paren");
+        assert_eq!(who(18), (true, false), "resting against foo's right edge");
+        assert_eq!(who(19), (false, true), "bar's opening paren");
+        assert_eq!(who(36), (false, true), "just past bar");
+        // Without a column there is nothing to choose with, and both cover.
+        assert_eq!((f[0].covers(1, None), f[1].covers(1, None)), (true, true));
+
+        let sites = definer_sites(src.as_bytes());
+        assert_eq!(
+            sites.iter().map(|s| (s.name.as_str(), s.line, s.column)).collect::<Vec<_>>(),
+            vec![("foo", 1, 1), ("bar", 1, 19)]
+        );
+    }
+
+    /// A column is measured from the line it is on, not from the file.
+    #[test]
+    fn columns_restart_on_every_line() {
+        let f = split_str("(a)\n  (b) (c)\n(d\n  e) (f)\n").unwrap();
+        let at = f.iter().map(|u| (u.from(), u.to())).collect::<Vec<_>>();
+        assert_eq!(
+            at,
+            vec![
+                ((1, 1), (1, 4)),
+                ((2, 3), (2, 6)),
+                ((2, 7), (2, 10)),
+                ((3, 1), (4, 5)),
+                ((4, 6), (4, 9)),
+            ]
+        );
     }
 
     #[test]

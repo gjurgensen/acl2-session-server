@@ -54,6 +54,9 @@ impl How {
 pub struct Located {
     /// 1-based line of the form.
     pub line: usize,
+    /// 1-based column of the form on that line, which is what tells it from
+    /// another form written beside it.
+    pub column: usize,
     pub how: How,
 }
 
@@ -91,7 +94,7 @@ fn parts(name: &str) -> Vec<String> {
 
 /// The longest contiguous run of `wanted`'s parts that names something in
 /// `index`, preferring longer runs -- i.e. the most specific match.
-fn decompose(wanted: &str, index: &HashMap<String, usize>) -> Option<usize> {
+fn decompose(wanted: &str, index: &HashMap<String, (usize, usize)>) -> Option<(usize, usize)> {
     let p = parts(wanted);
     let whole = fold(wanted);
     for len in (1..=p.len()).rev() {
@@ -99,9 +102,9 @@ fn decompose(wanted: &str, index: &HashMap<String, usize>) -> Option<usize> {
             for sep in ["-", "->"] {
                 let cand = p[i..i + len].join(sep);
                 if cand != whole
-                    && let Some(&line) = index.get(&cand)
+                    && let Some(&at) = index.get(&cand)
                 {
-                    return Some(line);
+                    return Some(at);
                 }
             }
         }
@@ -116,14 +119,17 @@ fn decompose(wanted: &str, index: &HashMap<String, usize>) -> Option<usize> {
 /// is newest-first. Pass an empty slice to get tier 1 only, which is what a
 /// caller without a census can honestly offer.
 pub fn locate(text: &[u8], book_names: &[String], wanted: &str) -> Option<Located> {
-    let mut index: HashMap<String, usize> = HashMap::new();
+    // Positions are compared, not just returned: the window below asks
+    // whether one site precedes another, and two sites on one line are
+    // ordered by nothing but their columns.
+    let mut index: HashMap<String, (usize, usize)> = HashMap::new();
     for d in definer_sites(text) {
         // First wins: a name written twice is defined at the first, and the
         // later one is a redefinition or a `verify-termination` rerun.
-        index.entry(fold(&d.name)).or_insert(d.line);
+        index.entry(fold(&d.name)).or_insert((d.line, d.column));
     }
-    if let Some(&line) = index.get(&fold(wanted)) {
-        return Some(Located { line, how: How::Definer });
+    if let Some(&(line, column)) = index.get(&fold(wanted)) {
+        return Some(Located { line, column, how: How::Definer });
     }
 
     // The window: between the nearest locatable name before `wanted` and the
@@ -141,14 +147,14 @@ pub fn locate(text: &[u8], book_names: &[String], wanted: &str) -> Option<Locate
         // Windowed decomposition: the most specific answer, and checked
         // against where the world says this name was introduced.
         (Some(d), _) if lo.is_none_or(|l| d >= l) && hi.is_none_or(|h| d <= h) => {
-            Some(Located { line: d, how: How::Decomposed })
+            Some(Located { line: d.0, column: d.1, how: How::Decomposed })
         }
         // Out of the window, so the decomposition matched something
         // unrelated; the anchor is the better answer.
-        (_, Some(l)) => Some(Located { line: l, how: How::Anchored }),
+        (_, Some(l)) => Some(Located { line: l.0, column: l.1, how: How::Anchored }),
         // No anchor at all: take the decomposition even unwindowed, since
         // there is nothing to check it against and it is all there is.
-        (Some(d), None) => Some(Located { line: d, how: How::Decomposed }),
+        (Some(d), None) => Some(Located { line: d.0, column: d.1, how: How::Decomposed }),
         (None, None) => None,
     }
 }
@@ -206,8 +212,8 @@ mod tests {
         ];
         // Unwindowed, decomposition would answer line 1.
         let mut bare = HashMap::new();
-        bare.insert("pred".to_string(), 1usize);
-        assert_eq!(decompose("defind-pred-infop", &bare), Some(1));
+        bare.insert("pred".to_string(), (1usize, 1usize));
+        assert_eq!(decompose("defind-pred-infop", &bare), Some((1, 1)));
 
         let got = locate(text.as_bytes(), &names, "defind-pred-infop").expect("located");
         assert_eq!(got.line, 42, "the defprod it came from, not the far-off `pred`");
@@ -223,6 +229,17 @@ mod tests {
         assert_eq!((got.line, got.how), (2, How::Definer));
         let got = locate(text, &[], "alpha").expect("also written");
         assert_eq!((got.line, got.how), (1, How::Definer));
+    }
+
+    /// Two definers on one line, which the line alone cannot tell apart.
+    #[test]
+    fn a_column_separates_two_definitions_on_one_line() {
+        let text = b"(defun alpha (x) x) (defun beta (x) x)\n";
+        let a = locate(text, &[], "alpha").expect("written");
+        let b = locate(text, &[], "beta").expect("written too");
+        assert_eq!((a.line, a.column), (1, 1));
+        assert_eq!((b.line, b.column), (1, 21));
+        assert_eq!((a.how, b.how), (How::Definer, How::Definer));
     }
 
     #[test]

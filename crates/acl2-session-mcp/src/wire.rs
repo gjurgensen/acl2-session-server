@@ -160,9 +160,9 @@ fn checkpoints(c: &core::sync::Checkpoints) -> Checkpoints {
 /// evidence rather than bulk.
 ///
 /// There is deliberately no form index. Nothing on this surface accepts one
-/// -- `through_line` is the only positional input -- so it was a number you
-/// could look at and not use, and printing it beside `output_ref` invited the
-/// reading that `f63` names form 63.
+/// -- `through_line`, refined by `through_column`, is the only positional
+/// input -- so it was a number you could look at and not use, and printing it
+/// beside `output_ref` invited the reading that `f63` names form 63.
 ///
 /// It never did, not even once. `f` counts everything the session has *put in
 /// the store* -- and it is 1-based where indices are 0-based, so a fresh
@@ -195,6 +195,10 @@ pub struct Admitted {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub names_total: Option<usize>,
     pub line_start: usize,
+    /// The column that line starts the form at, present only when the call
+    /// asked for `columns`. See `SyncReply::target_column`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub col_start: Option<usize>,
     /// Wall time, present only for a form that took over a second.
     ///
     /// Self-suppressing, the way `warnings` is: on two measured sessions of
@@ -241,6 +245,11 @@ pub struct Admitted {
 pub struct Failed {
     pub line_start: usize,
     pub line_end: usize,
+    /// The two columns, present only when the call asked for `columns`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub col_start: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub col_end: Option<usize>,
     /// `proof_failure` -- a proof ran and did not finish; checkpoints and an
     /// abort cause are available.
     /// `rejected` -- ACL2 declined the form before any proof: a translate
@@ -329,6 +338,16 @@ pub struct SyncReply {
     /// `reused`, and the form left running is `in_flight`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_line: Option<usize>,
+    /// That form's column, present only when the call asked for `columns`.
+    ///
+    /// A line names a form exactly until two forms share one, which is rare
+    /// but legal: `(defun foo (x) x) (defun bar (x) x)` is two forms, and
+    /// only a column tells them apart. Ask for columns when you are working
+    /// in a file that does that, or when a `through_line` selected a form
+    /// you did not mean; otherwise the line alone is the smaller reply and
+    /// says everything.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_column: Option<usize>,
     /// Forms left untouched because the file had not changed under them.
     pub reused: usize,
     /// Forms undone because the file had changed under them.
@@ -379,16 +398,20 @@ pub struct StaleInclude {
     /// supplied.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line: Option<usize>,
+    /// That form's column, present only when the call asked for `columns`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column: Option<usize>,
     /// The file is gone, not merely different.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub missing: bool,
 }
 
-pub fn stale_include(s: &core::StaleInclude) -> StaleInclude {
+pub fn stale_include(s: &core::StaleInclude, columns: bool) -> StaleInclude {
     StaleInclude {
         book: s.book.clone(),
         path: s.path.display().to_string(),
         line: s.line,
+        column: s.column.filter(|_| columns),
         missing: s.missing,
     }
 }
@@ -398,6 +421,11 @@ pub fn stale_include(s: &core::StaleInclude) -> StaleInclude {
 pub struct InFlight {
     pub line_start: usize,
     pub line_end: usize,
+    /// The two columns, present only when the call asked for `columns`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub col_start: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub col_end: Option<usize>,
     /// Handle to this form's output, readable **while the form runs**.
     ///
     /// Pass it to `acl2_output` to watch a long proof as it goes: every mode
@@ -408,26 +436,32 @@ pub struct InFlight {
     pub output_ref: String,
 }
 
-impl From<core::SyncOutcome> for SyncReply {
-    fn from(o: core::SyncOutcome) -> Self {
-        // A deadline is not a failure. Reporting it under `failed` made a
-        // clean book look broken to anyone keying on that field, which is the
-        // obvious thing to key on.
-        let running = o.failed.as_ref().is_some_and(|f| f.still_running);
-        SyncReply {
-            target_line: o.resolved_through_line,
-            reused: o.reused,
-            rolled_back: o.rolled_back,
-            rebuilt: o.rebuilt,
-            admitted: o.admitted.iter().map(admitted).collect(),
-            failed: o.failed.as_ref().filter(|_| !running).map(failed),
-            stale_includes: o.stale_includes.iter().map(stale_include).collect(),
-            in_flight: o.failed.as_ref().filter(|_| running).map(|f| InFlight {
-                line_start: f.line_start,
-                line_end: f.line_end,
-                output_ref: f.output_ref.to_string(),
-            }),
-        }
+/// The sync reply, with columns included only if the call asked for them.
+///
+/// Not a `From` impl, because `columns` is a second input: every position in
+/// this reply is a line alone unless the caller said otherwise, and a
+/// conversion trait has nowhere to put that.
+pub fn sync_reply(o: core::SyncOutcome, columns: bool) -> SyncReply {
+    // A deadline is not a failure. Reporting it under `failed` made a
+    // clean book look broken to anyone keying on that field, which is the
+    // obvious thing to key on.
+    let running = o.failed.as_ref().is_some_and(|f| f.still_running);
+    SyncReply {
+        target_line: o.resolved_through_line,
+        target_column: o.resolved_through_column.filter(|_| columns),
+        reused: o.reused,
+        rolled_back: o.rolled_back,
+        rebuilt: o.rebuilt,
+        admitted: o.admitted.iter().map(|u| admitted(u, columns)).collect(),
+        failed: o.failed.as_ref().filter(|_| !running).map(|f| failed(f, columns)),
+        stale_includes: o.stale_includes.iter().map(|s| stale_include(s, columns)).collect(),
+        in_flight: o.failed.as_ref().filter(|_| running).map(|f| InFlight {
+            line_start: f.line_start,
+            line_end: f.line_end,
+            col_start: columns.then_some(f.col_start),
+            col_end: columns.then_some(f.col_end),
+            output_ref: f.output_ref.to_string(),
+        }),
     }
 }
 
@@ -472,12 +506,13 @@ fn names_within_budget(names: &[String]) -> (Vec<String>, Option<usize>) {
     (out, total)
 }
 
-pub fn admitted(u: &core::sync::UnitReport) -> Admitted {
+pub fn admitted(u: &core::sync::UnitReport, columns: bool) -> Admitted {
     let (names, names_total) = names_within_budget(&u.display_names());
     Admitted {
         names,
         names_total,
         line_start: u.line_start,
+        col_start: columns.then_some(u.col_start),
         elapsed_ms: Some(u.elapsed.as_millis()).filter(|ms| *ms >= SLOW_MS),
         warnings: u.event_data.warnings.clone(),
         hint_events: u.event_data.hint_events.clone(),
@@ -486,11 +521,13 @@ pub fn admitted(u: &core::sync::UnitReport) -> Admitted {
     }
 }
 
-pub fn failed(f: &core::sync::FailureReport) -> Failed {
+pub fn failed(f: &core::sync::FailureReport, columns: bool) -> Failed {
     let (prover_steps, step_limit_reached) = steps_split(f.event_data.prover_steps);
     Failed {
         line_start: f.line_start,
         line_end: f.line_end,
+        col_start: columns.then_some(f.col_start),
+        col_end: columns.then_some(f.col_end),
         status: match f.status {
             core::Status::ProofFailure => "proof_failure",
             core::Status::Rejected => "rejected",
