@@ -42,6 +42,129 @@
 export const MAX_TERM = 64 * 1024;
 
 /**
+ * Holding the panel on one form.
+ *
+ * The panel follows the cursor. Locking stops it, so a form can be watched
+ * while the edit meant to fix it happens somewhere else -- which is the
+ * ordinary way to use it: hold the failure, change the lemma above it, watch
+ * the checkpoints move.
+ *
+ * A possible step beyond this, deliberately not built: **freeze**. Lock holds
+ * the panel on a form and lets its contents update as that form is re-proved;
+ * freeze would hold the contents too. The two differ only while the locked
+ * form is being re-proved, and in that window what a reader wants is "do not
+ * take away what I was reading" rather than a snapshot. What freeze would add
+ * beyond that is comparing an old result against a new one -- and that needs
+ * both on screen at once, so it wants a second panel rather than a mode. If it
+ * is ever built it should freeze the *facts* and not the presentation: a
+ * frozen panel must still re-flow when the pane is dragged and still recolour
+ * with the theme, or "frozen" quietly means "wrong width and wrong colours"
+ * too. The state here would become a third value rather than a second flag.
+ */
+
+/**
+ * A place in a book: where a form starts.
+ *
+ * Carries the same position twice because two parties count differently. The
+ * daemon speaks 1-based lines and **byte** columns, which is what has to match
+ * a unit's `line_start`/`col_start`. The editor speaks UTF-16 characters, which
+ * is what an edit's range is expressed in. Converting on demand would mean
+ * decoding a line that the edit has already changed, so both are carried and
+ * both are refreshed together whenever the lock is re-confirmed.
+ */
+export interface Anchor {
+  /** 1-based, as the wire counts. */
+  line: number;
+  /** 1-based byte column, as the wire counts. */
+  column: number;
+  /** The same column as the editor counts it: 0-based UTF-16. */
+  character: number;
+}
+
+/** One edit, in the editor's coordinates with 1-based lines. */
+export interface Edit {
+  startLine: number;
+  startChar: number;
+  endLine: number;
+  endChar: number;
+  /** How many lines the replacement text occupies -- 1 when it has no newline. */
+  newLines: number;
+}
+
+/** Whether `(l1, c1)` comes strictly before `(l2, c2)`. */
+function before(l1: number, c1: number, l2: number, c2: number): boolean {
+  return l1 < l2 || (l1 === l2 && c1 < c2);
+}
+
+/**
+ * Where an anchor ends up after some edits, or `undefined` if it did not
+ * survive them.
+ *
+ * An anchor names the *first character* of a form, and the question is only
+ * ever whether that character moved somewhere this can work out. Three cases,
+ * and the third is the one that matters:
+ *
+ * - The edit finishes above the anchor's line: whole lines were added or
+ *   removed above, so the anchor slides by the difference. This is the case
+ *   the feature exists for -- fixing a lemma above the form you are watching.
+ * - The edit begins after the anchor: it is below or to the right, and the
+ *   anchor has not moved.
+ * - Anything else -- an edit that straddles the anchor, starts exactly on it,
+ *   or merely finishes to its left on its own line -- gives up.
+ *
+ * That last case is deliberately blunt. Sliding an anchor *along* a line would
+ * mean re-measuring bytes on a line whose old text the edit has already
+ * replaced, and getting it subtly wrong would leave a lock pointing confidently
+ * at the wrong form. Letting go instead costs a rare re-lock and can never lie.
+ * It also settles the case nothing else can: deleting the locked form.
+ */
+export function keepAnchor(a: Anchor, edits: readonly Edit[]): Anchor | undefined {
+  // Every range in one change event is expressed against the document as it
+  // was *before* the event, so each is judged against the original position
+  // and the shifts are summed. Walking them while moving the anchor would
+  // measure the later ones against a document none of them saw.
+  let shift = 0;
+  for (const e of edits) {
+    if (before(e.endLine, e.endChar, a.line, a.character)) {
+      if (e.endLine >= a.line) {
+        // Finished on our own line, to our left: our column moved, and this
+        // does not track columns.
+        return undefined;
+      }
+      shift += e.newLines - (e.endLine - e.startLine + 1);
+    } else if (!before(a.line, a.character, e.startLine, e.startChar)) {
+      // It did not finish before us and does not start after us, so it covers
+      // where we point.
+      return undefined;
+    }
+  }
+  const line = a.line + shift;
+  return line < 1 ? undefined : { line, column: a.column, character: a.character };
+}
+
+/**
+ * The unit a lock is on, or `undefined` if the lock can no longer be trusted.
+ *
+ * The rule the whole feature rests on: **the daemon's split is the truth and
+ * the anchor is a guess.** A lock holds the position a form *started* at, so a
+ * lock that is still good is one whose anchor is still exactly where a form
+ * starts. Anything else -- no form there, or a form starting elsewhere -- means
+ * the guess and the split have diverged, and the honest response is to let go
+ * rather than show a form nobody asked for.
+ *
+ * Deliberately stricter than "some form covers this position": a position
+ * inside a *different* form covers it just as well, and staying locked has to
+ * mean the same form.
+ */
+export function lockedIndex(
+  anchor: Anchor,
+  units: readonly { index: number; line_start: number; col_start: number }[]
+): number | undefined {
+  const u = units.find((x) => x.line_start === anchor.line && x.col_start === anchor.column);
+  return u?.index;
+}
+
+/**
  * What a `tail` event should cause.
  *
  * A tail is a **push**: the daemon sends it on its own timer and it already

@@ -195,6 +195,16 @@
         "title": "ACL2: Show Documentation for Name at Cursor"
       },
       {
+        "command": "acl2-session.lockPanel",
+        "title": "ACL2: Hold Panel on This Form",
+        "icon": "$(unlock)"
+      },
+      {
+        "command": "acl2-session.unlockPanel",
+        "title": "ACL2: Release Panel",
+        "icon": "$(lock)"
+      },
+      {
         "command": "acl2-session.showPanel",
         "title": "ACL2: Show Panel"
       },
@@ -292,6 +302,26 @@
           "command": "acl2-session.certify",
           "when": "editorLangId == acl2 && acl2Session.active",
           "group": "navigation@2"
+        },
+        {
+          "command": "acl2-session.lockPanel",
+          "when": "activeWebviewPanelId == 'acl2SessionPanel' && !acl2Session.panelLocked",
+          "group": "navigation@1"
+        },
+        {
+          "command": "acl2-session.unlockPanel",
+          "when": "activeWebviewPanelId == 'acl2SessionPanel' && acl2Session.panelLocked",
+          "group": "navigation@1"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "acl2-session.lockPanel",
+          "when": "activeWebviewPanelId == 'acl2SessionPanel' && !acl2Session.panelLocked"
+        },
+        {
+          "command": "acl2-session.unlockPanel",
+          "when": "acl2Session.panelLocked"
         }
       ]
     },

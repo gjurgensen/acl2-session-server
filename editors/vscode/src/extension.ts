@@ -15,7 +15,7 @@
 // reds included, and no diagnostics. One treatment per fact, never two.
 
 import * as vscode from 'vscode';
-import { planTail } from './policy';
+import { Anchor, Edit, keepAnchor, lockedIndex, planTail } from './policy';
 import { readFileSync } from 'fs';
 import {
   DaemonClient,
@@ -349,6 +349,17 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('acl2-session.showDocs', () => forBook(showDocs)),
     vscode.commands.registerCommand('acl2-session.certify', () => forBook(certifyBook)),
     vscode.tasks.registerTaskProvider('acl2', certifyTaskProvider),
+    vscode.commands.registerCommand('acl2-session.lockPanel', () => forBook(takeLock)),
+    // Not `forBook`: letting go must work even when the editor in front
+    // belongs to another book, which is exactly when a lock is doing its job.
+    vscode.commands.registerCommand('acl2-session.unlockPanel', () => {
+      const was = locked?.book;
+      releaseLock();
+      const s = was === undefined ? undefined : byId.get(was);
+      if (s) {
+        void followPanel(s);
+      }
+    }),
     vscode.commands.registerCommand('acl2-session.showPanel', () =>
       forBook((s) => {
         panel.open();
@@ -379,6 +390,21 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!s || e.contentChanges.length === 0) {
         return;
       }
+      if (locked && locked.book === s.id) {
+        const edits: Edit[] = e.contentChanges.map((c) => ({
+          startLine: c.range.start.line + 1,
+          startChar: c.range.start.character,
+          endLine: c.range.end.line + 1,
+          endChar: c.range.end.character,
+          newLines: c.text.split('\n').length,
+        }));
+        const moved = keepAnchor(locked.anchor, edits);
+        if (moved) {
+          locked = { book: locked.book, anchor: moved };
+        } else {
+          releaseLock('the form it was held on was edited away');
+        }
+      }
       if (s.debounce) {
         clearTimeout(s.debounce);
       }
@@ -392,7 +418,8 @@ export function activate(context: vscode.ExtensionContext): void {
       if (outputView.visible) {
         void followOutputView(s, false);
       }
-      if (panel.visible) {
+      // A held panel is exactly the one that does not follow the cursor.
+      if (panel.visible && !(locked && locked.book === s.id)) {
         void followPanel(s);
       }
     }),
@@ -1210,6 +1237,9 @@ function stopBook(s: BookSession): void {
  * none of the `close` above: there is nobody left to tell.
  */
 function dropBook(s: BookSession): void {
+  if (locked && locked.book === s.id) {
+    releaseLock('its book was closed');
+  }
   books.delete(s.doc.uri.toString());
   byId.delete(s.id);
   // The transcript is answers from a world that no longer exists.
@@ -1597,7 +1627,11 @@ function onState(p: StateEvent): void {
   paint(s);
   updateStatusBar(s);
   const shown = panel.shown();
-  if (shown && shown.book === s.id) {
+  if (locked && locked.book === s.id) {
+    // Re-resolved rather than re-shown: the split has just moved, and the
+    // whole question is whether the form we are held on is still there.
+    void followPanel(s);
+  } else if (shown && shown.book === s.id) {
     void followPanel(s, shown.index);
   } else if (!shown && panel.visible) {
     // Open but showing nothing yet -- which is exactly where `start` leaves
@@ -1879,16 +1913,86 @@ async function reflowCheckpoints(s: BookSession, index: number): Promise<void> {
 /** The width last sent, so a re-measure that says the same thing costs nothing. */
 let lastCols = 0;
 
+/**
+ * The form the panel is held on, if it is held on one.
+ *
+ * The anchor is where that form *starts*, which is the only position that can
+ * be checked: `lockedIndex` asks the daemon's own split whether a form still
+ * begins exactly there, and lets go when it does not. Holding an index instead
+ * would survive nothing -- indices renumber whenever a form is added above --
+ * and holding a line alone cannot tell two forms on one line apart.
+ */
+let locked: { book: string; anchor: Anchor } | undefined;
+
+/** Which form the panel should be showing, and whether it is held there. */
+function panelTarget(s: BookSession): number | undefined {
+  if (locked && locked.book === s.id) {
+    const at = lockedIndex(locked.anchor, s.lastState?.units ?? []);
+    if (at !== undefined) {
+      return at;
+    }
+    // No form starts where we are pointing any more, so whatever we would
+    // show is not what was held.
+    releaseLock('the form it was held on is no longer there');
+  }
+  // The cursor only speaks for this book when it is in this book.
+  const editor = vscode.window.activeTextEditor;
+  return editor?.document === s.doc ? unitAt(s, cursorTarget())?.index : undefined;
+}
+
+/**
+ * Hold the panel on the form at the cursor.
+ *
+ * Anchored to the form's own start rather than to the cursor: a cursor can sit
+ * on a blank line or in a comment between forms, and an anchor that resolves to
+ * nothing is a lock that lets go the moment it is taken.
+ */
+function takeLock(s: BookSession): void {
+  const u = unitAt(s, cursorTarget());
+  const editor = vscode.window.activeTextEditor;
+  if (!u || !editor || editor.document !== s.doc) {
+    void vscode.window.showInformationMessage('ACL2: put the cursor in a form to hold the panel on it');
+    return;
+  }
+  locked = {
+    book: s.id,
+    anchor: {
+      line: u.line_start,
+      column: u.col_start,
+      character: charOffset(editor.document.lineAt(u.line_start - 1).text, u.col_start),
+    },
+  };
+  void vscode.commands.executeCommand('setContext', 'acl2Session.panelLocked', true);
+  panel.setLockLabel('locked');
+  panel.note(undefined);
+  void followPanel(s);
+}
+
+/**
+ * Let go, and say so.
+ *
+ * Never silently: a lock that stopped working without a word is
+ * indistinguishable from one that is still holding, which is the failure this
+ * whole design is arranged to avoid. `why` is absent when the reader asked.
+ */
+function releaseLock(why?: string): void {
+  if (!locked) {
+    return;
+  }
+  locked = undefined;
+  void vscode.commands.executeCommand('setContext', 'acl2Session.panelLocked', false);
+  panel.setLockLabel(undefined);
+  if (why) {
+    panel.note(`The panel is no longer held: ${why}.`);
+    channel.appendLine(`panel: released -- ${why}`);
+  }
+}
+
 /** Update the panel for the form at the cursor (or a pinned INDEX). */
 async function followPanel(s: BookSession, index?: number): Promise<void> {
-  let at = index;
-  if (at === undefined) {
-    const editor = vscode.window.activeTextEditor;
-    if (!editor || editor.document !== s.doc) {
-      return;
-    }
-    at = unitAt(s, cursorTarget())?.index;
-  }
+  // `panelTarget` decides between the held form and the cursor's, and is the
+  // one that knows whether the cursor speaks for this book at all.
+  const at = index ?? panelTarget(s);
   if (at === undefined) {
     return;
   }

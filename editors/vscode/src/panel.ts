@@ -368,6 +368,33 @@ export class Panel {
     this.onCols?.(this.layoutCols());
   }
 
+  /**
+   * Mark the tab as held, or stop marking it.
+   *
+   * In the title because that is where it stays visible: the tab-bar icon
+   * shows the state only while the panel's own tab has focus, and a reader
+   * watching a form is by definition looking somewhere else. VSCode's own
+   * markdown preview does the same thing, showing a locked preview as
+   * `[Preview] file.md`.
+   */
+  setLockLabel(label: string | undefined): void {
+    if (this.panel) {
+      this.panel.title = label ? `ACL2 (${label})` : 'ACL2';
+    }
+  }
+
+  /**
+   * Say something to the reader in the page itself.
+   *
+   * For the one thing the panel has to volunteer rather than answer: that it
+   * has stopped being held on the form it was held on. A notification would be
+   * dismissed before it was read and a status-bar entry would be missed; this
+   * is in the place the reader is already looking.
+   */
+  note(text: string | undefined): void {
+    void this.panel?.webview.postMessage({ kind: 'note', text });
+  }
+
   /** Re-send the current model, for when the theme changed under us. */
   refresh(): void {
     if (this.model) {
@@ -485,6 +512,12 @@ body { padding: 2px 12px 12px; }
 const vscode = acquireVsCodeApi();
 ${SHARED_JS}
 let model;
+// Something the panel has to say on its own account -- that it stopped being
+// held on a form. It outlives the render that follows it, which is the whole
+// point: letting go is followed at once by showing whatever the cursor is in,
+// and a message the next render wiped would never be seen. Cleared when the
+// panel is held again.
+let note;
 let inductions = [];
 let ruleEntries = [];
 let rulesKey = '';
@@ -531,6 +564,9 @@ window.addEventListener('message', (ev) => {
     Object.assign(toks, m.toks || {});
     inductions = m.records || [];
     inductionKey = m.book + ':' + m.index;
+    render();
+  } else if (m.kind === 'note') {
+    note = m.text;
     render();
   } else if (m.kind === 'tail') {
     const t = document.getElementById('tailtext');
@@ -636,7 +672,13 @@ function withDetail(m) {
 
 function render() {
   const m = model;
-  let h = '<div class="h">' +
+  if (!m) {
+    document.getElementById('root').innerHTML =
+      note ? '<div class="notice">' + esc(note) + '</div>' : '';
+    return;
+  }
+  let h = note ? '<div class="notice">' + esc(note) + '</div>' : '';
+  h += '<div class="h">' +
     '<span class="status ' + esc(m.status) + '">' + esc(m.status) + '</span>' +
     '<span>form ' + (m.index + 1) + '/' + m.total + '</span>' +
     '<span class="meta">lines ' + (m.colStart === 1

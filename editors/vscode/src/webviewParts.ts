@@ -41,6 +41,10 @@ button { background: var(--vscode-button-secondaryBackground);
 button:hover { background: var(--vscode-button-secondaryHoverBackground); }
 .note { background: rgba(198, 40, 40, 0.15); padding: 6px 9px; border-radius: 4px;
         margin: 8px 0; font-size: 12px; }
+/* The panel speaking for itself rather than about a form. Neutral on purpose:
+   red in here already means a form went red. */
+.notice { border-left: 3px solid var(--vscode-focusBorder, #888); padding: 4px 9px;
+          margin: 8px 0; font-size: 12px; opacity: 0.85; }
 .rules code, .codes code { display: inline-block; margin: 1px 5px 1px 0; }
 .cp { margin: 8px 0; }
 details > summary { cursor: pointer; }

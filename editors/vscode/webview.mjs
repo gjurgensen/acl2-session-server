@@ -346,6 +346,84 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
         'while a small one is said exactly, since rounding it would say 0');
 }
 
+// ---- the panel can speak for itself ----
+{
+  const page = require('./out/panel.js').HTML;
+  // Letting go of a lock is followed immediately by rendering whatever the
+  // cursor is in, so the message has to outlive that render or it is never
+  // read. These pin the two halves of that: the page keeps a note across a
+  // model, and drops it when the panel is held again.
+  check(/kind === 'note'/.test(page), 'the page takes a note from the extension');
+  const modelBranch = /if \(m\.kind === 'model'\) \{([\s\S]*?)\n  \} else if/.exec(page);
+  check(modelBranch !== null, 'the page has a model branch');
+  check(!/note = undefined/.test(modelBranch[1]),
+        'and a model does not silently wipe a note the reader has not seen');
+  check(/class="notice"/.test(page), 'a note renders in its own neutral style');
+  check(!/note \? '<div class="note">/.test(page),
+        'not the red one, which in here means a form went red');
+  check(/\.notice \{/.test(page), 'and that style is defined');
+}
+
+// ---- a lock follows its form, or lets go ----
+{
+  const { keepAnchor, lockedIndex } = require('./out/policy.js');
+  // A form starting at line 10, column 1 (byte) / 0 (UTF-16).
+  const anchor = { line: 10, column: 1, character: 0 };
+  // An edit, in the editor's coordinates with 1-based lines: what it replaced
+  // and how many lines went back.
+  const edit = (startLine, startChar, endLine, endChar, newLines) =>
+    ({ startLine, startChar, endLine, endChar, newLines });
+  const lineOf = (r) => (r === undefined ? undefined : r.line);
+
+  // Whole lines added or removed above: the form slides, which is the case
+  // the feature exists for.
+  check(lineOf(keepAnchor(anchor, [edit(3, 0, 3, 0, 3)])) === 12, 'two lines added above push the form down');
+  check(lineOf(keepAnchor(anchor, [edit(3, 0, 5, 0, 1)])) === 8, 'two lines removed above pull it up');
+  check(lineOf(keepAnchor(anchor, [edit(3, 4, 3, 9, 1)])) === 10, 'an edit above of the same height moves nothing');
+  check(lineOf(keepAnchor(anchor, [edit(20, 0, 25, 0, 1)])) === 10, 'an edit below moves nothing');
+
+  // Inside the form: the first character has not moved, so the lock holds --
+  // this is the whole point, since editing the locked form is what you do.
+  check(lineOf(keepAnchor(anchor, [edit(10, 8, 10, 12, 1)])) === 10, 'editing within the line, after the form starts, holds');
+  check(lineOf(keepAnchor(anchor, [edit(11, 2, 11, 6, 1)])) === 10, 'editing a later line of the form holds');
+  check(lineOf(keepAnchor(anchor, [edit(10, 8, 10, 8, 4)])) === 10, 'and so does splitting the form across new lines');
+
+  // Anything touching where we point gives up.
+  check(keepAnchor(anchor, [edit(10, 0, 10, 0, 1)]) === undefined, 'inserting exactly at the form start lets go');
+  check(keepAnchor(anchor, [edit(8, 0, 11, 0, 1)]) === undefined, 'an edit swallowing the line lets go');
+  check(keepAnchor(anchor, [edit(10, 0, 12, 0, 1)]) === undefined, 'and so does deleting the form itself');
+
+  // An edit finishing to our left on our own line would move our column, and
+  // columns are not tracked -- so let go rather than guess.
+  const second = { line: 10, column: 20, character: 19 };
+  check(keepAnchor(second, [edit(10, 0, 10, 4, 1)]) === undefined,
+        'an edit before a form on its own line lets go');
+  check(lineOf(keepAnchor(second, [edit(10, 25, 10, 30, 1)])) === 10,
+        'while one after it holds');
+
+  // Several ranges in one event are all measured against the document they
+  // were reported against, not against each other.
+  check(lineOf(keepAnchor(anchor, [edit(1, 0, 1, 0, 3), edit(30, 0, 30, 0, 5)])) === 12,
+        'ranges in one event compose, and only those above count');
+
+  // The byte column rides along untouched: it is what tells two forms on one
+  // line apart, and it is what has to match the wire.
+  check(keepAnchor(second, [edit(1, 0, 1, 0, 2)]).column === 20, 'the byte column is carried, not recomputed');
+
+  // Resolving: a lock is good only where a form actually starts.
+  const units = [
+    { index: 0, line_start: 1, col_start: 1 },
+    { index: 1, line_start: 3, col_start: 1 },
+    { index: 2, line_start: 3, col_start: 20 },
+  ];
+  const at = (line, column) => ({ line, column, character: column - 1 });
+  check(lockedIndex(at(3, 20), units) === 2, 'the second form on a shared line is found by its column');
+  check(lockedIndex(at(3, 1), units) === 1, 'and the first by its own');
+  check(lockedIndex(at(3, 9), units) === undefined,
+        'a position merely *inside* a form is not that form starting -- let go');
+  check(lockedIndex(at(4, 1), units) === undefined, 'and neither is a line with no form on it');
+}
+
 // ---- tails are pushed, never polled ----
 {
   const { planTail } = require('./out/policy.js');
