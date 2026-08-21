@@ -4177,14 +4177,23 @@ impl Book {
 /// untranslated term (for display) and the translated one, and we keep the
 /// first.
 ///
-/// The world-segment dance mirrors `pr-fn` exactly: `decode-logical-name` to
-/// the event, `world-to-next-non-deeper-event` for its segment,
-/// `actual-props` for the rules it laid down, filtered to this name's numes.
+/// The world-segment dance mirrors `pr-fn`, call for call:
+/// `decode-logical-name` to the event, `world-to-next-event` on its `cdr`
+/// for the segment, `actual-props` for the rules it laid down, filtered to
+/// this name's numes. Following `pr-fn` literally is the point -- these are
+/// `:program`-mode system internals in the same category as
+/// `get-event-data`, and the only guarantee about them is that ACL2's own
+/// caller keeps working.
 ///
-/// These are `:program`-mode system internals, in the same category as
-/// `get-event-data`: pinned to an ACL2 version, confined to this module, and
-/// loud rather than silent if they move -- a probe that no longer evaluates
-/// fails its submission instead of quietly reporting less.
+/// A name ACL2 does not have takes the whole probe down with it, not just
+/// the field that used it: the probe is one form, so a translate error means
+/// nothing is printed at all, and `scrape_rules` is best-effort, so the
+/// store is simply left empty. That is quiet -- quiet enough that
+/// `world-to-next-non-deeper-event`, a name no ACL2 has ever had, sat here
+/// disabling the entire scrape while every test that read
+/// `Book::rules_for` failed and every test that read a sync's own
+/// `event_data` went on passing. The live tests are what catch this; there
+/// is nothing at compile time that can.
 /// How a pass of the rules scrape ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scrape {
@@ -4261,9 +4270,7 @@ fn rules_probe(names: &[String], untranslated: bool) -> String {
              (acl2::if acl2::w2\n\
                (acl2::info-for-rules\n\
                  (acl2::actual-props\n\
-                   (acl2::world-to-next-non-deeper-event\n\
-                     (acl2::access-event-tuple-depth (acl2::cddr (acl2::car acl2::w2)))\n\
-                     (acl2::cdr acl2::w2))\n\
+                   (acl2::world-to-next-event (acl2::cdr acl2::w2))\n\
                    acl2::nil acl2::nil)\n\
                  (acl2::strip-cars acl2::rmp)\n\
                  (acl2::ens-maybe-brr acl2::state)\n\
