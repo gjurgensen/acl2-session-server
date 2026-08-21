@@ -37,13 +37,36 @@ use acl2_session::{SyncOptions,
 /// is one form, that takes the whole scrape down silently -- see
 /// `rules_probe` for why nothing says so.
 ///
-/// Measured rather than assumed: on 8.6 this suite fails exactly three
-/// tests, the three that read `Book::rules_for`, and the other 46 pass. So
-/// as of this writing the *whole* project's version floor is that one
-/// symbol -- `get-event-data`, `gag-state`, the `justification` accessors,
-/// `ubu!` and the rest of the probes are all older than 8.6. That is a
-/// measurement of today's probes, not a policy: nothing enforces it, and a
-/// probe added tomorrow can raise the floor without anything noticing.
+/// That floor is the **library's**, not this suite's. The symbol is in
+/// `rules_probe` in `src/sync.rs`; nothing in any test names it. Run the
+/// MCP or the editor against an 8.6 image and every form's rule detail is
+/// silently missing for real, with these tests merely the thing that
+/// notices. Measured: on 8.6 this suite fails exactly the three tests that
+/// read `Book::rules_for` and the other 46 pass, so as of this writing that
+/// one symbol is the library's whole version floor -- `get-event-data`,
+/// `gag-state`, the `justification` accessors and `ubu!` all predate 8.6.
+///
+/// The suite's own floor is **higher**, and worth keeping separate: a test
+/// here can fail while the library is perfectly correct. These depend on
+/// things ACL2's version does not pin --
+///
+/// - **the community books' layout.** `proto_live.rs` includes
+///   `std/util/bstar` and then asserts the jump lands on the line of
+///   `bstar.lisp` that defines `b*`, and that `patbind-unless-casematch`
+///   decomposes to the `def-b*-binder` that generates it. Reorganise bstar
+///   and those fail with nothing wrong downstream of them.
+/// - **ACL2's wording.** Anything asserting on `ACL2 Error` text, or on
+///   values ACL2 chose -- a `:ideal` symbol-class, an `(acl2-count x)`
+///   measure -- is reading a decision ACL2 is free to revisit.
+/// - **the environment.** A book directory's `acl2-customization.lsp` is
+///   inherited, and an image old enough to reject one quits at startup, so
+///   *everything* fails for a reason that is neither the library nor the
+///   test.
+///
+/// So a failure here is not by itself evidence about the library: check
+/// which of the four it is. And none of this is enforced -- a probe added
+/// tomorrow can raise the library's floor with nothing to notice but these
+/// tests, on whatever image whoever runs them happens to have.
 fn acl2() -> Option<PathBuf> {
     std::env::var("ACL2").ok().map(PathBuf::from)
 }

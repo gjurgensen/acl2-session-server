@@ -79,7 +79,10 @@ The first runs the unit tests. The second adds the integration tests, which
 drive a real ACL2 — the prefix invariant, deadlines and interrupts, eval, and
 the splitter across every book in a tree if `ACL2_BOOKS` is also set.
 
-The image must be **ACL2 8.7 or later**. The probes read system internals,
-and one of them — the rules scrape — needs a function 8.7 introduced. An
-older image fails three tests and silently returns nothing for a form's
-rules; `crates/acl2-session/tests/live.rs` says which, and why it is quiet.
+The image must be **ACL2 8.7 or later** — a library requirement, not a
+testing one. The probes read system internals, and the rules scrape needs a
+function 8.7 introduced; on an older image a real session silently returns
+nothing for every form's rules, and these tests are what notices. The suite
+also depends on things ACL2's version does not pin, such as the community
+books' layout, so a failure here is not by itself a verdict on the library.
+`crates/acl2-session/tests/live.rs` separates the two.
