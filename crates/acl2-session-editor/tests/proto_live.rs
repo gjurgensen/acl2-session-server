@@ -1212,3 +1212,82 @@ fn open_reports_when_prove_output_was_re_enabled() {
             "an environment that did not inhibit PROVE carries no notice: {off}");
     d.request("close", json!({ "book": off["book"].as_str().unwrap() }));
 }
+
+/// A target that names one of two forms written on the same line.
+///
+/// The daemon steps one unit at a time, naming each by where it ends, so a
+/// line shared by two forms is the one case that arithmetic cannot express:
+/// held at the line, the second form goes in with the first and a retraction
+/// to the first bounces straight back off it. The column is what makes each
+/// of them nameable, in the target the client sends and in every position
+/// the daemon sends back.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_target_column_picks_between_two_forms_on_a_line() {
+    let Some(acl2) = acl2() else {
+        eprintln!("ACL2 not set; skipping");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("acl2-editord-col-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let book_path: PathBuf = dir.join("shared.lisp");
+    //                            1         2         3
+    //                   123456789012345678901234567890123456
+    let text = "(in-package \"ACL2\")\n(defun one (x) x) (defun two (x) x)\n";
+    std::fs::write(&book_path, text).expect("write book");
+
+    let mut d = Daemon::start(&acl2);
+    let opened = d.request("open", json!({ "path": book_path.to_str().unwrap() }));
+    let book = opened["book"].as_str().expect("book id").to_string();
+
+    // Held at the end of the first form on the line.
+    d.notify("update", json!({
+        "book": book, "text": text,
+        "target_line": 2, "target_column": 18, "revision": 1,
+    }));
+    let events = d.events_until_settled();
+    let state = last_state(&events);
+    assert_eq!(statuses(&state), ["admitted", "admitted", "pending"],
+               "the second form on the line is held out: {state}");
+    let units = state["units"].as_array().expect("units");
+    assert_eq!((units[1]["line_start"].as_u64(), units[2]["line_start"].as_u64()),
+               (Some(2), Some(2)), "both are on line 2, which is the difficulty");
+    assert_eq!((units[1]["col_start"].as_u64(), units[1]["col_end"].as_u64()),
+               (Some(1), Some(18)), "and the columns are the difference: {state}");
+    assert_eq!(units[2]["col_start"].as_u64(), Some(19));
+
+    // One column further along takes the other form too.
+    d.notify("update", json!({
+        "book": book, "text": text,
+        "target_line": 2, "target_column": 19, "revision": 2,
+    }));
+    let events = d.events_until_settled();
+    assert_eq!(statuses(&last_state(&events)), ["admitted", "admitted", "admitted"]);
+
+    // And back: a retraction to the first form has to hold there rather than
+    // re-admitting its neighbour on the next step.
+    d.notify("retract", json!({ "book": book, "keep": 2 }));
+    d.notify("update", json!({
+        "book": book, "text": text,
+        "target_line": 2, "target_column": 18, "revision": 3,
+    }));
+    let events = d.events_until_settled();
+    assert_eq!(statuses(&last_state(&events)), ["admitted", "admitted", "pending"],
+               "the retraction holds: {:?}", last_state(&events));
+
+    // Every position the daemon reports carries its column.
+    let def = d.request("definition", json!({ "book": book, "name": "two" }));
+    assert_eq!((def["line"].as_u64(), def["column"].as_u64()), (Some(2), Some(19)),
+               "definition says which of the two: {def}");
+    let syms = d.request("symbols", json!({ "book": book }));
+    let outline: Vec<String> = syms["symbols"].as_array().expect("symbols").iter()
+        .map(|s| format!("{}@{}:{}", s["name"].as_str().unwrap_or("?"),
+                         s["line_start"], s["col_start"]))
+        .collect();
+    assert_eq!(outline, ["in-package@1:1", "one@2:1", "two@2:19"],
+               "the outline separates them: {syms}");
+
+    d.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}

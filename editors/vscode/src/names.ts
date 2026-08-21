@@ -183,7 +183,7 @@ export function prefixAt(lineText: string, character: number): string {
   return m ? m[0] : '';
 }
 
-/** One outline entry. Lines only; the client widens them to whole lines. */
+/** One outline entry. Columns are 1-based and in bytes; see `positions.ts`. */
 export interface BookSymbol {
   name: string;
   kind: 'function' | 'macro' | 'theorem' | 'constant' | 'include' | 'other';
@@ -191,12 +191,16 @@ export interface BookSymbol {
   unit?: number;
   line_start: number;
   line_end: number;
+  col_start: number;
+  col_end: number;
   children?: BookSymbol[];
 }
 
 /** One `include-book`, resolved. `path` absent means it did not resolve. */
 export interface BookLink {
   line: number;
+  /** 1-based byte column of the `(`, which separates two on one line. */
+  column: number;
   book: string;
   path?: string;
 }
@@ -204,16 +208,21 @@ export interface BookLink {
 /**
  * Where the book name sits on its line, as UTF-16 offsets.
  *
- * The daemon deliberately sends no coordinates -- it says
- * which line and which name, and the client locates the quoted string
- * itself. Searching one line in TypeScript is UTF-16 native, so the byte
- * offsets the daemon deals in never have to be translated at all.
+ * The daemon says which line, which column, and which name; the client
+ * locates the quoted string itself, because searching one line in TypeScript
+ * is UTF-16 native and the daemon's own offsets are bytes. `from` is where
+ * that include's form starts, so two includes on one line find their own
+ * names rather than both finding the first.
  *
  * The quotes are excluded from the range, so the link underlines the path
  * rather than the string literal.
  */
-export function linkRangeOnLine(lineText: string, book: string): [number, number] | undefined {
-  const at = lineText.indexOf(`"${book}"`);
+export function linkRangeOnLine(
+  lineText: string,
+  book: string,
+  from = 0
+): [number, number] | undefined {
+  const at = lineText.indexOf(`"${book}"`, from);
   return at < 0 ? undefined : [at + 1, at + 1 + book.length];
 }
 
@@ -225,6 +234,8 @@ export interface DefinitionReply {
   path?: string;
   /** Absent means "somewhere in that file" -- open it at the top. */
   line?: number;
+  /** 1-based byte column on that line. Set exactly when `line` is. */
+  column?: number;
   /** `definer` when the name is written at that line. */
   how?: string;
 }

@@ -14,6 +14,14 @@ export interface UnitState {
   index: number;
   line_start: number;
   line_end: number;
+  /**
+   * The form's two columns, 1-based and counted in **bytes**: `col_end` is
+   * one past the closing paren, so the pair reads as a range. They are the
+   * only thing that tells two forms written on one line apart. See
+   * `positions.ts` for turning them into editor positions.
+   */
+  col_start: number;
+  col_end: number;
   status: string;
 }
 
@@ -75,6 +83,8 @@ export interface UnitEvent extends Envelope {
   outcome: string;
   line_start: number;
   line_end: number;
+  col_start: number;
+  col_end: number;
   elapsed_ms?: number;
   retry_output_ref?: string;
 }

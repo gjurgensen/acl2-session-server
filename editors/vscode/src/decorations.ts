@@ -17,6 +17,7 @@
 
 import * as vscode from 'vscode';
 import { UnitState } from './protocol';
+import { charOffset } from './positions';
 
 export type DecorationMode = 'minimal' | 'wash';
 
@@ -135,6 +136,11 @@ export class Decorations {
   }
 
   apply(editor: vscode.TextEditor, units: UnitState[], opts: DecorationOptions): void {
+    // Whole lines, columns and all: a gutter has one cell per line and a wash
+    // is `isWholeLine`, so neither can show two statuses on one line however
+    // exactly the forms are located. Two forms on a line therefore paint over
+    // each other -- rare, and the panel and the target glyph, which *can* be
+    // exact, are where that line's forms are told apart.
     const span = (u: UnitState) => new vscode.Range(u.line_start - 1, 0, u.line_end - 1, 0);
     const of = (status: string) => units.filter((u) => u.status === status);
 
@@ -173,20 +179,30 @@ export class Decorations {
     editor.setDecorations(this.redBar, red);
   }
 
-  /** Draw (or clear, with null) the held-target glyph. */
-  applyTarget(editor: vscode.TextEditor, line: number | null): void {
-    if (line === null) {
+  /**
+   * Draw (or clear, with null) the held-target glyph.
+   *
+   * At the target's own column when it has one, rather than at the end of
+   * its line: a target holding after the first of two forms on a line would
+   * otherwise put the glyph after the second, which reads as including it.
+   */
+  applyTarget(editor: vscode.TextEditor, target: { line: number; column: number | null } | null): void {
+    if (target === null) {
       editor.setDecorations(this.target, []);
       return;
     }
-    if (line < 1) {
+    if (target.line < 1) {
       // Held before the first form: the glyph leads the first line.
       editor.setDecorations(this.target, [new vscode.Range(0, 0, 0, 0)]);
       return;
     }
-    const l = Math.min(line, editor.document.lineCount) - 1;
-    const end = editor.document.lineAt(l).range.end;
-    editor.setDecorations(this.target, [new vscode.Range(end, end)]);
+    const l = Math.min(target.line, editor.document.lineCount) - 1;
+    const text = editor.document.lineAt(l).text;
+    const at =
+      target.column === null
+        ? editor.document.lineAt(l).range.end
+        : new vscode.Position(l, charOffset(text, target.column));
+    editor.setDecorations(this.target, [new vscode.Range(at, at)]);
   }
 
   clear(editor: vscode.TextEditor): void {

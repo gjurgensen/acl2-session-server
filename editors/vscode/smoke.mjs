@@ -232,6 +232,79 @@ assert(defKeys.includes(':clique'), 'but the rest of the rule is');
 assert(!batch.rules[1].found, 'a name this file never introduced is not ours to explain');
 assert(batch.rules[1].name === 'binary-append', 'and is still named, so the order is usable');
 
+// Two forms on one line: rare, legal, and the case a line number cannot
+// name. A second book rather than more forms in the first, so the assertions
+// above keep their indices.
+//
+// Columns are 1-based and count bytes, and this file is ASCII, so they are
+// also the character offsets the editor would compute.
+//
+//                     1         2         3
+//            123456789012345678901234567890123456
+const twoText = '(in-package "ACL2")\n(defun one (x) x) (defun two (x) x)\n';
+const twoBook = join(dir, 'two.lisp');
+writeFileSync(twoBook, twoText);
+const two = await c.request('open', { path: twoBook });
+const twoEvents = () => events.filter(([, p]) => p.book === two.book);
+
+// Held at the end of the *first* form on the line. The second must stay
+// pending: a target that took the whole line would admit both, and there
+// would be no way to ask for one.
+events.length = 0;
+c.notify('update', {
+  book: two.book,
+  text: twoText,
+  target_line: 2,
+  target_column: 18,
+  revision: 1,
+});
+await until(() => twoEvents().find(([m]) => m === 'settled'));
+const held = twoEvents().filter(([m]) => m === 'state').pop()[1];
+assert(held.units.length === 3, 'the shared line splits into two forms, not one');
+assert(
+  held.units[1].line_start === 2 && held.units[2].line_start === 2,
+  'both forms report the same line, which is why the column has to exist'
+);
+assert(
+  held.units[1].col_start === 1 && held.units[1].col_end === 18,
+  'the first form ends where the second begins'
+);
+assert(held.units[2].col_start === 19, 'and the second starts after the space');
+assert(
+  held.units.map((u) => u.status).join(',') === 'admitted,admitted,pending',
+  'a target at the first form’s end admits it and stops'
+);
+
+// One column further along is the other form, and it goes in.
+events.length = 0;
+c.notify('update', {
+  book: two.book,
+  text: twoText,
+  target_line: 2,
+  target_column: 19,
+  revision: 2,
+});
+await until(() => twoEvents().find(([m]) => m === 'settled'));
+const both = twoEvents().filter(([m]) => m === 'state').pop()[1];
+assert(
+  both.units.map((u) => u.status).join(',') === 'admitted,admitted,admitted',
+  'a target on the second form admits that one too'
+);
+
+const dtwo = await c.request('definition', { book: two.book, name: 'two' });
+assert(dtwo.found && dtwo.line === 2, 'definition finds the second form on the line');
+assert(dtwo.column === 19, 'and says which of the two it is');
+const done = await c.request('definition', { book: two.book, name: 'one' });
+assert(done.line === 2 && done.column === 1, 'the first is told apart by the same field');
+
+const outline = await c.request('symbols', { book: two.book });
+const heads = outline.symbols.map((s) => `${s.name}@${s.line_start}:${s.col_start}`);
+assert(
+  heads.join(' ') === 'in-package@1:1 one@2:1 two@2:19',
+  `the outline separates them too (${heads.join(' ')})`
+);
+assert((await c.request('close', { book: two.book })).closed === true, 'the second book closes');
+
 // A book of four small forms must not cost megabytes. The number is
 // generous -- this is a floor against floods, not a tight bound -- and it
 // exists because a client that asked the daemon for a slice on every `tail`

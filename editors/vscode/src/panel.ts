@@ -129,6 +129,12 @@ export interface PanelModel extends PanelEnvelope {
   total: number;
   lineStart: number;
   lineEnd: number;
+  /**
+   * The form's columns, shown only when they say something: a form starting
+   * in column 1 is the only one on its line, and the lines alone name it.
+   */
+  colStart: number;
+  colEnd: number;
   /** The paint status: `admitted`, `conditional`, `skipped`, `failed`, ... */
   status: string;
   skipped: boolean;
@@ -633,7 +639,9 @@ function render() {
   let h = '<div class="h">' +
     '<span class="status ' + esc(m.status) + '">' + esc(m.status) + '</span>' +
     '<span>form ' + (m.index + 1) + '/' + m.total + '</span>' +
-    '<span class="meta">lines ' + m.lineStart + '\\u2013' + m.lineEnd + '</span>';
+    '<span class="meta">lines ' + (m.colStart === 1
+      ? m.lineStart + '\\u2013' + m.lineEnd
+      : m.lineStart + ':' + m.colStart + '\\u2013' + m.lineEnd + ':' + m.colEnd) + '</span>';
   if (m.elapsedMs != null) {
     h += '<span class="meta">' + (m.elapsedMs / 1000).toFixed(m.elapsedMs < 10000 ? 1 : 0) + 's</span>';
   }

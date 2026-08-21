@@ -2385,3 +2385,72 @@ fn a_latin1_book_survives_in_both_directions() {
     assert!(text.contains("caf\u{e9}"), "the byte survives the round trip: {text:?}");
     assert!(!text.contains('\u{fffd}'), "and is never replaced: {text:?}");
 }
+
+/// Two forms on one line, admitted and retracted one at a time.
+///
+/// Rare in real books, and legal, and the case a line number cannot name:
+/// both forms report line 2, so a target that speaks only in lines can ask
+/// for "everything on line 2" and nothing finer. With a column each form is
+/// selectable on its own, in both directions.
+#[test]
+#[ignore = "needs ACL2"]
+fn two_forms_on_one_line_are_selected_by_column() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("shared-line");
+    let file = dir.join("shared.lisp");
+    //                    1         2         3
+    //           123456789012345678901234567890123456
+    let text = "(in-package \"ACL2\")\n(defun one (x) x) (defun two (x) x)\n";
+    std::fs::write(&file, text).expect("write book");
+
+    let mut b = Book::open(&acl2, &file).unwrap();
+    let through = |line, column| SyncOptions {
+        through_line: Some(line),
+        through_column: column,
+        ..Default::default()
+    };
+
+    // Held at the end of the first form. The second shares its line and must
+    // stay out: it is the only thing the column can be asked for.
+    let o = b.sync_with(&through(2, Some(18)), D).expect("sync to the first");
+    assert!(o.failed.is_none(), "{:?}", o.failed.as_ref().map(|f| &f.error_line));
+    assert_eq!(o.admitted.len(), 2, "in-package and `one`, and not `two`");
+    assert_eq!(o.resolved_through_line, Some(2));
+    assert_eq!(o.resolved_through_column, Some(1), "the form starting in column 1");
+    let last = o.admitted.last().unwrap();
+    assert_eq!((last.line_start, last.col_start), (2, 1));
+    assert_eq!((last.line_end, last.col_end), (2, 18), "one past its closing paren");
+    assert_eq!(last.names, ["one"]);
+
+    // `two` is genuinely not in the world, rather than merely unreported.
+    let r = b.eval("(two 1)", D).expect("eval");
+    assert_eq!(r.outcome, acl2_session::Outcome::Failed,
+               "the second form was not admitted");
+
+    // One column further along is the other form.
+    let o = b.sync_with(&through(2, Some(19)), D).expect("sync to the second");
+    assert_eq!(o.reused, 2);
+    assert_eq!(o.admitted.len(), 1);
+    assert_eq!(o.resolved_through_column, Some(19));
+    let two = &o.admitted[0];
+    assert_eq!((two.line_start, two.col_start), (2, 19));
+    assert_eq!(two.names, ["two"]);
+    assert_eq!(b.eval("(two 1)", D).expect("eval").outcome, acl2_session::Outcome::Ok);
+
+    // Without a column the line means the whole line, which is the only
+    // thing it can mean -- and is what a caller with no cursor gets.
+    let o = b.sync(Some(2), D).expect("sync by line alone");
+    assert_eq!((o.reused, o.admitted.len()), (3, 0), "both forms already in");
+    assert_eq!(o.resolved_through_column, Some(19), "the later of the two");
+
+    // And retracting to the first form leaves the second out, rather than
+    // the line taking both back in.
+    let o = b.retract_to(text.as_bytes(), 2, D).expect("retract");
+    assert_eq!(o.rolled_back, 1);
+    let o = b.sync_with(&through(2, Some(18)), D).expect("re-sync to the first");
+    assert_eq!((o.reused, o.admitted.len()), (2, 0), "the target holds it there");
+    assert_eq!(b.eval("(two 1)", D).expect("eval").outcome,
+               acl2_session::Outcome::Failed);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

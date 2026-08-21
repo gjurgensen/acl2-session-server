@@ -29,6 +29,7 @@ import {
 } from './protocol';
 import { Envelope, InductionWire, RulesReply, RuneWire } from './protocol';
 import { DecorationMode, Decorations } from './decorations';
+import { byteColumn, charOffset } from './positions';
 import { EVAL_SCHEME, OutputView, SCHEME } from './outputView';
 import { Highlighter } from './highlight';
 import { Panel, PanelEnvelope, PanelInduction, PanelModel, PanelNameRules } from './panel';
@@ -51,11 +52,24 @@ import {
 
 const UPDATE_DEBOUNCE_MS = 300;
 
+/**
+ * How far auto-admission goes: a position, not a line.
+ *
+ * A line names a form exactly until two of them share one --
+ * `(defun foo (x) x) (defun bar (x) x)` is two forms -- and then only the
+ * column says which. An editor always has a real cursor, so it always sends
+ * one; the daemon takes a missing column to mean the whole line.
+ */
+interface Target {
+  line: number;
+  column: number | null;
+}
+
 interface BookSession {
   id: string;
   doc: vscode.TextDocument;
-  /** Held target line (1-based); null checks the whole book; 0 holds all. */
-  target: number | null;
+  /** Held target; null checks the whole book, line 0 holds before the first. */
+  target: Target | null;
   lastState?: StateEvent;
   /** Latest envelope per unit index, for diagnostics, panel and output view. */
   unitEvents: Map<number, UnitEvent>;
@@ -291,11 +305,11 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('acl2-session.retractToCursor', () =>
       forBook((s) => {
         const units = s.lastState?.units ?? [];
-        const line = cursorLine();
+        const at = cursorTarget();
         // Mid-form snaps forward to that form's end.
         let keep = 0;
         for (const u of units) {
-          if (u.line_start <= line) {
+          if (startsAtOrBefore(u, at)) {
             keep = u.index + 1;
           }
         }
@@ -304,7 +318,7 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
     vscode.commands.registerCommand('acl2-session.targetAtCursor', () =>
       forBook((s) => {
-        s.target = cursorLine();
+        s.target = cursorTarget();
         sendUpdate(s);
       })
     ),
@@ -506,14 +520,21 @@ const definitionProvider: vscode.DefinitionProvider = {
       return undefined;
     }
     if (r.path) {
+      // Another file, so its text is not in hand to convert a byte column
+      // against; the line is where the jump lands. Definitions written two
+      // to a line are rare enough not to be worth opening the file to read.
       const line = Math.max(0, (r.line ?? 1) - 1);
       return new vscode.Location(vscode.Uri.file(r.path), new vscode.Position(line, 0));
     }
-    const line = r.line ?? (r.unit !== undefined ? unitLine(s, r.unit) : undefined);
-    if (line === undefined) {
+    const here = r.line !== undefined
+      ? { line: r.line, column: r.column ?? null }
+      : r.unit !== undefined
+        ? unitStart(s, r.unit)
+        : undefined;
+    if (here === undefined) {
       return undefined;
     }
-    return new vscode.Location(doc.uri, new vscode.Position(Math.max(0, line - 1), 0));
+    return new vscode.Location(doc.uri, positionOf(doc, here));
   },
 };
 
@@ -547,7 +568,7 @@ const linkProvider: vscode.DocumentLinkProvider = {
         continue;
       }
       const text = doc.lineAt(l.line - 1).text;
-      const span = linkRangeOnLine(text, l.book);
+      const span = linkRangeOnLine(text, l.book, charOffset(text, l.column));
       if (!span) {
         continue;
       }
@@ -633,13 +654,11 @@ const symbolProvider: vscode.DocumentSymbolProvider = {
       statusOf.set(u.index, u.status);
     }
     const build = (b: BookSymbol): vscode.DocumentSymbol => {
-      const last = Math.min(Math.max(b.line_end - 1, 0), doc.lineCount - 1);
-      const range = new vscode.Range(
-        Math.max(b.line_start - 1, 0),
-        0,
-        last,
-        doc.lineAt(last).text.length
-      );
+      // The form's own extent, columns included: two entries on one line are
+      // otherwise the same range, and clicking either selects both.
+      const from = positionOf(doc, { line: b.line_start, column: b.col_start });
+      const to = positionOf(doc, { line: b.line_end, column: b.col_end });
+      const range = new vscode.Range(from, to);
       const sym = new vscode.DocumentSymbol(
         b.name,
         b.unit !== undefined ? (statusOf.get(b.unit) ?? '') : '',
@@ -727,10 +746,14 @@ async function includeTargetAt(
     if (!l.path || l.line !== position.line + 1) {
       continue;
     }
-    const span = linkRangeOnLine(doc.lineAt(position.line).text, l.book);
+    const text = doc.lineAt(position.line).text;
+    const from = charOffset(text, l.column);
+    const span = linkRangeOnLine(text, l.book, from);
     // Anywhere in the form counts, not just inside the quotes: `gd` with the
-    // cursor on `include-book` itself should go there too.
-    if (span && position.character <= span[1] + 1) {
+    // cursor on `include-book` itself should go there too. Bounded below by
+    // the form's own column, so a second include on the line does not claim
+    // the cursor sitting in the first.
+    if (span && position.character >= from && position.character <= span[1] + 1) {
       return new vscode.Location(vscode.Uri.file(l.path), new vscode.Position(0, 0));
     }
   }
@@ -943,9 +966,17 @@ function paintDocs(): void {
   });
 }
 
-/** The 1-based start line of a unit, from the last state event. */
-function unitLine(s: BookSession, index: number): number | undefined {
-  return s.lastState?.units.find((u) => u.index === index)?.line_start;
+/** Where a unit starts, from the last state event. */
+function unitStart(s: BookSession, index: number): Target | undefined {
+  const u = s.lastState?.units.find((x) => x.index === index);
+  return u && { line: u.line_start, column: u.col_start };
+}
+
+/** A daemon position as an editor one, converting the column it counts in bytes. */
+function positionOf(doc: vscode.TextDocument, at: Target): vscode.Position {
+  const line = Math.min(Math.max(at.line, 1), doc.lineCount) - 1;
+  const character = at.column === null ? 0 : charOffset(doc.lineAt(line).text, at.column);
+  return new vscode.Position(line, character);
 }
 
 function forBook(f: (s: BookSession) => unknown): void {
@@ -960,9 +991,25 @@ function forBook(f: (s: BookSession) => unknown): void {
   void f(s);
 }
 
-function cursorLine(): number {
+/** Where the cursor is, in the daemon's coordinates. */
+function cursorTarget(): Target {
   const editor = vscode.window.activeTextEditor;
-  return editor ? editor.selection.active.line + 1 : 1;
+  if (!editor) {
+    return { line: 1, column: null };
+  }
+  const pos = editor.selection.active;
+  return {
+    line: pos.line + 1,
+    column: byteColumn(editor.document.lineAt(pos.line).text, pos.character),
+  };
+}
+
+/** Whether a unit starts at or before a position. */
+function startsAtOrBefore(u: UnitState, at: Target): boolean {
+  if (u.line_start !== at.line || at.column === null) {
+    return u.line_start <= at.line;
+  }
+  return u.col_start <= at.column;
 }
 
 function ensureClient(): DaemonClient {
@@ -1212,7 +1259,8 @@ function sendUpdate(s: BookSession): void {
   client?.notify('update', {
     book: s.id,
     text: fromFile ? undefined : s.doc.getText(),
-    target_line: s.target,
+    target_line: s.target?.line ?? null,
+    target_column: s.target?.column ?? null,
     // The document's own monotone version is exactly the revision the
     // protocol wants stamped back on events.
     revision: s.doc.version,
@@ -1246,7 +1294,9 @@ function bufferCarriesFile(doc: vscode.TextDocument): boolean {
 function retractTo(s: BookSession, keep: number): void {
   const units = s.lastState?.units ?? [];
   const kept = keep > 0 ? units[keep - 1] : undefined;
-  s.target = kept ? kept.line_end : 0;
+  // The end of the kept form, column included: held at its line alone, a
+  // form sharing that line would be admitted straight back.
+  s.target = kept ? { line: kept.line_end, column: kept.col_end } : { line: 0, column: null };
   client?.notify('retract', { book: s.id, keep });
 }
 
@@ -1456,23 +1506,29 @@ function gotoAttention(s: BookSession): void {
     void vscode.window.showInformationMessage('acl2-session: nothing to jump to yet');
     return;
   }
-  const points: { line: number; kind: string }[] = units
+  const points: { at: Target; kind: string }[] = units
     .filter((u) => u.status === 'skipped' || u.status === 'failed')
-    .map((u) => ({ line: u.line_start, kind: u.status }));
+    .map((u) => ({ at: { line: u.line_start, column: u.col_start }, kind: u.status }));
   const running = units.find((u) => u.status === 'running');
   points.push(
     running
-      ? { line: running.line_start, kind: 'running' }
-      : { line: editor.document.lineCount, kind: 'eof' }
+      ? { at: { line: running.line_start, column: running.col_start }, kind: 'running' }
+      : { at: { line: editor.document.lineCount, column: null }, kind: 'eof' }
   );
 
   // By line, not by character: the cursor may sit anywhere along the form's
   // first line and still be standing on it.
-  const line = editor.selection.active.line + 1;
-  const at = points.findIndex((p) => p.line === line);
+  const here = cursorTarget();
+  const on = unitAt(s, here);
+  const standingOn = (p: { at: Target }): boolean =>
+    p.at.line === here.line &&
+    // Where that line holds a second form, though, the cursor has to be on
+    // *this* one; where it holds only this one, anywhere along it will do.
+    (on === undefined || on.line_start !== p.at.line || on.col_start === p.at.column);
+  const at = points.findIndex(standingOn);
   const next = points[at >= 0 ? (at + 1) % points.length : 0];
 
-  const pos = new vscode.Position(next.line - 1, 0);
+  const pos = positionOf(editor.document, next.at);
   editor.selection = new vscode.Selection(pos, pos);
   editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
   vscode.window.setStatusBarMessage(
@@ -1496,7 +1552,10 @@ function gotoFrontier(s: BookSession): void {
     units.find((u) => u.status === 'running') ??
     units.find((u) => u.status === 'pending') ??
     units[units.length - 1];
-  const pos = new vscode.Position(frontier.line_start - 1, 0);
+  const pos = positionOf(editor.document, {
+    line: frontier.line_start,
+    column: frontier.col_start,
+  });
   editor.selection = new vscode.Selection(pos, pos);
   editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
 }
@@ -1531,7 +1590,7 @@ function onState(p: StateEvent): void {
     const editor = vscode.window.activeTextEditor;
     const at =
       editor?.document === s.doc
-        ? unitAt(s, editor.selection.active.line + 1)?.index
+        ? unitAt(s, cursorTarget())?.index
         : undefined;
     void followPanel(s, at ?? 0);
   }
@@ -1662,8 +1721,33 @@ function updateStatusBar(s: BookSession): void {
 
 // ---- Output view and panel --------------------------------------------------
 
-function unitAt(s: BookSession, line: number): UnitState | undefined {
-  return s.lastState?.units.find((u) => u.line_start <= line && line <= u.line_end);
+/**
+ * The unit a position falls in.
+ *
+ * The **last** one it touches, so that a cursor resting between two forms on
+ * one line belongs to the one it is inside; both ends are inclusive, since a
+ * caret sits between characters and the one just past a closing paren
+ * belongs to the form it closes. Matches the daemon's `Form::covers`.
+ */
+function unitAt(s: BookSession, at: Target): UnitState | undefined {
+  const units = s.lastState?.units;
+  if (!units) {
+    return undefined;
+  }
+  const covers = (u: UnitState): boolean => {
+    if (at.column === null) {
+      return u.line_start <= at.line && at.line <= u.line_end;
+    }
+    const after = u.line_start < at.line || (u.line_start === at.line && u.col_start <= at.column);
+    const before = at.line < u.line_end || (at.line === u.line_end && at.column <= u.col_end);
+    return after && before;
+  };
+  for (let i = units.length - 1; i >= 0; i--) {
+    if (covers(units[i])) {
+      return units[i];
+    }
+  }
+  return undefined;
 }
 
 async function followOutputView(s: BookSession, force: boolean): Promise<void> {
@@ -1671,7 +1755,7 @@ async function followOutputView(s: BookSession, force: boolean): Promise<void> {
   if (!editor || editor.document !== s.doc) {
     return;
   }
-  const unit = unitAt(s, editor.selection.active.line + 1);
+  const unit = unitAt(s, cursorTarget());
   if (!unit) {
     return;
   }
@@ -1745,7 +1829,7 @@ async function followPanel(s: BookSession, index?: number): Promise<void> {
     if (!editor || editor.document !== s.doc) {
       return;
     }
-    at = unitAt(s, editor.selection.active.line + 1)?.index;
+    at = unitAt(s, cursorTarget())?.index;
   }
   if (at === undefined) {
     return;
@@ -1911,6 +1995,8 @@ function buildPanelModel(s: BookSession, index: number): PanelModel | undefined 
     total: st.units.length,
     lineStart: u.line_start,
     lineEnd: u.line_end,
+    colStart: u.col_start,
+    colEnd: u.col_end,
     status: u.status,
     checkpoints: [],
     rules: [],
