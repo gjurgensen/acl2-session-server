@@ -112,7 +112,7 @@ for (const kind of ['light', 'dark']) {
 // bars, `minimal` draws only the form being proved and leaves what is *wrong*
 // to a diagnostic.
 {
-  const { barFor, isProblem, markFor, spinnerSvg } = require('./out/bars.js');
+  const { barFor, markFor, problemFor, spinnerSvg } = require('./out/bars.js');
   const ALL = ['pending', 'running', 'admitted', 'conditional', 'skipped', 'failed'];
 
   const expect = {
@@ -270,11 +270,22 @@ for (const kind of ['light', 'dark']) {
   }
 
   // What goes to the Problems view, in every mode.
-  check('a failed form is a problem', isProblem('failed'), true);
-  check('and so is a skipped one -- it failed, then was let through',
-    isProblem('skipped'), true);
-  for (const st of ['pending', 'running', 'admitted', 'conditional']) {
-    check(`${st} is not a problem`, isProblem(st), false);
+
+  // Severity, which is where a conditional form differs: it was proved, and
+  // proved correctly, on a claim that was not. That is worth saying, but it
+  // is not an error and there can be hundreds of them, so it is a warning and
+  // it is off unless asked for.
+  {
+    check('a failure is an error', problemFor('failed', false), 'error');
+    check('and so is a skip', problemFor('skipped', false), 'error');
+    check('with the setting off, a conditional form says nothing',
+      problemFor('conditional', false), undefined);
+    check('with it on, it is a warning and not an error',
+      problemFor('conditional', true), 'warning');
+    check('a failure is an error either way', problemFor('failed', true), 'error');
+    for (const st of ['pending', 'admitted', 'running', 'beyond']) {
+      check(`${st} says nothing even with it on`, problemFor(st, true), undefined);
+    }
   }
 }
 

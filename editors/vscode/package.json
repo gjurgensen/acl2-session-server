@@ -408,6 +408,11 @@
           "default": true,
           "description": "Report failed and skipped forms in the Problems view. VSCode draws a squiggle along with each one and gives no way to have the entry without it, so this is both. Turning it off in the 'minimal' decoration mode leaves a failed form marked by nothing at all, scrollbar included -- that mode's only mark for a failure is this."
         },
+        "acl2-session.conditionalWarnings": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Report **conditional** forms as warnings in the Problems view.\n\nA conditional form was proved, and proved correctly — on top of a claim that was not, because a form above it went in with its proofs skipped. Nothing is wrong with it in isolation, and every form below the first skip is one, so this can be a great many warnings at once. Off by default for that reason; the status column and the wash say the same thing more quietly.\n\nRequires `#acl2-session.problems#`, which reports failed and skipped forms as errors."
+        },
         "acl2-session.highlightOutput": {
           "type": "boolean",
           "default": true,

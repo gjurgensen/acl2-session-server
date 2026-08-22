@@ -40,7 +40,7 @@ import { Envelope, InductionWire, RulesReply, RuneWire } from './protocol';
 import { DecorationMode, Decorations } from './decorations';
 import { byteColumn, charOffset } from './positions';
 import { paintMap } from './paintmap';
-import { isProblem } from './bars';
+import { problemFor } from './bars';
 import { EVAL_SCHEME, OutputView, SCHEME } from './outputView';
 import { Highlighter } from './highlight';
 import { FormEnvelope, FormInduction, FormModel, FormNameRules, FormView } from './formView';
@@ -2105,6 +2105,13 @@ function reportProblems(): boolean {
   return vscode.workspace.getConfiguration('acl2-session').get<boolean>('problems', true);
 }
 
+/** Whether a conditional form is worth a warning of its own. See `problemFor`. */
+function warnConditional(): boolean {
+  return vscode.workspace
+    .getConfiguration('acl2-session')
+    .get<boolean>('conditionalWarnings', false);
+}
+
 /**
  * Publish this book's failures, or take them down.
  *
@@ -2146,8 +2153,18 @@ function updateProblems(s: BookSession): void {
     d.source = 'ACL2';
     out.push(d);
   }
+  // The form the skipping started at, for a conditional form to point back
+  // to: on its own, a conditional form looks fine, and the reason it is not
+  // trusted is somewhere above it.
+  const skippedAt = s.lastState?.conditional_from ?? null;
+  const because =
+    skippedAt === null
+      ? undefined
+      : s.lastState?.units.find((u) => u.index === skippedAt)?.line_start;
+  const withConditional = warnConditional();
   for (const u of s.lastState?.units ?? []) {
-    if (!isProblem(u.status) || u.line_start > doc.lineCount) {
+    const kind = problemFor(u.status, withConditional);
+    if (kind === undefined || u.line_start > doc.lineCount) {
       continue;
     }
     const line = u.line_start - 1;
@@ -2164,10 +2181,18 @@ function updateProblems(s: BookSession): void {
       e?.error_line?.trim() ||
       (e?.abort_cause ? `the proof gave up: ${e.abort_cause}` : undefined) ||
       (u.status === 'skipped' ? 'admitted with its proofs skipped' : 'this form did not go in');
+    const message =
+      u.status === 'conditional'
+        ? 'ACL2: this form was proved, but on top of a claim that was not' +
+          (because === undefined ? '' : ` \u2014 see line ${because}`) +
+          '. Re-check without skipping, or certify, before trusting it.'
+        : u.status === 'skipped'
+          ? `ACL2 skipped this form's proofs \u2014 ${why}`
+          : `ACL2: ${why}`;
     const d = new vscode.Diagnostic(
       new vscode.Range(line, from, line, Math.max(from + 1, to)),
-      u.status === 'skipped' ? `ACL2 skipped this form's proofs \u2014 ${why}` : `ACL2: ${why}`,
-      vscode.DiagnosticSeverity.Error
+      message,
+      kind === 'warning' ? vscode.DiagnosticSeverity.Warning : vscode.DiagnosticSeverity.Error
     );
     d.source = 'ACL2';
     out.push(d);

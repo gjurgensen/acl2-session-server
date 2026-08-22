@@ -152,9 +152,26 @@ export function spinnerSvg(color: string): string {
   );
 }
 
-/** Whether a status is worth a line in the Problems view, and a squiggle. */
-export function isProblem(status: string): boolean {
-  return status === 'failed' || status === 'skipped';
+/**
+ * What a status is worth in the Problems view: an error, a warning, or
+ * nothing.
+ *
+ * A form that failed or went in with its proofs skipped is an error, always.
+ * A *conditional* form is the interesting case: it was proved, and proved
+ * correctly, on top of a claim that was not. Nothing is wrong with it in
+ * isolation and there may be hundreds of them -- everything below the first
+ * skip is conditional -- so a squiggle on each is off by default and is a
+ * warning rather than an error when it is on. `withConditional` is the
+ * `acl2-session.conditionalWarnings` setting.
+ */
+export function problemFor(
+  status: string,
+  withConditional: boolean
+): 'error' | 'warning' | undefined {
+  if (status === 'failed' || status === 'skipped') {
+    return 'error';
+  }
+  return status === 'conditional' && withConditional ? 'warning' : undefined;
 }
 
 export interface Bar {

@@ -46,6 +46,14 @@ than one form, because nothing below the bracket has been *read*, let alone
 checked. Which mark is still the mode's: a wash in `wash`, the status column
 in `gutter`, and in `minimal` the diagnostic alone.
 
+Conditional forms can be warnings there too, with
+`acl2-session.conditionalWarnings`. Off by default: a conditional form was
+proved, and proved correctly, on top of a claim that was not, so nothing is
+wrong with it in isolation — and *every* form below the first skip is one, so
+turning it on can mean a great many yellow squiggles at once. The warning
+names the line the skipping started at, which is the form actually worth
+fixing.
+
 Failed and skipped forms are reported in the **Problems** view in every mode,
 which is also where the squiggle comes from — VSCode gives no way to have the
 entry without the mark. `acl2-session.problems` turns both off. In `minimal`
