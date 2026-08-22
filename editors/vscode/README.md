@@ -231,6 +231,17 @@ what keeps a wrapped sentence like `(acl2-count x).  We observe that ...`
 from opening a block. And nothing highlights inside prose, including terms
 mentioned inline. Under-highlighting is the right way to be wrong here.
 
+The scopes it marks with are chosen for what a *theme* will do with them,
+which is not the same as what they mean to us. Errors are `markup.deleted`
+and warnings `markup.changed` rather than the `invalid.*` family: nothing in
+a log is ill-formed source, and themes read `invalid` literally — a
+background, a strikethrough, or in one case a purple `deprecated`. The
+summary labels are `support.type.property-name`, since that is what they are,
+and `Summary` itself heads its block the way a goal name does. They used to
+be `keyword.control`, which is the loudest colour most themes have: thirteen
+of them in one short log, shouting over an `ACL2 Error` painted a quieter
+red.
+
 `acl2-session.highlightOutput` turns it off; the log is then plain text.
 The form view and console still colour *terms* the daemon sends as structure,
 which is exact rather than best-effort, and is unaffected by this setting.

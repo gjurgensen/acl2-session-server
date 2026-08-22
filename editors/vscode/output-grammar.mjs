@@ -98,11 +98,25 @@ check(
 );
 check(has(find(rows, 'Subgoal *1/2\'\''), 'entity.name.section'), 'a goal header is a header');
 check(has(find(rows, 'Q.E.D.'), 'markup.inserted'), 'Q.E.D. is marked');
-check(has(find(rows, 'ACL2 Error [Failure]'), 'invalid.illegal'), 'an ACL2 Error is marked');
-check(has(find(rows, '******** FAILED ********'), 'invalid.illegal'), 'and so is FAILED');
-check(has(find(rows, 'Rules: ((:definition'), 'keyword.control'), 'the Rules: label is a label');
+check(has(find(rows, 'ACL2 Error [Failure]'), 'markup.deleted'), 'an ACL2 Error is marked');
+check(
+  has(scopeLines('ACL2 Warning [Use] in ( defthm foo ...)\n')[0], 'markup.changed'),
+  'and a Warning is a warning, not something deprecated'
+);
+check(has(find(rows, '******** FAILED ********'), 'markup.deleted'), 'and so is FAILED');
+// The scopes are chosen for what a *theme* does with them, so what they are
+// is part of the contract. `invalid.*` reads as ill-formed source and gets a
+// background or a strikethrough in many themes; `keyword.control` is the
+// loudest colour in most, which the summary labels were wearing while the
+// errors beside them wore a quieter red.
+check(has(find(rows, 'Summary'), 'entity.name.section'), 'Summary heads its block');
+check(has(find(rows, 'Time:'), 'support.type.property-name'), 'and Time: labels a value');
+check(!has(find(rows, 'Time:'), 'keyword'), 'without shouting');
+check(has(find(rows, 'Rules: ((:definition'), 'support.type.property-name'),
+  'the Rules: label is a label');
 check(isLisp(find(rows, '(:elim car-cdr-elim)')), 'and the rune list under it is Lisp');
-check(has(find(rows, 'Prover steps counted:'), 'keyword.control'), 'the steps label is a label');
+check(has(find(rows, 'Prover steps counted:'), 'support.type.property-name'),
+  'the steps label is a label');
 check(isLisp(find(rows, '(defun alpha (x)')), "a form printed by `pe` is Lisp");
 
 // The false positives. Each of these lines is prose that opens like code.
@@ -195,7 +209,7 @@ for (const [what, text] of ADVERSARIAL) {
 // A truncated log -- the console shows the tail of one -- must not leave the
 // first line half-inside something either.
 const truncated = scopeLines('              (append y (cdr x))))\nSummary\n');
-check(has(truncated[1], 'keyword.control'), 'a log cut mid-term still finds the next label');
+check(has(truncated[1], 'entity.name.section'), 'a log cut mid-term still finds the next label');
 
 if (bad) {
   console.error(`output-grammar: ${bad} failing`);
