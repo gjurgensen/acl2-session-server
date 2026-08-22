@@ -28,10 +28,10 @@ and the overview ruler, so the status column cannot disagree with itself.
 }
 ```
 
-## The panel
+## The form view
 
 The editor title bar shows a "play" icon in the upper right, which starts the
-ACL2 session. This automatically opens the ACL2 panel, which displays structured
+ACL2 session. This automatically opens the ACL2 form view, which displays structured
 information for the current form under the user's cursor.
 
 ## The console
@@ -39,7 +39,7 @@ information for the current form under the user's cursor.
 **ACL2: Show Console** opens a window for evaluating forms.
 There is **one per session**, titled after its book, because that is what an
 evaluation belongs to: it ran against the world *that* book has built, and its
-answer means nothing against another book's world. The panel follows the cursor;
+answer means nothing against another book's world. The form view follows the cursor;
 the console does not follow anything.
 
 The console is not quite a REPL, and deliberately so. It is sufficient for forms
@@ -65,8 +65,8 @@ nested `#|` block comments.
 ACL2's own functions — `equal`, `car`, `len`, `implies`, `+`, `<` — are
 marked in call position.
 
-The panel's terms and runes go through *the same grammar*, so a term in the
-panel and the same term in the buffer are tokenized identically.
+The form view's terms and runes go through *the same grammar*, so a term in the
+form view and the same term in the buffer are tokenized identically.
 
 ## Language features
 
@@ -123,7 +123,7 @@ from opening a block. And nothing highlights inside prose, including terms
 mentioned inline. Under-highlighting is the right way to be wrong here.
 
 `acl2-session.highlightOutput` turns it off; the log is then plain text.
-The panel and console still colour *terms* the daemon sends as structure,
+The form view and console still colour *terms* the daemon sends as structure,
 which is exact rather than best-effort, and is unaffected by this setting.
 
 ## Certifying
@@ -162,18 +162,18 @@ Repackage and reinstall to pick up later changes.
 **Starting is one action**: `ctrl+alt+a` (`cmd+alt+a` on a Mac), or the
 &#9654; button in the editor's title bar, which becomes a stop button once
 the session is live. Both run **ACL2: Start Live Checking**, which opens the
-panel too — there is no moment where you want the session but not the place
-its failures explain themselves. The panel opens without taking the cursor.
+form view too — there is no moment where you want the session but not the place
+its failures explain themselves. The form view opens without taking the cursor.
 Clicking the status bar brings it back if you close it.
 
 | key | command |
 | --- | --- |
-| `ctrl+alt+a` | Start Live Checking (and open the panel) |
+| `ctrl+alt+a` | Start Live Checking (and open the form view) |
 | `ctrl+alt+i` | Interrupt |
 | `ctrl+alt+n` | Target at Cursor — check up to here |
 | `ctrl+alt+u` | Retract to Cursor |
 | `ctrl+alt+b` | Clear Target — check the whole book |
-| `ctrl+alt+p` | Show Panel |
+| `ctrl+alt+p` | Show Form view |
 | `ctrl+alt+c` | Show Console |
 | `ctrl+alt+e` | Evaluate Selection |
 | `ctrl+alt+o` | Show Output for Form at Cursor |

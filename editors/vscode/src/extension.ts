@@ -4,7 +4,7 @@
 // renderer of the daemon's event stream: edits become `update` notifications
 // (debounced, stamped with the document's own version as the revision), and
 // `state` events become the status column, `unit` envelopes become
-// diagnostics, panel content and output-view content, `settled` and `tail`
+// diagnostics, form view content and output-view content, `settled` and `tail`
 // drive the status bar. The target -- how far auto-admission goes -- is
 // client state, sent with every update, so retraction holds exactly as
 // prescribed.
@@ -32,7 +32,7 @@ import { DecorationMode, Decorations } from './decorations';
 import { byteColumn, charOffset } from './positions';
 import { EVAL_SCHEME, OutputView, SCHEME } from './outputView';
 import { Highlighter } from './highlight';
-import { Panel, PanelEnvelope, PanelInduction, PanelModel, PanelNameRules } from './panel';
+import { FormEnvelope, FormInduction, FormModel, FormNameRules, FormView } from './formView';
 import { Console, ConsoleResult, HISTORY } from './console';
 import { DocView, plainSpans } from './docView';
 import { DocHtml as DocHtmlResult, esc, xdocHtml } from './xdoc';
@@ -71,7 +71,7 @@ interface BookSession {
   /** Held target; null checks the whole book, line 0 holds before the first. */
   target: Target | null;
   lastState?: StateEvent;
-  /** Latest envelope per unit index, for diagnostics, panel and output view. */
+  /** Latest envelope per unit index, for diagnostics, form view and output view. */
   unitEvents: Map<number, UnitEvent>;
   /**
    * The unit currently printing, and the handle its log is readable under.
@@ -86,29 +86,29 @@ interface BookSession {
   /**
    * What each unit introduced, once asked for.
    *
-   * Cached because the panel follows the *cursor*: `followPanel` runs on
+   * Cached because the form view follows the *cursor*: `followFormView` runs on
    * every selection change, and fetching on each one put a reply -- and so a
    * re-render -- a moment after every keystroke and every click. A re-render
-   * replaces the page, which resets every open dropdown, so the panel looked
+   * replaces the page, which resets every open dropdown, so the form view looked
    * frozen. Dropped for a unit when that unit is admitted again, which is
    * the only way what it introduced can change.
    */
-  rulesByUnit: Map<number, PanelNameRules[]>;
+  rulesByUnit: Map<number, FormNameRules[]>;
   /**
    * Why each unit inducted, once asked for.
    *
-   * Cached for the reason `rulesByUnit` is -- the panel follows the cursor,
+   * Cached for the reason `rulesByUnit` is -- the form view follows the cursor,
    * so this is asked again on every selection change and every state event --
    * and *more* than it is, because answering means reading the unit's whole
    * captured log. One `defines` in `kestrel/c/syntax/validator.lisp` printed
    * 490,000 lines and 20.9 MB of induction schemes; asking again per event is
-   * how a panel takes the editor down with it.
+   * how a form view takes the editor down with it.
    *
    * The promise, not the records, so a burst of events makes one request.
    * Dropped when the unit is admitted again, which is the only way what its
    * log says can change.
    */
-  inductionByUnit: Map<number, Promise<PanelInduction[]>>;
+  inductionByUnit: Map<number, Promise<FormInduction[]>>;
   debounce?: ReturnType<typeof setTimeout>;
   /** Said once per book: the editor could not decode this file's bytes. */
   warnedEncoding?: boolean;
@@ -181,7 +181,7 @@ let docHistory: { book: string; name: string }[] = [];
 // The topic on screen, kept so a theme or grammar change can recolour its
 // code without going back to the daemon for text that has not changed.
 let lastDoc: { name: string; rendered: DocHtmlResult } | undefined;
-let panel: Panel;
+let formView: FormView;
 let highlighter: Highlighter;
 let status: vscode.StatusBarItem;
 let channel: vscode.OutputChannel;
@@ -200,7 +200,7 @@ function gutterAdmitted(): boolean {
  *
  * A setting rather than a measurement, and it has to be: the extension API
  * exposes no geometry for a hover -- or for the editor -- and only a webview
- * can measure anything, which a tooltip is not. Defaults to the panel's own
+ * can measure anything, which a tooltip is not. Defaults to the form view's own
  * ceiling so a term reads the same in both places.
  */
 function hoverWidth(): number {
@@ -243,27 +243,27 @@ export function activate(context: vscode.ExtensionContext): void {
     light: vscode.Uri.joinPath(context.extensionUri, 'media', 'window-light.svg'),
     dark: vscode.Uri.joinPath(context.extensionUri, 'media', 'window-dark.svg'),
   };
-  panel = new Panel();
-  panel.iconPath = windowIcon;
+  formView = new FormView();
+  formView.iconPath = windowIcon;
   status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 10);
-  // The progress readout is also the way back to the panel, for when it has
+  // The progress readout is also the way back to the form view, for when it has
   // been closed and the gutter says something needs looking at.
-  status.command = 'acl2-session.showPanel';
-  status.tooltip = 'ACL2: show the panel';
+  status.command = 'acl2-session.showFormView';
+  status.tooltip = 'ACL2: show the formView';
   channel = vscode.window.createOutputChannel('ACL2');
 
-  panel.onGoal = (m, goal, slot) => void fetchGoal(m, goal, slot);
-  panel.onCols = (cols) => setLayout(cols);
+  formView.onGoal = (m, goal, slot) => void fetchGoal(m, goal, slot);
+  formView.onCols = (cols) => setLayout(cols);
 
-  // The grammar and theme load off disk, so the first panel may render
+  // The grammar and theme load off disk, so the first form view may render
   // before they arrive; refresh once they have, and again whenever the
   // colors the editor paints with change under us.
   highlighter = new Highlighter(context.extensionPath);
   const reload = () =>
     void highlighter.load().then(() => {
       const tokenizer = highlighter.ready ? (t: string) => highlighter.tokenize(t) : undefined;
-      panel.tokenizer = tokenizer;
-      panel.refresh();
+      formView.tokenizer = tokenizer;
+      formView.refresh();
       for (const s of books.values()) {
         if (s.console) {
           s.console.tokenizer = tokenizer;
@@ -288,7 +288,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     decorations,
-    panel,
+    formView,
     docs,
     status,
     channel,
@@ -350,22 +350,22 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('acl2-session.certify', () => forBook(certifyBook)),
     vscode.tasks.registerTaskProvider('acl2', certifyTaskProvider),
     // Neither of these goes through `forBook`: both are invoked from the
-    // panel's own title bar, where the focused thing is a webview and there is
+    // form view's own title bar, where the focused thing is a webview and there is
     // no active text editor to find a book from.
-    vscode.commands.registerCommand('acl2-session.lockPanel', () => takeLock()),
-    vscode.commands.registerCommand('acl2-session.unlockPanel', () => dropLock()),
+    vscode.commands.registerCommand('acl2-session.lockFormView', () => takeLock()),
+    vscode.commands.registerCommand('acl2-session.unlockFormView', () => dropLock()),
     // A third verb for the same pair, because the title bar and everywhere
     // else want different things. The bar shows one of two icons and needs a
     // command per state to swap them; a person reaching for this by name, or
     // one day by key, wants to say the thing they mean once and not care
     // which state it is in.
-    vscode.commands.registerCommand('acl2-session.togglePanelLock', () =>
+    vscode.commands.registerCommand('acl2-session.toggleFormViewLock', () =>
       locked ? dropLock() : takeLock()
     ),
-    vscode.commands.registerCommand('acl2-session.showPanel', () =>
+    vscode.commands.registerCommand('acl2-session.showFormView', () =>
       forBook((s) => {
-        panel.open();
-        void followPanel(s);
+        formView.open();
+        void followFormView(s);
       })
     ),
     vscode.commands.registerCommand('acl2-session.gotoFrontier', () => forBook(gotoFrontier)),
@@ -420,9 +420,9 @@ export function activate(context: vscode.ExtensionContext): void {
       if (outputView.visible) {
         void followOutputView(s, false);
       }
-      // A held panel is exactly the one that does not follow the cursor.
-      if (panel.visible && !(locked && locked.book === s.id)) {
-        void followPanel(s);
+      // A held form view is exactly the one that does not follow the cursor.
+      if (formView.visible && !(locked && locked.book === s.id)) {
+        void followFormView(s);
       }
     }),
     vscode.window.onDidChangeVisibleTextEditors((editors) => {
@@ -451,7 +451,7 @@ export function activate(context: vscode.ExtensionContext): void {
         }
         // termWidth caps the width terms are laid out at, and laying out
         // happens in the daemon now, so this has to go back over the wire.
-        panel.reportCols();
+        formView.reportCols();
       }
       if (e.affectsConfiguration('acl2-session.highlightOutput')) {
         void outputView.refreshLanguage();
@@ -862,8 +862,8 @@ async function certifyBook(s: BookSession): Promise<void> {
   } finally {
     clearInterval(tick);
     s.certifying = false;
-    status.command = 'acl2-session.showPanel';
-    status.tooltip = 'ACL2: show the panel';
+    status.command = 'acl2-session.showFormView';
+    status.tooltip = 'ACL2: show the formView';
     updateStatusBar(s);
   }
 }
@@ -996,7 +996,7 @@ async function openTopic(s: BookSession, name: string, keepOpen: boolean): Promi
  * Separate from fetching it, because the grammar and theme load off disk and
  * can arrive *after* a window is already open -- and because a theme change
  * has to recolour what is on screen without asking the daemon again for text
- * that has not changed. The same reason the panel re-renders on reload.
+ * that has not changed. The same reason the form view re-renders on reload.
  */
 function paintDocs(): void {
   if (!lastDoc) {
@@ -1161,12 +1161,12 @@ async function startCommand(): Promise<void> {
     void noteProveOverride(r.prove_output_overridden as string | undefined);
     sendUpdate(s);
     refreshContext();
-    // Starting and opening the panel are one action, because there is no
+    // Starting and opening the form view are one action, because there is no
     // moment where you want the session but not the place its failures
     // explain themselves. It opens with preserveFocus, so it costs the
     // cursor nothing.
-    panel.open();
-    void followPanel(s);
+    formView.open();
+    void followFormView(s);
   } catch (e) {
     report(e);
   }
@@ -1452,7 +1452,7 @@ function onEvalState(p: EvalStateEvent): void {
   }
 }
 
-// ---- The panel's console ----------------------------------------------------
+// ---- The form view's console ----------------------------------------------------
 
 /** How much of an eval's log to show inline, before the full-log button. */
 const CONSOLE_LOG_LINES = 200;
@@ -1634,25 +1634,25 @@ function onState(p: StateEvent): void {
   s.lastState = p;
   paint(s);
   updateStatusBar(s);
-  const shown = panel.shown();
+  const shown = formView.shown();
   if (locked && locked.book === s.id) {
     // Re-resolved rather than re-shown: the split has just moved, and the
     // whole question is whether the form we are held on is still there.
-    void followPanel(s);
+    void followFormView(s);
   } else if (shown && shown.book === s.id) {
-    void followPanel(s, shown.index);
-  } else if (!shown && panel.visible) {
+    void followFormView(s, shown.index);
+  } else if (!shown && formView.visible) {
     // Open but showing nothing yet -- which is exactly where `start` leaves
-    // it, since the panel opens before any state has arrived. Adopt the
+    // it, since the form view opens before any state has arrived. Adopt the
     // cursor's form as soon as there is something to render, or the one
-    // button would open an empty panel and leave it that way until the
+    // button would open an empty form view and leave it that way until the
     // cursor happened to move.
     //
     // Falling back to the first form matters more than it looks: at start
     // the cursor is usually on line 1, which is the `in-package` or a
     // comment above it, so the honest answer to "which form is the cursor
-    // in" is "none" and the panel would open on its placeholder. Only on
-    // adoption, though -- once the panel is showing something, moving the
+    // in" is "none" and the form view would open on its placeholder. Only on
+    // adoption, though -- once the form view is showing something, moving the
     // cursor onto a blank line leaves it where it is rather than jumping it
     // back to the top of the book.
     const editor = vscode.window.activeTextEditor;
@@ -1660,7 +1660,7 @@ function onState(p: StateEvent): void {
       editor?.document === s.doc
         ? unitAt(s, cursorTarget())?.index
         : undefined;
-    void followPanel(s, at ?? 0);
+    void followFormView(s, at ?? 0);
   }
 }
 
@@ -1683,9 +1683,9 @@ function onUnit(p: UnitEvent): void {
   if (outputView.shownBook === s.id && outputView.shownUnit === p.index) {
     void showUnitOutput(s, p.index);
   }
-  const shown = panel.shown();
+  const shown = formView.shown();
   if (shown && shown.book === s.id && shown.index === p.index) {
-    void followPanel(s, p.index);
+    void followFormView(s, p.index);
   }
 }
 
@@ -1697,7 +1697,7 @@ function onTail(p: TailEvent): void {
     return;
   }
   // A null unit is an eval's tail: it belongs to this book's console, not to
-  // any form of the file, and so to neither the panel nor a view that
+  // any form of the file, and so to neither the form view nor a view that
   // follows the cursor.
   // The rule lives in `policy.planTail`, where it can be tested without an
   // editor -- and where the reason it is a push rather than a poll is written
@@ -1715,7 +1715,7 @@ function onTail(p: TailEvent): void {
     if (plan.target === 'output-view') {
       outputView.set(s.id, p.unit as number, p.text);
     }
-    panel.tail(p.book, p.unit, p.elapsed_ms, p.text);
+    formView.tail(p.book, p.unit, p.elapsed_ms, p.text);
   }
   const secs = Math.round(p.elapsed_ms / 1000);
   status.text = `$(sync~spin) ACL2: proving ${p.unit === null ? '' : `${p.unit + 1}/${s.lastState?.units.length ?? '?'} `}(${secs}s)`;
@@ -1787,7 +1787,7 @@ function updateStatusBar(s: BookSession): void {
   }
 }
 
-// ---- Output view and panel --------------------------------------------------
+// ---- Output view and form view --------------------------------------------------
 
 /**
  * The unit a position falls in.
@@ -1879,24 +1879,24 @@ function setLayout(cols: number): void {
     s.rulesByUnit.clear();
     s.inductionByUnit.clear();
   }
-  const shown = panel.shown();
+  const shown = formView.shown();
   const s = shown && byId.get(shown.book);
   if (s && shown) {
-    void reflowCheckpoints(s, shown.index).then(() => followPanel(s, shown.index));
+    void reflowCheckpoints(s, shown.index).then(() => followFormView(s, shown.index));
   }
 }
 
 /**
  * Re-flow the checkpoints of the form on show.
  *
- * Everything else the panel renders can be asked for again, so a width change
+ * Everything else the form view renders can be asked for again, so a width change
  * just drops the caches. Checkpoints cannot: they ride on `unit` events, which
  * are pushed when a form lands and never sent a second time. So the client
  * sends back the text it already has and the daemon lays it out again -- which
  * works because laying out is idempotent across widths, the reader having
  * discarded the whitespace before it ever sees the layout.
  *
- * Best effort and in place: on any trouble the panel keeps the wrapping it
+ * Best effort and in place: on any trouble the form view keeps the wrapping it
  * had, which is the same thing it would have shown anyway.
  */
 async function reflowCheckpoints(s: BookSession, index: number): Promise<void> {
@@ -1922,7 +1922,7 @@ async function reflowCheckpoints(s: BookSession, index: number): Promise<void> {
 let lastCols = 0;
 
 /**
- * The form the panel is held on, if it is held on one.
+ * The form the form view is held on, if it is held on one.
  *
  * The anchor is where that form *starts*, which is the only position that can
  * be checked: `lockedIndex` asks the daemon's own split whether a form still
@@ -1932,8 +1932,8 @@ let lastCols = 0;
  */
 let locked: { book: string; anchor: Anchor } | undefined;
 
-/** Which form the panel should be showing, and whether it is held there. */
-function panelTarget(s: BookSession): number | undefined {
+/** Which form the form view should be showing, and whether it is held there. */
+function formViewTarget(s: BookSession): number | undefined {
   if (locked && locked.book === s.id) {
     const at = lockedIndex(locked.anchor, s.lastState?.units ?? []);
     if (at !== undefined) {
@@ -1949,16 +1949,16 @@ function panelTarget(s: BookSession): number | undefined {
 }
 
 /**
- * Hold the panel on the form it is showing.
+ * Hold the form view on the form it is showing.
  *
- * On what the panel *shows* rather than on where the cursor is, and the reason
+ * On what the form view *shows* rather than on where the cursor is, and the reason
  * is where this gets invoked from: its own title bar. A webview having focus
  * means there is no active text editor at all, so anything reading the cursor
  * finds nothing and reports that there is no session -- which was the first
- * thing this did. Reading the panel instead is both correct there and a better
+ * thing this did. Reading the form view instead is both correct there and a better
  * description of the act: the button says keep showing this.
  *
- * It costs nothing anywhere else, since an unheld panel is already showing
+ * It costs nothing anywhere else, since an unheld form view is already showing
  * whatever the cursor is in.
  *
  * Anchored to the form's own start rather than to a position inside it: only a
@@ -1966,14 +1966,14 @@ function panelTarget(s: BookSession): number | undefined {
  * decision rests on.
  */
 function takeLock(): void {
-  const shown = panel.shown();
+  const shown = formView.shown();
   const s = shown && byId.get(shown.book);
   const u = shown && s?.lastState?.units[shown.index];
   // The document, not an editor: there may not be one in front, and a
   // `TextDocument` can be read either way.
   if (!s || !u || u.line_start > s.doc.lineCount) {
     void vscode.window.showInformationMessage(
-      'ACL2: the panel is not showing a form to hold it on'
+      'ACL2: the formView is not showing a form to hold it on'
     );
     return;
   }
@@ -1985,17 +1985,17 @@ function takeLock(): void {
       character: charOffset(s.doc.lineAt(u.line_start - 1).text, u.col_start),
     },
   };
-  void vscode.commands.executeCommand('setContext', 'acl2Session.panelLocked', true);
-  panel.setLockLabel('locked');
-  panel.note(undefined);
-  void followPanel(s);
+  void vscode.commands.executeCommand('setContext', 'acl2Session.formViewLocked', true);
+  formView.setLockLabel('locked');
+  formView.note(undefined);
+  void followFormView(s);
 }
 
 /**
  * Let go because the reader said so, and show them what the cursor is in.
  *
  * Separate from `releaseLock`, which is also what a lost form calls: this is
- * the deliberate one, so it says nothing and hands the panel back to the
+ * the deliberate one, so it says nothing and hands the form view back to the
  * cursor rather than leaving it on a form nobody is pointing at.
  */
 function dropLock(): void {
@@ -2003,7 +2003,7 @@ function dropLock(): void {
   releaseLock();
   const s = was === undefined ? undefined : byId.get(was);
   if (s) {
-    void followPanel(s);
+    void followFormView(s);
   }
 }
 
@@ -2019,25 +2019,25 @@ function releaseLock(why?: string): void {
     return;
   }
   locked = undefined;
-  void vscode.commands.executeCommand('setContext', 'acl2Session.panelLocked', false);
-  panel.setLockLabel(undefined);
+  void vscode.commands.executeCommand('setContext', 'acl2Session.formViewLocked', false);
+  formView.setLockLabel(undefined);
   if (why) {
-    panel.note(`The panel is no longer held: ${why}.`);
-    channel.appendLine(`panel: released -- ${why}`);
+    formView.note(`The formView is no longer held: ${why}.`);
+    channel.appendLine(`formView: released -- ${why}`);
   }
 }
 
-/** Update the panel for the form at the cursor (or a pinned INDEX). */
-async function followPanel(s: BookSession, index?: number): Promise<void> {
-  // `panelTarget` decides between the held form and the cursor's, and is the
+/** Update the form view for the form at the cursor (or a pinned INDEX). */
+async function followFormView(s: BookSession, index?: number): Promise<void> {
+  // `formViewTarget` decides between the held form and the cursor's, and is the
   // one that knows whether the cursor speaks for this book at all.
-  const at = index ?? panelTarget(s);
+  const at = index ?? formViewTarget(s);
   if (at === undefined) {
     return;
   }
-  const model = buildPanelModel(s, at);
+  const model = buildFormModel(s, at);
   if (model) {
-    panel.render(model);
+    formView.render(model);
     void followInduction(s, at);
     void followRules(s, at);
   }
@@ -2058,10 +2058,10 @@ async function followPanel(s: BookSession, index?: number): Promise<void> {
 async function followRules(s: BookSession, index: number): Promise<void> {
   const cached = s.rulesByUnit.get(index);
   if (cached) {
-    // Already known: hand it over and let the panel decide whether anything
+    // Already known: hand it over and let the form view decide whether anything
     // changed. Asking again would cost a round trip per name and, worse,
     // land a re-render on top of whatever the reader was doing.
-    panel.rules(s.id, index, cached);
+    formView.rules(s.id, index, cached);
     return;
   }
   const e = s.unitEvents.get(index);
@@ -2081,7 +2081,7 @@ async function followRules(s: BookSession, index: number): Promise<void> {
     // back onto a socket the renderer was too busy to drain.
     const batch = await client?.request('rules', { book: s.id, names });
     const replies: RulesReply[] = (batch?.rules as RulesReply[]) ?? [];
-    const entries: PanelNameRules[] = replies
+    const entries: FormNameRules[] = replies
       .filter((r): r is RulesReply => !!r && r.found)
       .map((r) => ({
         name: r.name,
@@ -2099,10 +2099,10 @@ async function followRules(s: BookSession, index: number): Promise<void> {
         })),
       }));
     s.rulesByUnit.set(index, entries);
-    // Keyed by book and unit inside the panel: the cursor may have moved on.
-    panel.rules(s.id, index, entries);
+    // Keyed by book and unit inside the form view: the cursor may have moved on.
+    formView.rules(s.id, index, entries);
   } catch (err) {
-    // Best effort, but said out loud -- a panel that silently shows less is
+    // Best effort, but said out loud -- a form view that silently shows less is
     // indistinguishable from a form that introduced less.
     channel.appendLine(`rules: form ${index} could not be read (${err})`);
   }
@@ -2114,7 +2114,7 @@ async function followRules(s: BookSession, index: number): Promise<void> {
  * Gated on the envelope rather than always asked: ACL2 records the
  * `:induction` rune structurally in `rules`, so the cheap fact decides
  * whether to pay for the expensive one -- which reads the whole captured log.
- * Most forms never induct, and this keeps the panel free for them.
+ * Most forms never induct, and this keeps the form view free for them.
  */
 async function followInduction(s: BookSession, index: number): Promise<void> {
   const e = s.unitEvents.get(index);
@@ -2146,12 +2146,12 @@ async function followInduction(s: BookSession, index: number): Promise<void> {
     const records = await pending;
     // Keyed by book and unit: the cursor may have moved on while the log was
     // being read, and a narrative for the form you have left is noise.
-    panel.induction(s.id, index, records);
+    formView.induction(s.id, index, records);
   } catch (err) {
     // Not cached, so the next look asks again -- a failed read is a fault to
     // retry, not an answer to remember.
     s.inductionByUnit.delete(index);
-    // Best effort in the panel, but not silent: swallowing this hid a real
+    // Best effort in the form view, but not silent: swallowing this hid a real
     // fault once already.
     channel.appendLine(`induction: form ${index} could not be read (${err})`);
   }
@@ -2162,7 +2162,7 @@ async function readInduction(
   s: BookSession,
   index: number,
   ref: string
-): Promise<PanelInduction[]> {
+): Promise<FormInduction[]> {
   const r = await client?.request('induction', { book: s.id, output_ref: ref });
   const wire = (r?.inductions ?? []) as InductionWire[];
   if (wire.length === 0) {
@@ -2184,13 +2184,13 @@ async function readInduction(
   }));
 }
 
-function buildPanelModel(s: BookSession, index: number): PanelModel | undefined {
+function buildFormModel(s: BookSession, index: number): FormModel | undefined {
   const st = s.lastState;
   const u = st?.units[index];
   if (!st || !u) {
     return undefined;
   }
-  const model: PanelModel = {
+  const model: FormModel = {
     book: s.id,
     index,
     total: st.units.length,
@@ -2216,12 +2216,12 @@ function buildPanelModel(s: BookSession, index: number): PanelModel | undefined 
 }
 
 /**
- * The wire's envelope in the panel's spelling. One function, because the
+ * The wire's envelope in the form view's spelling. One function, because the
  * daemon flattens a unit's envelope and an eval's identically -- and if that
  * ever stops being true, this is where it breaks loudly rather than in one
  * of two renderers that drifted apart.
  */
-function toPanelEnvelope(e: Envelope): PanelEnvelope {
+function toPanelEnvelope(e: Envelope): FormEnvelope {
   const inner = (e.inner ?? []).map((i) => ({
     name: i.name,
     kind: i.kind,
@@ -2260,11 +2260,11 @@ function toConsoleResult(r: EvalReply): ConsoleResult {
   };
 }
 
-async function fetchGoal(m: PanelModel, goal: string, slot: number): Promise<void> {
+async function fetchGoal(m: FormModel, goal: string, slot: number): Promise<void> {
   const s = byId.get(m.book);
   const e = s?.unitEvents.get(m.index);
   if (!s || !e) {
-    panel.goalResult(slot, '(no captured output for this form)');
+    formView.goalResult(slot, '(no captured output for this form)');
     return;
   }
   try {
@@ -2274,8 +2274,8 @@ async function fetchGoal(m: PanelModel, goal: string, slot: number): Promise<voi
       mode: 'goal',
       text: goal,
     });
-    panel.goalResult(slot, (r.text as string) || '(nothing captured under this goal)');
+    formView.goalResult(slot, (r.text as string) || '(nothing captured under this goal)');
   } catch (err) {
-    panel.goalResult(slot, `(output unavailable: ${err})`);
+    formView.goalResult(slot, `(output unavailable: ${err})`);
   }
 }

@@ -51,13 +51,13 @@ fn laid_opt(term: &Option<String>) -> Option<String> {
     term.as_deref().map(laid)
 }
 
-/// Lay a term out for a box that is not the panel.
+/// Lay a term out for a box that is not the form view.
 ///
 /// A hover is the case: it has a width, but nothing can measure it. The
 /// extension API exposes no pixel geometry at all -- not for the hover
 /// widget, not even for the editor -- and a webview, the one place an
 /// extension *can* measure, is not where a tooltip lives. So the client says
-/// what it wants and this obeys, rather than borrowing the panel's width,
+/// what it wants and this obeys, rather than borrowing the form view's width,
 /// which belongs to a different box and moves when a different pane is
 /// dragged.
 fn laid_at(term: &Option<String>, cols: Option<usize>) -> Option<String> {
@@ -256,7 +256,7 @@ pub fn described(name: &str, d: Option<&NameDetail>, cols: Option<usize>) -> Des
             kind: Some(kind_str(d.kind)),
             origin: Some(origin_str(d.origin)),
             formals: d.formals.clone(),
-            // Laid out, like the panel's. `formals` is not: a short list ACL2
+            // Laid out, like the form view's. `formals` is not: a short list ACL2
             // never wraps anyway.
             guard: laid_at(&d.guard, cols),
             statement: laid_at(&d.statement, cols),
@@ -576,9 +576,9 @@ pub struct InductionReply {
 /// request away. Generous on purpose: a scheme a person can actually read
 /// arrives whole, and this is a backstop against the ones nobody can.
 ///
-/// Chosen against the client's own limit rather than freely. The panel lays a
+/// Chosen against the client's own limit rather than freely. The form view lays a
 /// scheme out at the pane's width *before* coloring it, and laying out grows
-/// the text -- 6.83 MB became 15.3 MB, about 2.2x. What the panel colors is
+/// the text -- 6.83 MB became 15.3 MB, about 2.2x. What the form view colors is
 /// therefore what this sends, expanded; if that lands over `MAX_TERM` in
 /// `editors/vscode/src/policy.ts` the scheme arrives cut *and* uncolored,
 /// which is the one combination nobody asked for. This leaves room for the
@@ -953,7 +953,7 @@ pub struct RulesParams {
     /// of a unit's events.
     ///
     /// A list rather than one name because the caller almost never wants one:
-    /// the panel explains everything a form introduced, and macro-generated
+    /// the form view explains everything a form introduced, and macro-generated
     /// code records far more than the buffer shows. Asked one at a time, a
     /// `defines` of 620 recorded events became 620 requests fired at once,
     /// 620 commands queued to the driver thread that also runs proofs, and

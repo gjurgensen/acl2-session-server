@@ -2253,7 +2253,7 @@ impl Book {
     ///   without the query. A query that cleared them would make moving the
     ///   cursor change what the next retry reports.
     /// - **Nothing reaches the `OutputStore`.** Hovering a file walks hundreds
-    ///   of names; storing a log apiece would evict the unit logs the panel
+    ///   of names; storing a log apiece would evict the unit logs the form view
     ///   exists to show. The markers come back inline instead.
     /// - **The answer is structured, not prose.** Callers get the `ASS-DATA`
     ///   pairs and `ASS-BEGIN`/`ASS-END` blocks their probe printed, which is

@@ -245,13 +245,13 @@ fn terms_arrive_laid_out_for_the_width_the_client_asked_for() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A hover's terms are laid out for the hover, not for the panel.
+/// A hover's terms are laid out for the hover, not for the form view.
 ///
 /// Two things at once. The world stores terms translated, so a `defthm` whose
 /// statement was written with `and` is held as `(if x y 'nil)` and used to be
 /// shown that way. And a hover has a width but nothing can measure it -- the
 /// extension API exposes no geometry for a tooltip -- so the client says what
-/// it wants rather than inheriting the panel's, which is a different box.
+/// it wants rather than inheriting the form view's, which is a different box.
 #[test]
 #[ignore = "needs ACL2"]
 fn a_hover_lays_terms_out_at_the_width_it_asked_for() {
@@ -274,7 +274,7 @@ fn a_hover_lays_terms_out_at_the_width_it_asked_for() {
     let mut d = Daemon::start(&acl2);
     let opened = d.request("open", json!({ "path": book_path.to_str().unwrap() }));
     let book = opened["book"].as_str().expect("book id").to_string();
-    // A wide panel, so inheriting its width would be visible.
+    // A wide form view, so inheriting its width would be visible.
     d.notify("layout", json!({ "cols": 200 }));
     d.notify("update", json!({ "book": book, "text": text, "revision": 1 }));
     let events = d.events_until_settled();
@@ -292,7 +292,7 @@ fn a_hover_lays_terms_out_at_the_width_it_asked_for() {
     assert!(widest <= 40, "laid out to {widest} columns, not the 40 asked for: {narrow}");
 
     // The same name at a different width: the number is used, and it is the
-    // hover's rather than the panel's 200.
+    // hover's rather than the form view's 200.
     let t2 = d.request("describe", json!({ "book": book, "name": "hv-thm", "cols": 100 }));
     let wide = t2["statement"].as_str().expect("a statement").to_string();
     assert!(wide.lines().count() < narrow.lines().count(), "wide:\n{wide}\nnarrow:\n{narrow}");
@@ -1168,7 +1168,7 @@ fn a_client_that_stops_reading_does_not_wedge_the_daemon() {
 
 /// Everything a form introduced is explained in one exchange.
 ///
-/// The panel asks about every name a unit's events recorded, and for
+/// The form view asks about every name a unit's events recorded, and for
 /// macro-generated code that is far more than the buffer shows -- a `defines`
 /// in kestrel/c/syntax/validator.lisp records 620. Asked one at a time, that
 /// was 620 requests fired at once the moment the form landed, 620 commands
@@ -1213,7 +1213,7 @@ fn a_forms_names_are_explained_in_one_request() {
     // shift every later answer out of step with the list the client sent.
     assert_eq!(got[2]["found"], false, "and an unknown one is still answered: {batch}");
 
-    // An empty list is legal and cheap -- the panel asks whenever a form
+    // An empty list is legal and cheap -- the form view asks whenever a form
     // lands, including forms that introduced nothing at all.
     let none = d.request("rules", json!({ "book": book, "names": Vec::<String>::new() }));
     assert_eq!(none["rules"].as_array().map(|a| a.len()), Some(0), "{none}");

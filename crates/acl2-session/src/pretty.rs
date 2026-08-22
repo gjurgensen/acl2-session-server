@@ -16,8 +16,8 @@
 //! that tells the second how to print.
 //!
 //! Following ACL2 rather than inventing a layout is a deliberate choice, and
-//! the reason is the same one that puts the panel's colors on the editor's own
-//! grammar and theme: a term in the panel and the same term in ACL2's output
+//! the reason is the same one that puts the form view's colors on the editor's own
+//! grammar and theme: a term in the form view and the same term in ACL2's output
 //! should agree by construction, not by resemblance. It also means the rules
 //! are *ACL2's* to justify, and there is a reference implementation to test
 //! against.

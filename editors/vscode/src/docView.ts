@@ -1,8 +1,8 @@
 // The documentation view: one topic at a time, with its cross-references
 // followed in place.
 //
-// Its own window rather than a section of the panel, for the same reason
-// the console moved out: the panel is *per-form* and about proof
+// Its own window rather than a section of the form view, for the same reason
+// the console moved out: the form view is *per-form* and about proof
 // state, and a topic is neither. It is opened deliberately and should outlive
 // the cursor moving, which is also why it follows nothing.
 
@@ -18,7 +18,7 @@ export interface DocPage {
   /**
    * Code blocks as *tokens*, coloured by the extension with the editor's own
    * grammar and theme. The page turns them into spans with the same helper
-   * the panel uses -- there is no second tokenizer anywhere on this page.
+   * the form view uses -- there is no second tokenizer anywhere on this page.
    */
   code: { slot: number; lines: unknown }[];
   /** Whether anything is behind us in the history. */
@@ -83,7 +83,7 @@ export class DocView {
 
 export const HTML = `<!DOCTYPE html>
 <html><head><meta charset="utf-8">
-<!-- The same policy the panel and the console carry, and this page has the
+<!-- The same policy the form view and the console carry, and this page has the
      better claim to it: it is the only one whose body is markup derived from
      a book rather than assembled here. -->
 <meta http-equiv="Content-Security-Policy"

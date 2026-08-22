@@ -1,6 +1,6 @@
-// The parts of a webview the panel and the console both need.
+// The parts of a webview the form view and the console both need.
 //
-// Two webviews exist because they answer different questions. The panel is
+// Two webviews exist because they answer different questions. The form view is
 // per-form: it follows the cursor and shows the envelope of whatever the
 // cursor is in. The console is per-session: its transcript belongs to one
 // book and outlives every cursor move. But a result is a result, and a
@@ -41,7 +41,7 @@ button { background: var(--vscode-button-secondaryBackground);
 button:hover { background: var(--vscode-button-secondaryHoverBackground); }
 .note { background: rgba(198, 40, 40, 0.15); padding: 6px 9px; border-radius: 4px;
         margin: 8px 0; font-size: 12px; }
-/* The panel speaking for itself rather than about a form. Neutral on purpose:
+/* The form view speaking for itself rather than about a form. Neutral on purpose:
    red in here already means a form went red. */
 .notice { border-left: 3px solid var(--vscode-focusBorder, #888); padding: 4px 9px;
           margin: 8px 0; font-size: 12px; opacity: 0.85; }

@@ -91,7 +91,7 @@ function link(target: string, text: string): string {
  *
  * Code blocks are lifted out *before* anything else and returned separately,
  * so no later rewriting can reach inside them and so the host can colour them
- * with the editor's own grammar -- the same choice made for the panel's
+ * with the editor's own grammar -- the same choice made for the form view's
  * terms, and for the same reason: a second, approximate Lisp lexer is
  * precisely what this project keeps declining to write.
  *

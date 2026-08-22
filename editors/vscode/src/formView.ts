@@ -1,4 +1,4 @@
-// The structured panel: an infoview-shaped webview beside the editor,
+// The structured form view: an infoview-shaped webview beside the editor,
 // rendering the envelope for the form at the cursor -- status, the failure
 // as structure (abort cause, checkpoints as terms with their prover output
 // one click away), warnings, fired hints, splitter rules, the events inside
@@ -22,13 +22,23 @@ import { TokLines } from './highlight';
 import { SHARED_CSS, SHARED_JS } from './webviewParts';
 import { MAX_TERM } from './policy';
 
-export interface PanelCheckpoint {
+/**
+ * What the tab says.
+ *
+ * Named rather than left as a bare "ACL2", to sit with its siblings -- `ACL2
+ * Docs`, `ACL2 Output`, `ACL2 Eval`, `ACL2 Console` -- and because "panel"
+ * was VSCode's word for the dock at the bottom of the window, which this has
+ * never been. This is an editor tab showing one form.
+ */
+const TITLE = 'ACL2 Form View';
+
+export interface FormCheckpoint {
   kind: string;
   goal?: string;
   term: string;
 }
 
-export interface PanelInnerEvent {
+export interface FormInnerEvent {
   name: string;
   kind?: string;
   time?: string;
@@ -42,20 +52,20 @@ export interface PanelInnerEvent {
    * model, and the page joins the two by name at render time. Declared all
    * the same, because `envelope()` reads it.
    */
-  detail?: PanelNameRules;
+  detail?: FormNameRules;
 }
 
 /**
  * What ACL2 had to say about one form. A unit and an eval carry the same
  * fields meaning the same things; each adds its own on top.
  */
-export interface PanelEnvelope {
+export interface FormEnvelope {
   elapsedMs?: number;
   proverSteps?: number;
   outputLines?: number;
   errorLine?: string;
   abortCause?: string;
-  checkpoints: PanelCheckpoint[];
+  checkpoints: FormCheckpoint[];
   rules: string[];
   warnings?: string;
   time?: string;
@@ -63,22 +73,22 @@ export interface PanelEnvelope {
   splitterRules?: string[];
   preRevert?: boolean;
   forced?: boolean;
-  inner?: PanelInnerEvent[];
+  inner?: FormInnerEvent[];
   innerTotal?: number;
   nTop?: number;
   nSub?: number;
 }
 
-export interface PanelRuneField {
+export interface FormRuneField {
   key: string;
   value: string;
 }
 
-export interface PanelRune {
+export interface FormRune {
   rune: string;
   class?: string;
   enabled?: boolean;
-  fields: PanelRuneField[];
+  fields: FormRuneField[];
 }
 
 /**
@@ -94,7 +104,7 @@ export interface PanelRune {
  * are facts about one `defun` or one `defthm`, and a `define` that writes
  * four of them wants them beside their own names rather than pooled.
  */
-export interface PanelNameRules {
+export interface FormNameRules {
   name: string;
   symbolClass?: string;
   measure?: string;
@@ -102,11 +112,11 @@ export interface PanelNameRules {
   formals?: string;
   guard?: string;
   statement?: string;
-  runes: PanelRune[];
+  runes: FormRune[];
 }
 
 /** Why the prover inducted -- see `InductionWire`. */
-export interface PanelInduction {
+export interface FormInduction {
   goal?: string;
   suggestedBy?: string;
   attribution?: string;
@@ -123,7 +133,7 @@ export interface PanelInduction {
   subgoals?: string;
 }
 
-export interface PanelModel extends PanelEnvelope {
+export interface FormModel extends FormEnvelope {
   book: string;
   index: number;
   total: number;
@@ -141,7 +151,7 @@ export interface PanelModel extends PanelEnvelope {
 }
 
 /** The strings in an induction record that are ACL2 code rather than prose. */
-function inductionStrings(records: PanelInduction[]): string[] {
+function inductionStrings(records: FormInduction[]): string[] {
   return records.flatMap((r) =>
     [r.scheme, r.suggestedBy].filter((x): x is string => x !== undefined)
   );
@@ -163,7 +173,7 @@ function same(a: unknown, b: unknown): boolean {
 }
 
 /** The strings in a rules record that are ACL2 code rather than prose. */
-export function rulesStrings(entries: PanelNameRules[]): string[] {
+export function rulesStrings(entries: FormNameRules[]): string[] {
   return entries.flatMap((e) => [
     ...(e.formals === undefined ? [] : [e.formals]),
     ...(e.guard === undefined ? [] : [e.guard]),
@@ -175,7 +185,7 @@ export function rulesStrings(entries: PanelNameRules[]): string[] {
 }
 
 /** The strings in an envelope that are ACL2 code rather than prose. */
-export function highlightable(m: PanelEnvelope): string[] {
+export function highlightable(m: FormEnvelope): string[] {
   return [
     ...m.checkpoints.map((c) => c.term),
     ...(m.rules ?? []),
@@ -216,12 +226,12 @@ export function tokenizeAll(
   return toks;
 }
 
-export class Panel {
+export class FormView {
   private panel?: vscode.WebviewPanel;
-  private model?: PanelModel;
-  private lastRules?: { book: string; index: number; entries: PanelNameRules[] };
+  private model?: FormModel;
+  private lastRules?: { book: string; index: number; entries: FormNameRules[] };
 
-  onGoal?: (model: PanelModel, goal: string, slot: number) => void;
+  onGoal?: (model: FormModel, goal: string, slot: number) => void;
 
   /**
    * Set by the extension once the grammar and theme are loaded. Terms travel
@@ -269,7 +279,7 @@ export class Panel {
    */
   onCols?: (cols: number) => void;
 
-  private lastInduction?: { book: string; index: number; records: PanelInduction[] };
+  private lastInduction?: { book: string; index: number; records: FormInduction[] };
 
   get visible(): boolean {
     return this.panel !== undefined;
@@ -287,8 +297,8 @@ export class Panel {
       return;
     }
     this.panel = vscode.window.createWebviewPanel(
-      'acl2SessionPanel',
-      'ACL2',
+      'acl2SessionFormView',
+      TITLE,
       { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
       { enableScripts: true, retainContextWhenHidden: true }
     );
@@ -319,7 +329,7 @@ export class Panel {
     }
   }
 
-  render(model: PanelModel): void {
+  render(model: FormModel): void {
     this.model = model;
     this.post(model);
   }
@@ -331,14 +341,14 @@ export class Panel {
    * reason: the cursor may have moved on while this was being fetched, and
    * detail for the form you have left is noise.
    */
-  rules(book: string, index: number, entries: PanelNameRules[]): void {
+  rules(book: string, index: number, entries: FormNameRules[]): void {
     const s = this.shown();
     if (!s || s.book !== book || s.index !== index) {
       return;
     }
     // A render replaces the whole page, which resets every dropdown the
     // reader has opened. So a post that would change nothing must not
-    // happen: the panel follows the cursor, and the same form arriving again
+    // happen: the form view follows the cursor, and the same form arriving again
     // is the common case, not the rare one.
     const l = this.lastRules;
     if (l && l.book === book && l.index === index && same(l.entries, entries)) {
@@ -348,7 +358,7 @@ export class Panel {
     this.postRules(this.lastRules);
   }
 
-  private postRules(r: { book: string; index: number; entries: PanelNameRules[] }): void {
+  private postRules(r: { book: string; index: number; entries: FormNameRules[] }): void {
     void this.panel?.webview.postMessage({
       kind: 'rules',
       book: r.book,
@@ -372,21 +382,21 @@ export class Panel {
    * Mark the tab as held, or stop marking it.
    *
    * In the title because that is where it stays visible: the tab-bar icon
-   * shows the state only while the panel's own tab has focus, and a reader
+   * shows the state only while the form view's own tab has focus, and a reader
    * watching a form is by definition looking somewhere else. VSCode's own
    * markdown preview does the same thing, showing a locked preview as
    * `[Preview] file.md`.
    */
   setLockLabel(label: string | undefined): void {
     if (this.panel) {
-      this.panel.title = label ? `ACL2 (${label})` : 'ACL2';
+      this.panel.title = label ? `${TITLE} (${label})` : TITLE;
     }
   }
 
   /**
    * Say something to the reader in the page itself.
    *
-   * For the one thing the panel has to volunteer rather than answer: that it
+   * For the one thing the form view has to volunteer rather than answer: that it
    * has stopped being held on the form it was held on. A notification would be
    * dismissed before it was read and a status-bar entry would be missed; this
    * is in the place the reader is already looking.
@@ -409,7 +419,7 @@ export class Panel {
    * the page will look up, so anything that changes the text has to happen
    * before the tokenizer sees it.
    */
-  private post(model: PanelModel): void {
+  private post(model: FormModel): void {
     // No re-flow here: terms arrive from the daemon already laid out for
     // the width this pane reported.
     const laid = model;
@@ -452,17 +462,17 @@ export class Panel {
    * The induction narrative for the form on show.
    *
    * A separate message rather than a field of the model, because it is a
-   * second round trip: the panel renders as soon as the envelope arrives,
+   * second round trip: the form view renders as soon as the envelope arrives,
    * and this fills in afterwards for the minority of forms that inducted.
    */
-  induction(book: string, index: number, records: PanelInduction[]): void {
+  induction(book: string, index: number, records: FormInduction[]): void {
     const s = this.shown();
     if (!s || s.book !== book || s.index !== index) {
       return;
     }
     // The same guard `rules` carries, and for the same reason: a render
     // replaces the whole page and resets every dropdown the reader has
-    // opened, so a post that would change nothing must not happen. The panel
+    // opened, so a post that would change nothing must not happen. The form view
     // follows the cursor, and the same form arriving again is the common
     // case rather than the rare one.
     const l = this.lastInduction;
@@ -473,7 +483,7 @@ export class Panel {
     this.postInduction(this.lastInduction);
   }
 
-  private postInduction(i: { book: string; index: number; records: PanelInduction[] }): void {
+  private postInduction(i: { book: string; index: number; records: FormInduction[] }): void {
     void this.panel?.webview.postMessage({
       kind: 'induction',
       book: i.book,
@@ -512,17 +522,17 @@ body { padding: 2px 12px 12px; }
 const vscode = acquireVsCodeApi();
 ${SHARED_JS}
 let model;
-// Something the panel has to say on its own account -- that it stopped being
+// Something the form view has to say on its own account -- that it stopped being
 // held on a form. It outlives the render that follows it, which is the whole
 // point: letting go is followed at once by showing whatever the cursor is in,
 // and a message the next render wiped would never be seen. Cleared when the
-// panel is held again.
+// form view is held again.
 let note;
 let inductions = [];
 let ruleEntries = [];
 let rulesKey = '';
 // Which form the records belong to, so a re-render of the *same* form keeps
-// them. The panel re-renders on every state event, and clearing on each one
+// them. The form view re-renders on every state event, and clearing on each one
 // made the section blink out and back for the whole time a book was being
 // checked. No backticks in here: this comment lives inside a template
 // literal, and one would end the string.
@@ -710,7 +720,7 @@ function render() {
   );
   h += inductionHtml();
   // No actions row. Retracting and holding the target are editor verbs with
-  // their own keybindings, and the full log has one too; a panel that follows
+  // their own keybindings, and the full log has one too; a form view that follows
   // the cursor is a poor place to put a button whose effect is elsewhere.
   document.getElementById('root').innerHTML = h;
 }

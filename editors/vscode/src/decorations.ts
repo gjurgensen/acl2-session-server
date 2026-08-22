@@ -6,7 +6,7 @@
 // a book that takes minutes), blue over the form being proved, green over
 // admitted forms ("actually good" is a positive mark, not an absence),
 // yellow over conditional ones, red over skipped/failed ones. Every status
-// echoes in the overview ruler. The failure envelope's home is the panel;
+// echoes in the overview ruler. The failure envelope's home is the form view;
 // there are no diagnostics and no washes here, one mark per fact.
 //
 // `wash` draws whole-form background washes, reds included, and no

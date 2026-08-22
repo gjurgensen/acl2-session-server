@@ -57,7 +57,7 @@
     "colors": [
       {
         "id": "acl2Session.token.name",
-        "description": "Panel terms: defined names. Used only when the active theme's token colors could not be read; otherwise the panel takes its colors from the theme itself.",
+        "description": "Form view terms: defined names. Used only when the active theme's token colors could not be read; otherwise the form view takes its colors from the theme itself.",
         "defaults": {
           "light": "terminal.ansiYellow",
           "dark": "terminal.ansiBrightYellow",
@@ -67,7 +67,7 @@
       },
       {
         "id": "acl2Session.token.keyword",
-        "description": "Panel terms: :keywords and rune classes, when the theme's token colors could not be read.",
+        "description": "Form view terms: :keywords and rune classes, when the theme's token colors could not be read.",
         "defaults": {
           "light": "terminal.ansiMagenta",
           "dark": "terminal.ansiBrightMagenta",
@@ -77,7 +77,7 @@
       },
       {
         "id": "acl2Session.token.constant",
-        "description": "Panel terms: t, nil and *constants*, when the theme's token colors could not be read.",
+        "description": "Form view terms: t, nil and *constants*, when the theme's token colors could not be read.",
         "defaults": {
           "light": "terminal.ansiBlue",
           "dark": "terminal.ansiBrightBlue",
@@ -87,7 +87,7 @@
       },
       {
         "id": "acl2Session.token.number",
-        "description": "Panel terms: numbers, when the theme's token colors could not be read.",
+        "description": "Form view terms: numbers, when the theme's token colors could not be read.",
         "defaults": {
           "light": "terminal.ansiMagenta",
           "dark": "terminal.ansiBrightMagenta",
@@ -97,7 +97,7 @@
       },
       {
         "id": "acl2Session.token.string",
-        "description": "Panel terms: strings and character literals, when the theme's token colors could not be read.",
+        "description": "Form view terms: strings and character literals, when the theme's token colors could not be read.",
         "defaults": {
           "light": "terminal.ansiGreen",
           "dark": "terminal.ansiBrightGreen",
@@ -107,7 +107,7 @@
       },
       {
         "id": "acl2Session.token.comment",
-        "description": "Panel terms: comments, when the theme's token colors could not be read.",
+        "description": "Form view terms: comments, when the theme's token colors could not be read.",
         "defaults": {
           "light": "terminal.ansiBrightBlack",
           "dark": "terminal.ansiBrightBlack",
@@ -117,7 +117,7 @@
       },
       {
         "id": "acl2Session.token.storage",
-        "description": "Panel terms: definer heads such as defthm, when the theme's token colors could not be read.",
+        "description": "Form view terms: definer heads such as defthm, when the theme's token colors could not be read.",
         "defaults": {
           "light": "terminal.ansiYellow",
           "dark": "terminal.ansiYellow",
@@ -127,7 +127,7 @@
       },
       {
         "id": "acl2Session.token.control",
-        "description": "Panel terms: binding and event forms, when the theme's token colors could not be read.",
+        "description": "Form view terms: binding and event forms, when the theme's token colors could not be read.",
         "defaults": {
           "light": "terminal.ansiRed",
           "dark": "terminal.ansiBrightRed",
@@ -137,7 +137,7 @@
       },
       {
         "id": "acl2Session.token.punctuation",
-        "description": "Panel terms: parentheses, when the theme's token colors could not be read.",
+        "description": "Form view terms: parentheses, when the theme's token colors could not be read.",
         "defaults": {
           "light": "terminal.ansiWhite",
           "dark": "terminal.ansiWhite",
@@ -305,22 +305,22 @@
         "title": "ACL2: Show Documentation for Name at Cursor"
       },
       {
-        "command": "acl2-session.lockPanel",
-        "title": "ACL2: Hold Panel on This Form",
+        "command": "acl2-session.lockFormView",
+        "title": "ACL2: Hold Form View",
         "icon": "$(unlock)"
       },
       {
-        "command": "acl2-session.unlockPanel",
-        "title": "ACL2: Release Panel",
+        "command": "acl2-session.unlockFormView",
+        "title": "ACL2: Release Form View",
         "icon": "$(lock)"
       },
       {
-        "command": "acl2-session.togglePanelLock",
-        "title": "ACL2: Toggle Panel Hold"
+        "command": "acl2-session.toggleFormViewLock",
+        "title": "ACL2: Toggle Form View Hold"
       },
       {
-        "command": "acl2-session.showPanel",
-        "title": "ACL2: Show Panel"
+        "command": "acl2-session.showFormView",
+        "title": "ACL2: Show Form View"
       },
       {
         "command": "acl2-session.gotoFrontier",
@@ -384,13 +384,13 @@
           "type": "number",
           "default": 60,
           "minimum": 20,
-          "description": "Maximum width, in characters, that terms in the panel are laid out to. The pane's own width is used when it is narrower; this is a ceiling, not a target. ACL2 prints for a 77-column terminal, so a wide pane would otherwise leave every term on one long line."
+          "description": "Maximum width, in characters, that terms in the form view are laid out to. The pane's own width is used when it is narrower; this is a ceiling, not a target. ACL2 prints for a 77-column terminal, so a wide pane would otherwise leave every term on one long line."
         },
         "acl2-session.hoverWidth": {
           "type": "number",
           "default": 60,
           "minimum": 20,
-          "description": "Width, in characters, that terms in a hover are laid out to. A fixed number rather than a measurement: VSCode tells an extension nothing about the size of a hover, and a tooltip is not a webview, so nothing can measure it. Matches the panel's default so a term reads the same in both."
+          "description": "Width, in characters, that terms in a hover are laid out to. A fixed number rather than a measurement: VSCode tells an extension nothing about the size of a hover, and a tooltip is not a webview, so nothing can measure it. Matches the form view's default so a term reads the same in both."
         },
         "acl2-session.certifyJobs": {
           "type": "integer",
@@ -486,24 +486,24 @@
           "group": "navigation@2"
         },
         {
-          "command": "acl2-session.lockPanel",
-          "when": "activeWebviewPanelId == 'acl2SessionPanel' && !acl2Session.panelLocked",
+          "command": "acl2-session.lockFormView",
+          "when": "activeWebviewPanelId == 'acl2SessionFormView' && !acl2Session.formViewLocked",
           "group": "navigation@1"
         },
         {
-          "command": "acl2-session.unlockPanel",
-          "when": "activeWebviewPanelId == 'acl2SessionPanel' && acl2Session.panelLocked",
+          "command": "acl2-session.unlockFormView",
+          "when": "activeWebviewPanelId == 'acl2SessionFormView' && acl2Session.formViewLocked",
           "group": "navigation@1"
         }
       ],
       "commandPalette": [
         {
-          "command": "acl2-session.lockPanel",
-          "when": "!acl2Session.panelLocked"
+          "command": "acl2-session.lockFormView",
+          "when": "!acl2Session.formViewLocked"
         },
         {
-          "command": "acl2-session.unlockPanel",
-          "when": "acl2Session.panelLocked"
+          "command": "acl2-session.unlockFormView",
+          "when": "acl2Session.formViewLocked"
         }
       ]
     },
@@ -539,7 +539,7 @@
         "when": "editorLangId == acl2"
       },
       {
-        "command": "acl2-session.showPanel",
+        "command": "acl2-session.showFormView",
         "key": "ctrl+alt+p",
         "mac": "cmd+alt+p",
         "when": "editorLangId == acl2"

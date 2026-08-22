@@ -16,7 +16,7 @@
  * prints for a form a person wrote, and exists for the ones it prints for a
  * form a macro wrote. Measured on `kestrel/c/syntax/validator.lisp`, whose
  * `defines` at line 2775 induct on a 30-way flag function. The induction
- * scheme ACL2 printed for it was **6.83 MB**, and the panel's own handling of
+ * scheme ACL2 printed for it was **6.83 MB**, and the form view's own handling of
  * one of them cost:
  *
  *   laying it out           394 ms   6.83 MB -> 15.3 MB, 319,743 lines
@@ -25,14 +25,14 @@
  *   the page's own HTML              54.4 MB, 563,184 <span> elements
  *
  * Three such schemes came in one `induction` reply (20.9 MB, against 1.6 MB
- * of real events for the whole book), and the panel re-rendered them on every
+ * of real events for the whole book), and the form view re-rendered them on every
  * `state` event -- fifteen of them in the six seconds after that form landed.
- * The result was not a slow panel. The extension host stopped answering, so
+ * The result was not a slow form view. The extension host stopped answering, so
  * every other extension stopped with it; the renderer took a quarter of a
  * gigabyte of structured clone and a million and a half DOM nodes in wrapping
  * `<pre>` blocks, and the window went to "not responding" and stayed there.
- * With the panel closed the same book checks cleanly, because nothing asks
- * for the narrative unless the panel is showing the form.
+ * With the form view closed the same book checks cleanly, because nothing asks
+ * for the narrative unless the form view is showing the form.
  *
  * The daemon caps the scheme itself (`SCHEME_LIMIT` in the editor crate's
  * `wire.rs`), which is what keeps 20 MB off the wire. This is the guard for
@@ -42,22 +42,22 @@
 export const MAX_TERM = 64 * 1024;
 
 /**
- * Holding the panel on one form.
+ * Holding the form view on one form.
  *
- * The panel follows the cursor. Locking stops it, so a form can be watched
+ * The form view follows the cursor. Locking stops it, so a form can be watched
  * while the edit meant to fix it happens somewhere else -- which is the
  * ordinary way to use it: hold the failure, change the lemma above it, watch
  * the checkpoints move.
  *
  * A possible step beyond this, deliberately not built: **freeze**. Lock holds
- * the panel on a form and lets its contents update as that form is re-proved;
+ * the form view on a form and lets its contents update as that form is re-proved;
  * freeze would hold the contents too. The two differ only while the locked
  * form is being re-proved, and in that window what a reader wants is "do not
  * take away what I was reading" rather than a snapshot. What freeze would add
  * beyond that is comparing an old result against a new one -- and that needs
- * both on screen at once, so it wants a second panel rather than a mode. If it
+ * both on screen at once, so it wants a second form view rather than a mode. If it
  * is ever built it should freeze the *facts* and not the presentation: a
- * frozen panel must still re-flow when the pane is dragged and still recolour
+ * frozen form view must still re-flow when the pane is dragged and still recolour
  * with the theme, or "frozen" quietly means "wrong width and wrong colours"
  * too. The state here would become a third value rather than a second flag.
  */
@@ -185,7 +185,7 @@ export function lockedIndex(
  * A hundred and sixty times the legitimate traffic. The daemon's writer
  * thread stalled on a socket the client could not drain, and the extension
  * host -- which every other extension shares -- spent its life parsing JSON.
- * From the outside that is a frozen editor, not a slow panel.
+ * From the outside that is a frozen editor, not a slow form view.
  *
  * Depth on demand is a different question and still allowed: opening a view,
  * or a form landing, is a *user-paced* event, and reading the handle there
@@ -193,7 +193,7 @@ export function lockedIndex(
  */
 export interface TailPlan {
   /** Where the text the event already carries should go. */
-  target: 'console' | 'output-view' | 'panel-only';
+  target: 'console' | 'output-view' | 'form-view-only';
   /** Never true. See above. */
   requestsMore: false;
 }
@@ -201,7 +201,7 @@ export interface TailPlan {
 /**
  * `unit` is null for an eval's tail, which belongs to the console rather than
  * to any form of the file. Otherwise the output view takes it when it is
- * showing that same form, and the panel always gets it.
+ * showing that same form, and the form view always gets it.
  */
 export function planTail(args: {
   unit: number | null;
@@ -214,5 +214,5 @@ export function planTail(args: {
   if (args.sameBook && args.shownUnit === args.unit) {
     return { target: 'output-view', requestsMore: false };
   }
-  return { target: 'panel-only', requestsMore: false };
+  return { target: 'form-view-only', requestsMore: false };
 }

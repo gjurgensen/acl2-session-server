@@ -1,6 +1,6 @@
 // The console: a window per session for forms the file does not contain.
 //
-// One of these belongs to one book, and that is the point. The panel is
+// One of these belongs to one book, and that is the point. The form view is
 // per-form -- it follows the cursor and forgets what came before -- but an
 // eval belongs to the *session*: it ran against the world that book has
 // built, its answer means nothing against another book's world, and it stays
@@ -22,10 +22,10 @@
 
 import * as vscode from 'vscode';
 import { TokLines } from './highlight';
-import { PanelEnvelope, highlightable, tokenizeAll } from './panel';
+import { FormEnvelope, highlightable, tokenizeAll } from './formView';
 import { SHARED_CSS, SHARED_JS } from './webviewParts';
 
-export interface ConsoleResult extends PanelEnvelope {
+export interface ConsoleResult extends FormEnvelope {
   /** `ok` or `failed`. */
   outcome: string;
   /** `none`, `undone`, or `dirty`. */

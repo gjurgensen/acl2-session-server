@@ -1,4 +1,4 @@
-// Tokenizing the panel's terms with the very grammar the editor uses, and
+// Tokenizing the form view's terms with the very grammar the editor uses, and
 // coloring them with the very theme rules the editor uses.
 //
 // A webview receives workbench colors but never the editor's token colors,
@@ -6,7 +6,7 @@
 // what are the tokens, and what color is each. `vscode-textmate` answers
 // both -- it is the engine VSCode tokenizes buffers with, and its registry
 // resolves a theme's scope selectors with VSCode's own algorithm, so a term
-// in the panel and the same term in the book agree by construction rather
+// in the form view and the same term in the book agree by construction rather
 // than by a palette chosen to look close.
 //
 // The theme itself is the one thing with no API. `workbench.colorTheme` is a

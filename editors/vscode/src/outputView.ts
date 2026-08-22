@@ -53,7 +53,7 @@ export class OutputView implements vscode.TextDocumentContentProvider {
   }
 
   // The view shows ACL2's output verbatim: which unit it belongs to and how
-  // it fared are already in the gutter, the status bar and the panel, so a
+  // it fared are already in the gutter, the status bar and the form view, so a
   // banner here would only push the real text down.
   set(book: string, unit: number | null, text: string): void {
     this.shownBook = book;

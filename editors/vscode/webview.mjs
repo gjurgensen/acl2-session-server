@@ -41,7 +41,7 @@ function check(ok, what) {
 
 const pages = [
   ['the console page', require('./out/console.js').html('demo.lisp')],
-  ['the panel page', require('./out/panel.js').HTML],
+  ['the form view page', require('./out/formView.js').HTML],
   ['the docs page', require('./out/docView.js').HTML],
 ];
 
@@ -222,7 +222,7 @@ const envelope = lift('esc', 'strip', 'causes', 'spans', 'hl', 'codes', 'rat',
         'and is counted as unprobed, so a truncated probe still says so');
 }
 check(!pages[1][1].includes('Introduced ('),
-      'the panel has no second, pooled copy of what the form introduced');
+      'the form view has no second, pooled copy of what the form introduced');
 
 // The link range, which is where a coordinate bug would hide: the daemon
 // sends no columns, so the client places them by finding the quoted name on
@@ -312,7 +312,7 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
 // ---- a term too big to read is never worked on ----
 {
   const { MAX_TERM } = require('./out/policy.js');
-  const { tokenizeAll } = require('./out/panel.js');
+  const { tokenizeAll } = require('./out/formView.js');
   // The shape that took the editor down. ACL2 prints an induction scheme
   // with nothing abbreviated, so for a mutual recursion the scheme *is* the
   // clique: the `defines` at line 2775 of kestrel/c/syntax/validator.lisp
@@ -346,13 +346,13 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
         'while a small one is said exactly, since rounding it would say 0');
 }
 
-// ---- the panel can speak for itself ----
+// ---- the form view can speak for itself ----
 {
-  const page = require('./out/panel.js').HTML;
+  const page = require('./out/formView.js').HTML;
   // Letting go of a lock is followed immediately by rendering whatever the
   // cursor is in, so the message has to outlive that render or it is never
   // read. These pin the two halves of that: the page keeps a note across a
-  // model, and drops it when the panel is held again.
+  // model, and drops it when the form view is held again.
   check(/kind === 'note'/.test(page), 'the page takes a note from the extension');
   const modelBranch = /if \(m\.kind === 'model'\) \{([\s\S]*?)\n  \} else if/.exec(page);
   check(modelBranch !== null, 'the page has a model branch');
@@ -438,8 +438,8 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   const shapes = [
     { unit: null, sameBook: true, shownUnit: null, want: 'console' },
     { unit: 7, sameBook: true, shownUnit: 7, want: 'output-view' },
-    { unit: 7, sameBook: true, shownUnit: 3, want: 'panel-only' },
-    { unit: 7, sameBook: false, shownUnit: 7, want: 'panel-only' },
+    { unit: 7, sameBook: true, shownUnit: 3, want: 'form-view-only' },
+    { unit: 7, sameBook: false, shownUnit: 7, want: 'form-view-only' },
     { unit: 0, sameBook: true, shownUnit: 0, want: 'output-view' },
   ];
   let asked = 0;
