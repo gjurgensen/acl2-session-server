@@ -21,10 +21,29 @@ moves; on any other theme the column follows it.
 A theme that cannot be read falls back to those shipped values. That is a
 normal outcome rather than a failure: most themes define a fraction of the
 colour list and let VSCode's built-in defaults carry the rest, and those live
-in no file for an extension to read. The contributed theme colours —
-`acl2Session.bar.<status>` and `acl2Session.wash.<status>` — are what
-`workbench.colorCustomizations` overrides, and they cover the wash, the
-inline bar and the overview ruler.
+in no file for an extension to read.
+
+Four sources, most specific first: `acl2-session.colors`, then
+`workbench.colorCustomizations` on `acl2Session.bar.<status>` or
+`acl2Session.wash.<status>`, then the theme, then what is shipped. Whichever
+wins supplies the *hue*; the opacity stays this extension's, since a theme
+colour carries none and cannot be given one.
+
+`acl2-session.washOpacity` is that opacity for the washes, and is the setting
+most likely to be worth touching: how far a tint reads depends on the
+background under it, so the same wash can be too faint on one theme and too
+loud on another.
+
+```jsonc
+"acl2-session.washOpacity": 0.22,          // or { "light": 0.2, "dark": 0.16 }
+```
+
+It adjusts whatever colour won — including one from
+`workbench.colorCustomizations` — but not a wash written out in full under
+`acl2-session.colors`, which is taken exactly as given. The bars have no such
+dial on purpose: their opacities differ per status because a running form is
+the one to look at and an admitted one is a fact you can ignore, which is not
+a matter of taste about the background.
 
 The gutter bar is the exception, and it is a platform one: it is drawn as an
 image, and an image cannot resolve a theme colour or a CSS variable. That is

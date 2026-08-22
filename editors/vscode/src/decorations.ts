@@ -49,7 +49,9 @@ import {
   gutterSvg,
   svgCanPaint,
   washColorId,
+  withAlpha,
   withThemeHue,
+  WASH_ALPHA,
 } from './bars';
 import { themeColors } from './highlight';
 
@@ -193,6 +195,36 @@ export class Decorations {
     // What the active theme calls each of these, when it can be read. Read
     // once per build rather than per colour: it is a file parse.
     const theme = themeColors();
+    // And what the reader has said about our own ids in
+    // `workbench.colorCustomizations`. Read here rather than left to a
+    // `ThemeColor` because resolving to a value is what lets the gutter
+    // follow: referencing the id would customise three surfaces and leave the
+    // status column behind. Theme-scoped entries win over global ones, the
+    // same precedence VSCode applies and `highlight.ts` already honours for
+    // the token colours.
+    const custom = (() => {
+      const all =
+        vscode.workspace
+          .getConfiguration('workbench')
+          .get<Record<string, unknown>>('colorCustomizations') ?? {};
+      const label = vscode.workspace.getConfiguration('workbench').get<string>('colorTheme');
+      const scoped = (label ? all[`[${label}]`] : undefined) as
+        | Record<string, unknown>
+        | undefined;
+      return (id: string): string | undefined => {
+        const v = scoped?.[id] ?? all[id];
+        return typeof v === 'string' ? v : undefined;
+      };
+    })();
+    // How strong a wash is, which is the number a theme changes the feel of:
+    // the same tint reads differently over different backgrounds.
+    const washAlpha = (kind: 'light' | 'dark'): number => {
+      const set = vscode.workspace
+        .getConfiguration('acl2-session')
+        .get<number | { light?: number; dark?: number }>('washOpacity');
+      const v = typeof set === 'number' ? set : set?.[kind];
+      return typeof v === 'number' && v >= 0 && v <= 1 ? v : WASH_ALPHA[kind];
+    };
     // The colour to use, from the first source that has one: what the user
     // wrote, then the theme's own word for this status with our alpha kept,
     // and otherwise nothing -- which leaves the contributed theme colour to
@@ -207,21 +239,35 @@ export class Decorations {
       surface: 'bar' | 'wash',
       kind: 'light' | 'dark',
       shipped: string,
-      ids: string[]
+      ids: string[],
+      id: string
     ): string | undefined => {
+      // Ours first: it is the only setting that is about *this* extension,
+      // and it is fully explicit, so not even the opacity dial rewrites it.
       const written = forTheme(set[status]?.[surface], kind);
       if (written !== undefined) {
         return written;
       }
-      const hue = firstDefined(theme, ids);
-      return hue === undefined ? undefined : withThemeHue(shipped, hue);
+      // Then what the reader customised the contributed id to, then the
+      // theme's own word for this status, then what we ship. Each of the
+      // three is a hue that our own opacity is applied to.
+      const hue = custom(id) ?? firstDefined(theme, ids);
+      const base = hue === undefined ? shipped : (withThemeHue(shipped, hue) ?? hue);
+      if (surface === 'bar') {
+        // No dial for the bars: their opacities differ per status on purpose
+        // and are not a matter of taste about the background.
+        return hue === undefined ? undefined : base;
+      }
+      const alpha = washAlpha(kind);
+      return withAlpha(base, alpha) ?? (hue === undefined ? undefined : base);
     };
     const barOfStatus = (status: string) =>
       BARS.find((b) => b.statuses.includes(status)) ?? BARS[BARS.length - 1];
     const over = (status: string, surface: 'bar' | 'wash', kind: 'light' | 'dark') => {
       const bar = barOfStatus(status);
       const shipped = surface === 'wash' ? WASHES[status]?.[kind] : bar[kind];
-      return resolve(status, surface, kind, shipped ?? bar[kind], bar.themeIds[kind]);
+      const id = surface === 'wash' ? washColorId(status) : barColorId(status);
+      return resolve(status, surface, kind, shipped ?? bar[kind], bar.themeIds[kind], id);
     };
     // The ruler follows the *bar*, whatever the surface: it is the same
     // status seen from the scrollbar, and an override that recoloured the

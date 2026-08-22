@@ -297,3 +297,28 @@ export function firstDefined(
   }
   return undefined;
 }
+
+/**
+ * The wash's opacity, per theme kind.
+ *
+ * Separate from the wash colours themselves because it is the one number a
+ * reader is likely to want to move: how far a tint reads depends on the
+ * background under it, and a theme with low contrast can swallow what a high
+ * contrast one shouts. The hue follows the theme now, so this is what is left
+ * to tune. Overridable through `acl2-session.washOpacity`.
+ */
+export const WASH_ALPHA = { light: 0.15, dark: 0.13 };
+
+/**
+ * The same colour at a different opacity.
+ *
+ * Takes our own `rgba(...)` literals and the theme's `#rrggbb[aa]` alike,
+ * since which one is in hand depends on how far down the chain we got.
+ * `undefined` for anything else -- a CSS function, a named colour -- because
+ * those cannot be taken apart, and a caller must leave them as they are.
+ */
+export function withAlpha(color: string, alpha: number): string | undefined {
+  const m = /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,[\d.\s]+)?\)$/.exec(color.trim());
+  const rgb = m ? [+m[1], +m[2], +m[3]] : parseHex(color);
+  return rgb === undefined ? undefined : `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${alpha})`;
+}

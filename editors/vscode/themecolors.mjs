@@ -12,7 +12,8 @@
 import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
-const { BARS, WASHES, firstDefined, withThemeHue, svgCanPaint } = require('./out/bars.js');
+const { BARS, WASHES, WASH_ALPHA, firstDefined, withAlpha, withThemeHue, svgCanPaint } =
+  require('./out/bars.js');
 
 let failures = 0;
 const check = (what, got, want) => {
@@ -68,6 +69,21 @@ for (const [status, c] of Object.entries(WASHES)) {
 // surface this feature exists for would keep falling back to the shipped icon.
 check('a resolved colour is one an SVG can paint',
   svgCanPaint(withThemeHue('rgba(241, 76, 76, 0.65)', '#00ff00')), true);
+
+// The wash's opacity is a dial over whatever hue won, so it has to take both
+// forms a hue arrives in: ours, and the theme's.
+check('an opacity replaces ours', withAlpha('rgba(1, 2, 3, 0.13)', 0.3), 'rgba(1, 2, 3, 0.3)');
+check('and applies to a bare theme hex', withAlpha('#89d185', 0.3), 'rgba(137, 209, 133, 0.3)');
+check('and to one carrying its own alpha', withAlpha('#89d18580', 0.3), 'rgba(137, 209, 133, 0.3)');
+check('but declines what it cannot take apart',
+  withAlpha('color-mix(in srgb, var(--x) 50%, transparent)', 0.3), undefined);
+check('and a named colour, which has no channels to keep', withAlpha('red', 0.3), undefined);
+check('an adjusted wash is still paintable by the SVG',
+  svgCanPaint(withAlpha('#89d185', 0.3)), true);
+for (const kind of ['light', 'dark']) {
+  check(`the shipped ${kind} wash opacity is a fraction`,
+    WASH_ALPHA[kind] > 0 && WASH_ALPHA[kind] < 1, true);
+}
 
 console.log(failures === 0 ? 'themecolors: all green' : `themecolors: ${failures} failed`);
 process.exit(failures === 0 ? 0 : 1);

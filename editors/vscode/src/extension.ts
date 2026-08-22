@@ -447,7 +447,11 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.window.onDidChangeActiveTextEditor(refreshContext),
     vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration('acl2-session.colors')) {
+      if (
+        e.affectsConfiguration('acl2-session.colors') ||
+        e.affectsConfiguration('acl2-session.washOpacity') ||
+        e.affectsConfiguration('workbench.colorCustomizations')
+      ) {
         // A decoration type carries its colours from creation, so a changed
         // palette means new types. The repaint below is not optional after
         // this: disposing a type erases what it was drawing.
