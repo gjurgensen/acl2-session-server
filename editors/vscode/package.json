@@ -47,7 +47,8 @@
         "editor.colorDecorators": false,
         "editor.wordSeparators": "()[]{}'\"`,;|",
         "editor.autoIndent": "keep",
-        "editor.insertSpaces": true
+        "editor.insertSpaces": true,
+        "editor.formatOnType": true
       },
       "[acl2-output]": {
         "editor.colorDecorators": false
