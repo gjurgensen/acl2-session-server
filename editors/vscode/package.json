@@ -565,6 +565,11 @@
           "type": "boolean",
           "default": false,
           "description": "Make Tab re-indent the current line, the way it does in Emacs, when the cursor is in an ACL2 file with nothing selected. Off by default: outside a selection VSCode's Tab inserts, and taking that away from someone who did not ask for it is worse than not offering it. Indenting is always available as \"ACL2: Indent Line or Selection\", and Enter indents either way."
+        },
+        "acl2-session.indentOnType": {
+          "type": "boolean",
+          "default": true,
+          "description": "Re-indent the current line as you type -- on Enter, and on a closing delimiter. This watches the document rather than relying on editor.formatOnType, because an extension that replaces VSCode's `type` command (VSCodeVim does) stops on-type formatting from ever being called."
         }
       }
     },

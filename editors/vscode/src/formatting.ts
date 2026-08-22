@@ -18,7 +18,7 @@
 // can be measured against the books; this is the glue that carries it.
 
 import * as vscode from 'vscode';
-import { IndentOptions, plannedIndent, reindent, topLevelStarts } from './indent';
+import { IndentOptions, plannedIndent, reindent, reindentTrigger, topLevelStarts } from './indent';
 
 /**
  * Where each top-level form starts, remembered per document version.
@@ -175,6 +175,51 @@ export async function indentCommand(): Promise<void> {
   );
 }
 
+/**
+ * Re-indent from the document rather than from the keystroke.
+ *
+ * The on-type providers below are the right mechanism and the one VSCode
+ * documents, but they are only reached through the editor's own `type`
+ * command -- and VSCodeVim replaces that command, so for anyone using it the
+ * on-type path never runs at all. This watches the text instead, which no
+ * extension can intercept.
+ *
+ * Both paths stay live. They cannot fight: whichever runs first leaves the
+ * line correctly indented, and `indentLineEdit` returns nothing for a line
+ * that is already right, so the second is a no-op rather than a second edit.
+ */
+function watchDocument(): vscode.Disposable {
+  return vscode.workspace.onDidChangeTextDocument(async (e) => {
+    if (e.document.languageId !== 'acl2' || e.contentChanges.length !== 1) {
+      return;
+    }
+    if (!vscode.workspace.getConfiguration('acl2-session').get<boolean>('indentOnType', true)) {
+      return;
+    }
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.document !== e.document) {
+      return;
+    }
+    const change = e.contentChanges[0];
+    const kind = reindentTrigger(change.text);
+    if (!kind) {
+      return;
+    }
+    const at = e.document.positionAt(change.rangeOffset + change.text.length).line;
+    const edit = indentLineEdit(editor.document, at, { blankLines: 'indent' });
+    if (!edit) {
+      return;
+    }
+    // No undo stops: this belongs to the keystroke that caused it, and a
+    // reader pressing undo once means "take back what I typed", not "take
+    // back the indentation of what I typed".
+    await editor.edit((b) => b.replace(edit.range, edit.newText), {
+      undoStopBefore: false,
+      undoStopAfter: false,
+    });
+  });
+}
+
 /** Register the three providers. Returns them for disposal. */
 export function registerFormatting(): vscode.Disposable[] {
   const acl2 = { language: 'acl2' };
@@ -185,5 +230,6 @@ export function registerFormatting(): vscode.Disposable[] {
     vscode.languages.registerOnTypeFormattingEditProvider(acl2, onType, '\n', ')', ']'),
     vscode.languages.registerDocumentRangeFormattingEditProvider(acl2, range),
     vscode.languages.registerDocumentFormattingEditProvider(acl2, whole),
+    watchDocument(),
   ];
 }
