@@ -353,14 +353,15 @@ export function activate(context: vscode.ExtensionContext): void {
     // panel's own title bar, where the focused thing is a webview and there is
     // no active text editor to find a book from.
     vscode.commands.registerCommand('acl2-session.lockPanel', () => takeLock()),
-    vscode.commands.registerCommand('acl2-session.unlockPanel', () => {
-      const was = locked?.book;
-      releaseLock();
-      const s = was === undefined ? undefined : byId.get(was);
-      if (s) {
-        void followPanel(s);
-      }
-    }),
+    vscode.commands.registerCommand('acl2-session.unlockPanel', () => dropLock()),
+    // A third verb for the same pair, because the title bar and everywhere
+    // else want different things. The bar shows one of two icons and needs a
+    // command per state to swap them; a person reaching for this by name, or
+    // one day by key, wants to say the thing they mean once and not care
+    // which state it is in.
+    vscode.commands.registerCommand('acl2-session.togglePanelLock', () =>
+      locked ? dropLock() : takeLock()
+    ),
     vscode.commands.registerCommand('acl2-session.showPanel', () =>
       forBook((s) => {
         panel.open();
@@ -1982,6 +1983,22 @@ function takeLock(): void {
   panel.setLockLabel('locked');
   panel.note(undefined);
   void followPanel(s);
+}
+
+/**
+ * Let go because the reader said so, and show them what the cursor is in.
+ *
+ * Separate from `releaseLock`, which is also what a lost form calls: this is
+ * the deliberate one, so it says nothing and hands the panel back to the
+ * cursor rather than leaving it on a form nobody is pointing at.
+ */
+function dropLock(): void {
+  const was = locked?.book;
+  releaseLock();
+  const s = was === undefined ? undefined : byId.get(was);
+  if (s) {
+    void followPanel(s);
+  }
 }
 
 /**

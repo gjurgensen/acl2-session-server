@@ -205,6 +205,10 @@
         "icon": "$(lock)"
       },
       {
+        "command": "acl2-session.togglePanelLock",
+        "title": "ACL2: Toggle Panel Hold"
+      },
+      {
         "command": "acl2-session.showPanel",
         "title": "ACL2: Show Panel"
       },
