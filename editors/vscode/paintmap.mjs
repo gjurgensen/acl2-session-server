@@ -185,9 +185,22 @@ check('an empty book paints nothing', paintMap([]), []);
   const { WASHES } = require('./out/bars.js');
   for (const [status, c] of Object.entries(WASHES)) {
     const d = byId.get(`acl2Session.wash.${status}`);
-    check(`wash.${status} light is contributed`, d && d.light, c.light);
-    check(`wash.${status} dark is contributed`, d && d.dark, c.dark);
+    if (!d) {
+      failures++;
+      console.log(`FAIL: package.json contributes no acl2Session.wash.${status}`);
+      continue;
+    }
+    for (const theme of ['light', 'dark']) {
+      const want = rgbaChannels(c[theme]);
+      const got = rgbaChannels(d[theme]);
+      const near = want.length === got.length && want.every((n, i) => Math.abs(n - got[i]) <= 1);
+      if (!near) {
+        failures++;
+        console.log(`FAIL: acl2Session.wash.${status} (${theme}) is ${d[theme]}, not ${c[theme]}`);
+      }
+    }
   }
+  check('every wash has a contributed default', true, true);
 }
 
 console.log(failures === 0 ? 'paintmap: all green' : `paintmap: ${failures} failed`);

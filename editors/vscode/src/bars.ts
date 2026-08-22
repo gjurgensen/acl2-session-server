@@ -28,48 +28,53 @@ export interface Bar {
    * `skipped` and `failed` share one bar, as they share a colour.
    */
   statuses: string[];
-  /** The overview ruler's colour for this status. */
-  ruler: string;
   /** The bar's own colour, which must match the SVG's fill and opacity. */
   light: string;
   dark: string;
 }
 
+/**
+ * The shipped palette: VSCode's own semantic colours.
+ *
+ * `editorInfo`, `editorWarning` and `editorError`'s foregrounds for running,
+ * conditional and red, `charts.green` for admitted, and a neutral grey for
+ * pending -- the values the built-in light and dark themes use, so the status
+ * column looks native rather than looking like whoever picked it.
+ *
+ * The alphas are the older choice and are kept: they are what stops the
+ * column shouting, and they differ per status on purpose -- a running form is
+ * the one to look at, an admitted one is a fact you should be able to ignore.
+ */
 export const BARS: Bar[] = [
   {
     icon: 'pending',
     statuses: ['pending'],
-    ruler: 'rgba(136, 136, 136, 0.35)',
     light: 'rgba(97, 97, 97, 0.4)',
     dark: 'rgba(204, 204, 204, 0.35)',
   },
   {
     icon: 'running',
     statuses: ['running'],
-    ruler: 'rgba(90, 140, 210, 0.6)',
-    light: 'rgba(21, 101, 192, 0.85)',
-    dark: 'rgba(106, 159, 221, 0.85)',
+    light: 'rgba(26, 133, 255, 0.85)',
+    dark: 'rgba(55, 148, 255, 0.85)',
   },
   {
     icon: 'admitted',
     statuses: ['admitted'],
-    ruler: 'rgba(80, 160, 90, 0.35)',
-    light: 'rgba(46, 125, 50, 0.55)',
-    dark: 'rgba(142, 192, 124, 0.5)',
+    light: 'rgba(56, 138, 52, 0.55)',
+    dark: 'rgba(137, 209, 133, 0.5)',
   },
   {
     icon: 'cond',
     statuses: ['conditional'],
-    ruler: 'rgba(212, 172, 13, 0.5)',
-    light: 'rgba(212, 172, 13, 0.75)',
-    dark: 'rgba(255, 214, 51, 0.7)',
+    light: 'rgba(191, 136, 3, 0.75)',
+    dark: 'rgba(204, 167, 0, 0.7)',
   },
   {
     icon: 'red',
     statuses: ['skipped', 'failed'],
-    ruler: 'rgba(220, 60, 60, 0.6)',
-    light: 'rgba(198, 40, 40, 0.7)',
-    dark: 'rgba(251, 73, 52, 0.65)',
+    light: 'rgba(229, 20, 0, 0.7)',
+    dark: 'rgba(241, 76, 76, 0.65)',
   },
 ];
 
@@ -109,13 +114,20 @@ export const INLINE_BAR = {
   margin: `0 0.15em -${DROP} 0.1em`,
 };
 
-/** The wash colours, by status. Backgrounds, so far paler than the bars. */
+/**
+ * The wash colours, by status: the bar's hue, faint.
+ *
+ * Translucent rather than opaque, which is the part that matters. An opaque
+ * wash is a colour chosen against one editor background and fights every
+ * other; a tint at this alpha sits on whatever background the theme has and
+ * reads the same on all of them.
+ */
 export const WASHES: Record<string, { light: string; dark: string }> = {
-  admitted: { light: '#c8e6c9', dark: '#1c2e15' },
-  conditional: { light: '#d9e8f5', dark: '#2c2908' },
-  skipped: { light: '#ffb3b3', dark: '#3d1e19' },
-  failed: { light: '#ffb3b3', dark: '#3d1e19' },
-  running: { light: '#fff59d', dark: '#1a2841' },
+  admitted: { light: 'rgba(56, 138, 52, 0.15)', dark: 'rgba(137, 209, 133, 0.13)' },
+  conditional: { light: 'rgba(191, 136, 3, 0.15)', dark: 'rgba(204, 167, 0, 0.13)' },
+  running: { light: 'rgba(26, 133, 255, 0.15)', dark: 'rgba(55, 148, 255, 0.13)' },
+  skipped: { light: 'rgba(229, 20, 0, 0.15)', dark: 'rgba(241, 76, 76, 0.13)' },
+  failed: { light: 'rgba(229, 20, 0, 0.15)', dark: 'rgba(241, 76, 76, 0.13)' },
 };
 
 /** The contributed theme-colour id for a status's bar, and for its wash. */

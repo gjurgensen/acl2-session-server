@@ -159,100 +159,100 @@
         "id": "acl2Session.bar.running",
         "description": "The status column's bar for a running form, and the same bar drawn inline where two forms share a line. Also its mark in the overview ruler.",
         "defaults": {
-          "light": "#1565c0d9",
-          "dark": "#6a9fddd9",
-          "highContrast": "#6a9fddd9",
-          "highContrastLight": "#1565c0d9"
+          "light": "#1a85ffd9",
+          "dark": "#3794ffd9",
+          "highContrast": "#3794ffd9",
+          "highContrastLight": "#1a85ffd9"
         }
       },
       {
         "id": "acl2Session.bar.admitted",
         "description": "The status column's bar for a admitted form, and the same bar drawn inline where two forms share a line. Also its mark in the overview ruler.",
         "defaults": {
-          "light": "#2e7d328c",
-          "dark": "#8ec07c80",
-          "highContrast": "#8ec07c80",
-          "highContrastLight": "#2e7d328c"
+          "light": "#388a348c",
+          "dark": "#89d18580",
+          "highContrast": "#89d18580",
+          "highContrastLight": "#388a348c"
         }
       },
       {
         "id": "acl2Session.bar.conditional",
         "description": "The status column's bar for a conditional form, and the same bar drawn inline where two forms share a line. Also its mark in the overview ruler.",
         "defaults": {
-          "light": "#d4ac0dbf",
-          "dark": "#ffd633b3",
-          "highContrast": "#ffd633b3",
-          "highContrastLight": "#d4ac0dbf"
+          "light": "#bf8803bf",
+          "dark": "#cca700b3",
+          "highContrast": "#cca700b3",
+          "highContrastLight": "#bf8803bf"
         }
       },
       {
         "id": "acl2Session.bar.skipped",
         "description": "The status column's bar for a skipped form, and the same bar drawn inline where two forms share a line. Also its mark in the overview ruler.",
         "defaults": {
-          "light": "#c62828b3",
-          "dark": "#fb4934a6",
-          "highContrast": "#fb4934a6",
-          "highContrastLight": "#c62828b3"
+          "light": "#e51400b3",
+          "dark": "#f14c4ca6",
+          "highContrast": "#f14c4ca6",
+          "highContrastLight": "#e51400b3"
         }
       },
       {
         "id": "acl2Session.bar.failed",
         "description": "The status column's bar for a failed form, and the same bar drawn inline where two forms share a line. Also its mark in the overview ruler.",
         "defaults": {
-          "light": "#c62828b3",
-          "dark": "#fb4934a6",
-          "highContrast": "#fb4934a6",
-          "highContrastLight": "#c62828b3"
+          "light": "#e51400b3",
+          "dark": "#f14c4ca6",
+          "highContrast": "#f14c4ca6",
+          "highContrastLight": "#e51400b3"
         }
       },
       {
         "id": "acl2Session.wash.admitted",
         "description": "The background wash over a admitted form, in the 'wash' decoration mode.",
         "defaults": {
-          "light": "#c8e6c9",
-          "dark": "#1c2e15",
-          "highContrast": "#1c2e15",
-          "highContrastLight": "#c8e6c9"
+          "light": "#388a3426",
+          "dark": "#89d18521",
+          "highContrast": "#89d18521",
+          "highContrastLight": "#388a3426"
         }
       },
       {
         "id": "acl2Session.wash.conditional",
         "description": "The background wash over a conditional form, in the 'wash' decoration mode.",
         "defaults": {
-          "light": "#d9e8f5",
-          "dark": "#2c2908",
-          "highContrast": "#2c2908",
-          "highContrastLight": "#d9e8f5"
+          "light": "#bf880326",
+          "dark": "#cca70021",
+          "highContrast": "#cca70021",
+          "highContrastLight": "#bf880326"
         }
       },
       {
         "id": "acl2Session.wash.skipped",
         "description": "The background wash over a skipped form, in the 'wash' decoration mode.",
         "defaults": {
-          "light": "#ffb3b3",
-          "dark": "#3d1e19",
-          "highContrast": "#3d1e19",
-          "highContrastLight": "#ffb3b3"
+          "light": "#e5140026",
+          "dark": "#f14c4c21",
+          "highContrast": "#f14c4c21",
+          "highContrastLight": "#e5140026"
         }
       },
       {
         "id": "acl2Session.wash.failed",
         "description": "The background wash over a failed form, in the 'wash' decoration mode.",
         "defaults": {
-          "light": "#ffb3b3",
-          "dark": "#3d1e19",
-          "highContrast": "#3d1e19",
-          "highContrastLight": "#ffb3b3"
+          "light": "#e5140026",
+          "dark": "#f14c4c21",
+          "highContrast": "#f14c4c21",
+          "highContrastLight": "#e5140026"
         }
       },
       {
         "id": "acl2Session.wash.running",
         "description": "The background wash over a running form, in the 'wash' decoration mode.",
         "defaults": {
-          "light": "#fff59d",
-          "dark": "#1a2841",
-          "highContrast": "#1a2841",
-          "highContrastLight": "#fff59d"
+          "light": "#1a85ff26",
+          "dark": "#3794ff21",
+          "highContrast": "#3794ff21",
+          "highContrastLight": "#1a85ff26"
         }
       }
     ],
