@@ -238,34 +238,9 @@ Three ways in, all the same rules:
 - **Tab**, as in Emacs, re-indenting the current line or the selected lines —
   including an empty one, which is where it is wanted most. On, and
   `acl2-session.tabIndents` turns it off if you would rather Tab inserted. It
-  is also the repair for a line no formatter is ever asked about; see below.
+  is also the repair for a line that arrived by command rather than by typing,
+  which as-you-type formatting is never asked about — Vim's `o` opens one.
   **ACL2: Indent Line or Selection** is in the command palette either way.
-
-### Opening a line with Vim's `o`
-
-`o` and `O` leave the cursor at the previous line's indent rather than the
-right one, and this is worth explaining because it is not a bug anyone can fix
-from here. VSCode triggers as-you-type formatting from *typing*: a line made
-by a command instead goes through the editor's own newline machinery, which
-consults the regex rules in a language configuration and never asks a
-formatter. Those regexes can express C and cannot express Lisp — the column a
-line belongs at depends on the paren nesting above it and on the head symbol
-of the enclosing form, which no regex over one line can see. So the languages
-that ride the regexes get `o` for free, and the languages that have to compute
-do not. VSCode's own Clojure support sidesteps it by having no indentation at
-all, and Calva does not solve it either.
-
-Tab fixes the line. To have `o` do it for you:
-
-```json
-"vim.normalModeKeyBindingsNonRecursive": [
-  { "before": ["o"], "after": ["o"], "commands": ["acl2-session.indent"] },
-  { "before": ["O"], "after": ["O"], "commands": ["acl2-session.indent"] }
-]
-```
-
-VSCodeVim runs the `after` keys first, so the real `o` opens the line and
-enters insert mode, and the command then indents it.
 
 ## Highlighting the output log
 

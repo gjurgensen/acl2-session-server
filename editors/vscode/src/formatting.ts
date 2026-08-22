@@ -73,6 +73,22 @@
 // provider involved, which is why C survives whatever an extension does to
 // `type`.
 //
+// A line made by a *command* rather than by typing is outside all of this, and
+// cannot be brought in. `editor.action.insertLineAfter` -- which is what Vim's
+// `o` runs -- reaches `TypeOperations._enter`, the same function Enter uses,
+// and `_enter` returns at `autoIndent: keep` before it would consult a rule,
+// let alone a provider. Nothing in the ecosystem solves this: of fourteen
+// Lisp-family extensions surveyed, none carries indentation rules at all, and
+// the two that indent as you type (Calva, and a Common Lisp extension that
+// binds Enter and calls `textDocument/onTypeFormatting` on its server by hand)
+// both leave `o` alone. Tab is the answer, which is why it is bound by
+// default; for `o` itself, VSCodeVim runs a remap's `after` keys before its
+// `commands`, so
+//
+//   { "before": ["o"], "after": ["o"], "commands": ["acl2-session.indent"] }
+//
+// opens the line, enters insert mode, and then indents it.
+//
 // Nothing in here decides anything. Every rule lives in `indent.ts` where it
 // can be measured against the books; this is the glue that carries it.
 
@@ -348,7 +364,7 @@ function logEffective(doc: vscode.TextDocument): void {
 export function registerFormatting(channel?: vscode.OutputChannel): vscode.Disposable[] {
   trace = channel;
   const acl2 = { language: 'acl2' };
-  log('registered: on-type provider for "\\n" ) ] }, range, document');
+  log('registered: on-type provider for "\\n" "\\r" ) ] }, range, document');
   // The settings line wants an occasion of its own. `onType` logs it, but
   // only once it has been called, and the one run where it matters is the
   // run where it never is.
@@ -359,7 +375,7 @@ export function registerFormatting(channel?: vscode.OutputChannel): vscode.Dispo
   };
   seeActive(vscode.window.activeTextEditor);
   return [
-    vscode.languages.registerOnTypeFormattingEditProvider(acl2, onType, '\n', ')', ']', '}'),
+    vscode.languages.registerOnTypeFormattingEditProvider(acl2, onType, '\n', '\r', ')', ']', '}'),
     vscode.languages.registerDocumentRangeFormattingEditProvider(acl2, range),
     vscode.languages.registerDocumentFormattingEditProvider(acl2, whole),
     vscode.window.onDidChangeActiveTextEditor(seeActive),

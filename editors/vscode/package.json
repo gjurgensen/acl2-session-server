@@ -737,7 +737,7 @@
       {
         "command": "acl2-session.indent",
         "key": "tab",
-        "when": "editorTextFocus && editorLangId == acl2 && config.acl2-session.tabIndents && !editorHasSelection && !suggestWidgetVisible && !inlineSuggestionVisible && !inSnippetMode && !editorReadonly"
+        "when": "editorTextFocus && editorLangId == acl2 && config.acl2-session.tabIndents && !editorHasSelection && !suggestWidgetVisible && !inlineSuggestionVisible && !inSnippetMode && !editorReadonly && (!vim.active || vim.mode == 'Insert')"
       }
     ],
     "taskDefinitions": [
