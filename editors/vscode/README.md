@@ -48,6 +48,10 @@ Four sources, most specific first: `acl2-session.colors`, then
 wins supplies the *hue*; the opacity stays this extension's, since a theme
 colour carries none and cannot be given one.
 
+A wash covers the form and stops there: whole lines through a multi-line
+form's block, and the line it ends on cut at its closing paren rather than
+running out to the edge of the viewport.
+
 `acl2-session.washOpacity` is that opacity for the washes, and is the setting
 most likely to be worth touching: how far a tint reads depends on the
 background under it, so the same wash can be too faint on one theme and too

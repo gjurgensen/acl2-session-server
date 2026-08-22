@@ -12,23 +12,18 @@
 // `wash` draws whole-form background washes, reds included, and no
 // diagnostics (the extension suppresses them in this mode).
 //
-// Both renderers are line-granular by nature -- one gutter cell per line, and
-// a wash that reaches the viewport edge -- so a line holding two forms needs
-// each of them to say something it cannot say by default. The last form on
-// such a line keeps the whole-line wash, so it still reaches the edge like
-// every other line, and the forms before it are painted over it, each ending
-// where the next begins; the gutter keeps its cell for the form that owns the
-// start of the line and draws the second form's bar between the two.
-// `paintmap.ts` decides all of that; this module only draws it.
+// A wash covers a form's own extent and stops: whole lines through the block,
+// and the line it ends on cut at its closing paren rather than running out to
+// the viewport edge. The gutter is line-granular whatever the wash does -- one
+// cell per line -- so it keeps its cell for the form that owns the start of a
+// line and draws a second form's bar between the two. `paintmap.ts` decides
+// all of that; this module only draws it.
 //
-// That overlap is deliberate and is the only way to say "from this column to
-// the viewport edge": a whole-line decoration always begins at column 0, and
-// `DecorationRenderOptions` has no z-index. What puts the column-bounded
-// pieces on top is that their decoration types are created *after* the
-// whole-line ones, which is the order VSCode renders them in -- unspecified,
-// but relied on widely. If it ever renders the other way the symptom is
-// visible and confined: on a line holding two forms, and only there, the
-// earlier form's colour is swallowed by the later one's.
+// Nothing the two of them emit overlaps, which is the property to keep. An
+// earlier version washed a shared line whole and painted the forms before it
+// on top, and that depended on the order VSCode draws decoration types in --
+// unspecified, since `DecorationRenderOptions` has no z-index. Painting only
+// what a form covers needs no such assumption.
 //
 // Both fill the scrollbar through the overview ruler's left lane; diagnostics
 // mark the right lane on their own.
@@ -292,11 +287,9 @@ export class Decorations {
         light: { backgroundColor: pick(over(status, 'wash', 'light'), washColorId(status)) },
         dark: { backgroundColor: pick(over(status, 'wash', 'dark'), washColorId(status)) },
       };
-      // Two types, one colour. Whole-line is the look this mode is for --
-      // the wash reaching the edge of the viewport is what makes a form read
-      // as a block. It is also the one thing that cannot express a line
-      // holding two forms, so that line, and only that line, is painted to
-      // its columns instead and the colour changes where the forms do.
+      // Two types, one colour: whole lines for the block a multi-line form
+      // fills, and a column-bounded one for the lines it only partly covers
+      // -- the line it ends on, and a line it starts partway along.
       this.washes.set(
         status,
         vscode.window.createTextEditorDecorationType({ isWholeLine: true, ...paint })
@@ -378,7 +371,7 @@ export class Decorations {
       const line = Math.min(Math.max(sp.line, 1), doc.lineCount) - 1;
       const text = doc.lineAt(line).text;
       const from = charOffset(text, sp.col);
-      const to = charOffset(text, sp.endCol);
+      const to = sp.endCol === null ? text.length : charOffset(text, sp.endCol);
       return new vscode.Range(line, from, line, Math.max(from, to));
     };
     // A point, not a span: the mark is a `before` attachment on the second

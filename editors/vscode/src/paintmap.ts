@@ -6,6 +6,11 @@
 // does not by itself buy either of them anything -- something has to decide
 // what to draw when a line holds two answers.
 //
+// The wash's answer is to paint a form's own extent and no more, so it never
+// has to arbitrate: two forms on a line each take their own half, and the
+// space between them belongs to neither. Only the gutter, which genuinely
+// has one cell to give, still has to choose.
+//
 // This module is that decision, kept apart from the drawing so it can be
 // tested without an editor. It takes the units and returns, per unit, the
 // spans to wash and where (if anywhere) to put an inline status mark.
@@ -34,15 +39,15 @@ export interface WholeLines {
 /**
  * Part of one line, from `col` up to (not including) `endCol`.
  *
- * Always a form that has a later form beside it on that line, so `endCol` is
- * where that one starts -- never the end of the text, which is the whole
- * point: the form on the right owns the rest of the line.
+ * `endCol` of `null` means the end of the line's text: an opening line of a
+ * form that carries on past it, where there is nothing after the form to
+ * leave unpainted.
  */
 export interface PartOfLine {
   kind: 'part';
   line: number;
   col: number;
-  endCol: number;
+  endCol: number | null;
 }
 
 export type Span = WholeLines | PartOfLine;
@@ -89,54 +94,52 @@ function lineOwners(units: Placed[]): Map<number, number> {
 /**
  * Lay the units out for painting.
  *
- * A unit whose lines are all its own is one whole-line run, exactly as
- * before this existed. On a line two forms share, the **last** form keeps
- * the whole-line run -- so the wash still reaches the edge of the viewport,
- * as it does on every other line in the book -- and the forms before it are
- * painted over it, each ending where the next begins. The colour therefore
- * changes once per boundary and not once more at the end of the text.
+ * A form is painted over exactly its own extent and no further. The lines it
+ * spans in full are whole lines -- washed to the edge of the viewport, which
+ * is what makes a multi-line form read as a block -- and the line it *ends*
+ * on stops at its closing paren, so the wash does not run on past the form
+ * into whatever follows. A line it begins partway through starts at its
+ * opening paren for the same reason.
  *
- * That overlap is the only way to say "from this column to the edge": a
- * whole-line decoration always starts at column 0, and the API has no
- * z-index. The pieces are drawn by decoration types created after the
- * whole-line ones, which is what puts them on top. See `decorations.ts`.
+ * Nothing overlaps, which is worth stating because an earlier version relied
+ * on overlap and on the undocumented order VSCode draws decoration types in.
+ * Painting only what a form covers removes the question: two forms on one
+ * line paint their own halves, and the gap between them belongs to neither.
  */
 export function paintMap(units: Placed[]): Painted[] {
   const owner = lineOwners(units);
-  // The next form to begin on a given line, which is where the form before
-  // it stops: the gap between `)` and `(` belongs to the form on its left,
-  // so the colour changes at a form boundary rather than a space.
-  const nextStartOn = (line: number, after: number): Placed | undefined =>
-    units.find((v) => v.index > after && v.line_start === line);
 
   return units.map((u) => {
     const spans: Span[] = [];
-    // A form is painted as pieces only where a *later* form starts on one of
-    // its lines. Only its last line can be in that position: an interior
-    // line is its own, and a later form starting on its first line would
-    // have to start after it, which the file order forbids.
-    const next = nextStartOn(u.line_end, u.index);
-    if (next === undefined) {
-      spans.push({ kind: 'lines', from: u.line_start, to: u.line_end });
-    } else {
-      // Leading indentation belongs to the form that owns the line, the
-      // same as a whole-line wash would give it.
-      const col =
-        u.line_start === u.line_end && owner.get(u.line_end) !== u.index ? u.col_start : 1;
-      spans.push({ kind: 'part', line: u.line_end, col, endCol: next.col_start });
-      if (u.line_start < u.line_end) {
-        spans.push({ kind: 'lines', from: u.line_start, to: u.line_end - 1 });
-      }
-    }
-    // A unit can only ever lose its *first* line: a later line of its own is
-    // shared only with a unit that comes after it, and the earlier one wins.
+    // Leading indentation goes to the form that owns the line, as a
+    // whole-line wash would have given it; a form that starts partway along
+    // begins at its own column, since the space before it is not its.
     const owns = owner.get(u.line_start) === u.index;
-    const from = owns ? u.line_start : u.line_start + 1;
+    const from = owns ? 1 : u.col_start;
+    if (u.line_start === u.line_end) {
+      spans.push({ kind: 'part', line: u.line_start, col: from, endCol: u.col_end });
+    } else {
+      // The opening line runs to the end of its text: the form continues, so
+      // there is nothing beyond it on this line to leave alone.
+      if (owns) {
+        spans.push({ kind: 'lines', from: u.line_start, to: u.line_end - 1 });
+      } else {
+        spans.push({ kind: 'part', line: u.line_start, col: from, endCol: null });
+        if (u.line_start + 1 <= u.line_end - 1) {
+          spans.push({ kind: 'lines', from: u.line_start + 1, to: u.line_end - 1 });
+        }
+      }
+      spans.push({ kind: 'part', line: u.line_end, col: 1, endCol: u.col_end });
+    }
+    // The gutter is a separate question: a unit can only ever lose its
+    // *first* cell, since a later line of its own is shared only with a unit
+    // that comes after it, and the earlier one wins.
+    const cells = owns ? u.line_start : u.line_start + 1;
     return {
       index: u.index,
       status: u.status,
       spans,
-      gutter: from <= u.line_end ? { from, to: u.line_end } : null,
+      gutter: cells <= u.line_end ? { from: cells, to: u.line_end } : null,
       inlineAt: owns ? null : { line: u.line_start, col: u.col_start },
     };
   });
