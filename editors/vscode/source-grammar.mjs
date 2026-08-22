@@ -133,6 +133,38 @@ check(
   'an ordinary form is still an ordinary form'
 );
 
+// ---- One notion of a word ------------------------------------------------
+//
+// The language says what a word is twice: `wordPattern` in
+// `language-configuration.json`, which decides what hover and go-to-definition
+// grab and what a double-click selects, and `editor.wordSeparators` in
+// `package.json`, which decides where a word motion stops. Nothing connects
+// them, and they disagreeing is the papercut where a double-click takes
+// `alpha-of-nil` whole and `ctrl-right` stops inside it. So: every printable
+// character is a separator exactly when the pattern excludes it.
+{
+  const cfg = JSON.parse(readFileSync(join(here, 'language-configuration.json'), 'utf8'));
+  const pkg = JSON.parse(readFileSync(join(here, 'package.json'), 'utf8'));
+  const seps = pkg.contributes.configurationDefaults['[acl2]']['editor.wordSeparators'];
+  const word = new RegExp(`^(?:${cfg.wordPattern})$`);
+  const wrong = [];
+  for (let c = 0x21; c < 0x7f; c++) {
+    const ch = String.fromCharCode(c);
+    const constituent = word.test(ch);
+    if (constituent === seps.includes(ch)) {
+      wrong.push(ch);
+    }
+  }
+  check(wrong.length === 0, `every character agrees${wrong.length ? `: ${wrong.join(' ')}` : ''}`);
+  // The ones the whole choice is about, named so a future edit has to mean it.
+  for (const ch of '-*:+<>=?!$%^&~@#/._') {
+    check(!seps.includes(ch), `a word motion runs through ${JSON.stringify(ch)}`);
+  }
+  for (const ch of '()[]{}\'"`,;|') {
+    check(seps.includes(ch), `and stops at ${JSON.stringify(ch)}`);
+  }
+}
+
 // And the file that prompted all of this, when it is to hand.
 const real =
   process.argv[2] ??

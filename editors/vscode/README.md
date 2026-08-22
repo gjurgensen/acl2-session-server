@@ -161,6 +161,20 @@ nested `#|` block comments.
 ACL2's own functions — `equal`, `car`, `len`, `implies`, `+`, `<` — are
 marked in call position.
 
+A word is the whole symbol. `alpha-of-nil`, `fty::defprod`, `*earmuffs*` and
+`1+` are each one word, so a double-click takes the symbol, hover reads the
+symbol, and a word motion crosses it in one step rather than stopping at every
+hyphen. Parens, brackets, quotes, the comma, the semicolon and the bar are
+what separate — which keeps a word motion meaningfully finer than a
+whitespace one in code this full of parens.
+
+Vim's `w`, `e` and `b` are the exception, and not by choice: VSCodeVim reads
+`editor.wordSeparators` without a document to scope it to, so a per-language
+value never reaches it, and its own `vim.iskeyword` is window-scoped. Either
+way it is global, so it belongs in your settings rather than in this
+extension. `"vim.iskeyword": "()[]{}'\"`,;|"` matches what ACL2 files do
+here, at the price of applying everywhere.
+
 VSCode's inline colour swatches are turned off for these files. Its built-in
 colour parser runs over any language that has none of its own, and Lisp's
 reader syntax collides with CSS's: `#001#` is a label reference, `#d1e-2` is a

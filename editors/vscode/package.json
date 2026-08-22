@@ -44,7 +44,8 @@
     ],
     "configurationDefaults": {
       "[acl2]": {
-        "editor.colorDecorators": false
+        "editor.colorDecorators": false,
+        "editor.wordSeparators": "()[]{}'\"`,;|"
       },
       "[acl2-output]": {
         "editor.colorDecorators": false
@@ -433,7 +434,7 @@
         "acl2-session.colors": {
           "type": "object",
           "default": {},
-          "markdownDescription": "Override the status colours with concrete values, per status.\n\nMost customisation does not need this: the wash, the inline bar and the overview ruler are theme colours, so `workbench.colorCustomizations` on `acl2Session.bar.*` and `acl2Session.wash.*` already restyles them, follows the active theme, and has high-contrast variants.\n\nThe **gutter bar cannot** be a theme colour: it is drawn as an image, and an extension has no way to read a theme colour back as a value. Setting a colour here is what reaches it \u2014 the gutter icon is generated from the value \u2014 and the same value then drives the inline bar, the wash and the ruler, so the status column cannot end up disagreeing with itself.\n\nStatuses: `pending`, `running`, `admitted`, `conditional`, `skipped`, `failed`. Any CSS colour: `#fb4934`, `#fb493480`, `rgba(251, 73, 52, 0.65)`.",
+          "markdownDescription": "Override the status colours with concrete values, per status.\n\nMost customisation does not need this: the wash, the inline bar and the overview ruler are theme colours, so `workbench.colorCustomizations` on `acl2Session.bar.*` and `acl2Session.wash.*` already restyles them, follows the active theme, and has high-contrast variants.\n\nThe **gutter bar cannot** be a theme colour: it is drawn as an image, and an extension has no way to read a theme colour back as a value. Setting a colour here is what reaches it — the gutter icon is generated from the value — and the same value then drives the inline bar, the wash and the ruler, so the status column cannot end up disagreeing with itself.\n\nStatuses: `pending`, `running`, `admitted`, `conditional`, `skipped`, `failed`. Any CSS colour: `#fb4934`, `#fb493480`, `rgba(251, 73, 52, 0.65)`.",
           "additionalProperties": {
             "type": "object",
             "properties": {
@@ -500,7 +501,7 @@
         },
         "acl2-session.washOpacity": {
           "default": null,
-          "markdownDescription": "How strong the background wash is, in the `wash` decoration mode \u2014 0 to 1.\n\nThe hue follows your theme, so this is the part left to taste: the same tint reads differently over different backgrounds, and a low-contrast theme can swallow what a high-contrast one shouts. Defaults to 0.15 on light themes and 0.1 on dark ones.\n\nA single number applies to both; an object sets each. This adjusts whatever colour won \u2014 the theme's, or one from `workbench.colorCustomizations` \u2014 but not a wash written out in full under `acl2-session.colors`, which is taken exactly as given.",
+          "markdownDescription": "How strong the background wash is, in the `wash` decoration mode — 0 to 1.\n\nThe hue follows your theme, so this is the part left to taste: the same tint reads differently over different backgrounds, and a low-contrast theme can swallow what a high-contrast one shouts. Defaults to 0.15 on light themes and 0.1 on dark ones.\n\nA single number applies to both; an object sets each. This adjusts whatever colour won — the theme's, or one from `workbench.colorCustomizations` — but not a wash written out in full under `acl2-session.colors`, which is taken exactly as given.",
           "anyOf": [
             {
               "type": "number",
