@@ -23,7 +23,8 @@ import { join } from 'path';
 import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
-const { reindent, topLevelStarts, insideOpaque } = require('./out/indent.js');
+const { reindent, topLevelStarts, insideOpaque, plannedIndent, enclosingStart } =
+  require('./out/indent.js');
 
 const BOOKS = '/path/to/acl2/books';
 const DEFAULT = [join(BOOKS, 'kestrel/c/syntax'), join(BOOKS, 'kestrel/fty')];
@@ -165,6 +166,48 @@ ind('an unclosed form still indents what follows it', `
 (defun f (x
           (g x)
 `);
+
+// What the editor's providers ask, checked here rather than through a
+// stubbed editor: `formatting.ts` holds no decision of its own, so these are
+// the decisions it makes.
+function plan(what, source, line, want) {
+  const text = source.replace(/^\n/, '');
+  const starts = topLevelStarts(text);
+  let off = 0;
+  for (let i = 0; i < line; i++) off = text.indexOf('\n', off) + 1;
+  const got = plannedIndent(text, off, starts);
+  const ok = got === want;
+  if (!ok) unitBad++;
+  console.log(`${ok ? 'ok' : 'FAIL'}: ${what}${ok ? '' : ` (got ${got}, want ${want})`}`);
+}
+
+const BOOK = `(in-package "ACL2")
+
+(defun f (x)
+  ;; a comment
+; left margin on purpose
+  (+ x 1))
+
+(defxdoc top
+  :long "one
+   two")
+`;
+
+plan('a body line is planned at the body indent', BOOK, 5, 2);
+plan('a double-semicolon comment is planned like code', BOOK, 3, 2);
+plan('a lone-semicolon comment is not planned at all', BOOK, 4, undefined);
+plan('a blank line is not planned', BOOK, 6, undefined);
+plan('a line inside a string is not planned', BOOK, 9, undefined);
+plan('a top-level form is planned at column zero', BOOK, 2, 0);
+
+{
+  const starts = [0, 100, 250];
+  const cases = [[0, 0], [99, 0], [100, 100], [249, 100], [250, 250], [9999, 250]];
+  let ok = true;
+  for (const [at, want] of cases) if (enclosingStart(starts, at) !== want) ok = false;
+  if (!ok) unitBad++;
+  console.log(`${ok ? 'ok' : 'FAIL'}: the enclosing form is found on either side of every boundary`);
+}
 
 const targets = (process.argv.slice(2).length ? process.argv.slice(2) : DEFAULT).flatMap(lispFiles);
 if (!targets.length) {

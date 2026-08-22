@@ -749,3 +749,54 @@ export function insideOpaque(text: string, from: number, limit: number): boolean
   }
   return false;
 }
+
+/**
+ * The top-level form start at or before `offset`.
+ *
+ * Binary search, because the list has one entry per form in the book and
+ * this is asked on the keystroke path.
+ */
+export function enclosingStart(starts: number[], offset: number): number {
+  let lo = 0;
+  let hi = starts.length - 1;
+  let best = 0;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (starts[mid] <= offset) {
+      best = starts[mid];
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return best;
+}
+
+/**
+ * What one line's indentation should be, or nothing if it is not ours.
+ *
+ * The whole decision for a single line, in one place: this is what the
+ * editor's providers ask, so that what they contain is the editor API and
+ * nothing else. Three answers are `undefined` -- a blank line, a line whose
+ * column belongs to its author (see {@link keepsOwnColumn}), and a line
+ * inside a string or block comment -- and they are `undefined` rather than
+ * "the current indent" so a caller can tell "leave it alone" from "it is
+ * already right", and skip producing an edit at all.
+ */
+export function plannedIndent(
+  text: string,
+  lineStart: number,
+  starts: number[],
+  opts: IndentOptions = {}
+): number | undefined {
+  const nl = text.indexOf('\n', lineStart);
+  const line = text.slice(lineStart, nl === -1 ? text.length : nl);
+  if (!line.trim() || keepsOwnColumn(line)) {
+    return undefined;
+  }
+  const from = enclosingStart(starts, lineStart);
+  if (insideOpaque(text, from, lineStart)) {
+    return undefined;
+  }
+  return indentFor(text, lineStart, from, from, opts);
+}

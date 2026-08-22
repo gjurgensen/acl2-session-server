@@ -46,6 +46,7 @@ import { Highlighter } from './highlight';
 import { FormEnvelope, FormInduction, FormModel, FormNameRules, FormView } from './formView';
 import { Console, ConsoleResult, HISTORY } from './console';
 import { DocView, plainSpans } from './docView';
+import { indentCommand, registerFormatting } from './formatting';
 import { DocHtml as DocHtmlResult, esc, xdocHtml } from './xdoc';
 import {
   BookLink,
@@ -359,6 +360,14 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.languages.registerHoverProvider({ language: 'acl2' }, hoverProvider),
     vscode.languages.registerDefinitionProvider({ language: 'acl2' }, definitionProvider),
     vscode.languages.registerDocumentLinkProvider({ language: 'acl2' }, linkProvider),
+    // Indentation. Three providers, none of which needs a session: see
+    // `formatting.ts`, and `indent.ts` for why the language configuration
+    // cannot carry this.
+    ...registerFormatting(),
+    // Wrapped rather than passed bare, for the reason `webview.mjs` checks:
+    // a bare registration receives whatever VSCode hands the command, and an
+    // arrow that declares no parameters cannot quietly grow one.
+    vscode.commands.registerCommand('acl2-session.indent', () => indentCommand()),
     // `:` triggers so keyword families appear without a word first; the rest
     // is VSCode's own 24x7 word completion.
     vscode.languages.registerCompletionItemProvider({ language: 'acl2' }, completionProvider, ':'),

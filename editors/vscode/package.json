@@ -45,7 +45,10 @@
     "configurationDefaults": {
       "[acl2]": {
         "editor.colorDecorators": false,
-        "editor.wordSeparators": "()[]{}'\"`,;|"
+        "editor.wordSeparators": "()[]{}'\"`,;|",
+        "editor.formatOnType": true,
+        "editor.autoIndent": "keep",
+        "editor.insertSpaces": true
       },
       "[acl2-output]": {
         "editor.colorDecorators": false
@@ -360,6 +363,10 @@
       {
         "command": "acl2-session.gotoAttention",
         "title": "ACL2: Go to Next Attention Point"
+      },
+      {
+        "command": "acl2-session.indent",
+        "title": "ACL2: Indent Line or Selection"
       }
     ],
     "configuration": {
@@ -543,6 +550,11 @@
               "dark": 0.16
             }
           ]
+        },
+        "acl2-session.tabIndents": {
+          "type": "boolean",
+          "default": false,
+          "description": "Make Tab re-indent the current line, the way it does in Emacs, when the cursor is in an ACL2 file with nothing selected. Off by default: outside a selection VSCode's Tab inserts, and taking that away from someone who did not ask for it is worse than not offering it. Indenting is always available as \"ACL2: Indent Line or Selection\", and Enter indents either way."
         }
       }
     },
@@ -663,6 +675,11 @@
         "key": "ctrl+alt+g",
         "mac": "cmd+alt+g",
         "when": "editorLangId == acl2"
+      },
+      {
+        "command": "acl2-session.indent",
+        "key": "tab",
+        "when": "editorTextFocus && editorLangId == acl2 && config.acl2-session.tabIndents && !editorHasSelection && !suggestWidgetVisible && !inSnippetMode && !editorReadonly"
       }
     ],
     "taskDefinitions": [
