@@ -82,8 +82,9 @@ function inlineBarType(bar: Bar): vscode.TextEditorDecorationType {
       // background to fill. `width` overrides what the space would take.
       contentText: ' ',
       backgroundColor: color,
+      // Width, height and the margin that drops it below the baseline all
+      // come together, because the last two only make sense as a pair.
       ...INLINE_BAR,
-      margin: '0 0.15em 0 0.1em',
     },
   });
   return vscode.window.createTextEditorDecorationType({

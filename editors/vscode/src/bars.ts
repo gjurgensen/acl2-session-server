@@ -55,17 +55,37 @@ export const BARS: Bar[] = [
 ];
 
 /**
- * How wide the inline bar is, and how tall.
+ * The inline bar's geometry: how wide, how tall, and how far below the
+ * baseline it hangs.
  *
- * In `em`, so it grows with the font exactly as the gutter's SVG grows with
- * the line -- a bar measured in pixels matched at one font size and no other,
- * which is what made the two marks visibly different in the first place.
+ * All in `em`, so it grows with the font exactly as the gutter's SVG grows
+ * with the line -- a bar measured in pixels matched at one font size and no
+ * other, which is what made the two marks visibly different to begin with.
  *
- * The height is the load-bearing number. An inline attachment sits on the
- * text's baseline and extends upward, so anything taller than the space above
- * the baseline pushes the line box open and the whole line shifts. A full
- * line-height bar -- which is what matching the gutter's proportions exactly
- * would need -- does that visibly. Just under the ascent does not, and costs
- * a bar a little shorter than the gutter's.
+ * The height is the load-bearing number, and it is bounded by where the
+ * baseline is rather than by the line. An inline attachment's bottom margin
+ * edge sits *on* the text baseline and the box extends upward, so anything
+ * taller than the space above the baseline -- roughly the ascent plus half
+ * the leading, about 0.9em in a 1.35em line -- pushes the line box open and
+ * shifts the whole line. Drawing the gutter's own square SVG at
+ * `height: '100%'` did exactly that.
+ *
+ * Hence the negative bottom margin. It drops the box below the baseline into
+ * the descender space, which the line box already reserves and nothing else
+ * here uses, buying height that costs nothing. The invariant to preserve when
+ * adjusting these is the *difference*:
+ *
+ *     height - drop = how far the bar rises above the baseline
+ *
+ * Keep that at or under about 0.9em and the line cannot be pushed open; the
+ * drop itself has roughly 0.35em of descender to spend. Raising both by the
+ * same amount is therefore always safe, and is how to make the bar taller.
  */
-export const INLINE_BAR = { width: '0.25em', height: '0.9em' };
+const DROP = '0.25em';
+export const INLINE_BAR = {
+  width: '0.25em',
+  height: '1.15em',
+  // Top, right, bottom, left. The bottom is the drop; the sides just keep
+  // the bar off the two forms it sits between.
+  margin: `0 0.15em -${DROP} 0.1em`,
+};
