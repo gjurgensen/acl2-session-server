@@ -378,10 +378,20 @@ const onType: vscode.OnTypeFormattingEditProvider = {
 /**
  * The editor settings that decide whether any of this runs, logged once.
  *
- * Resolved against the document's own URI rather than the language alone.
- * The two can differ -- a bare `{ languageId }` scope resolves at workspace
- * level -- and the earlier run read the weaker one, so "confirmed true for
- * the language" was never quite the question worth answering.
+ * Both halves of the scope, and it has to be both. A `ConfigurationScope`
+ * of a bare `Uri` resolves the resource but drops the language override; a
+ * bare `{ languageId }` applies the override but at workspace level. Either
+ * one alone reports a value the editor is not using.
+ *
+ * That is not a hypothetical. This function first shipped with the `Uri`
+ * form and reported `formatOnType=false autoIndent="full"` on the very run
+ * where the on-type provider fired and `autoIndent: keep` had visibly
+ * copied the previous line's eleven spaces -- both readings flatly contrary
+ * to the behaviour in the same trace, because both were the values with the
+ * `[acl2]` block stripped off. A line of instrumentation that disagrees
+ * with the run it is instrumenting is worse than none; the earlier
+ * `{ languageId }` probe was wrong the other way and no one noticed,
+ * because that time it happened to agree.
  */
 let loggedFor: string | undefined;
 function logEffective(doc: vscode.TextDocument): void {
@@ -389,14 +399,24 @@ function logEffective(doc: vscode.TextDocument): void {
     return;
   }
   loggedFor = doc.uri.toString();
-  const cfg = vscode.workspace.getConfiguration('editor', doc.uri);
-  const ours = vscode.workspace.getConfiguration('acl2-session', doc.uri);
+  const scope = { uri: doc.uri, languageId: doc.languageId };
+  const cfg = vscode.workspace.getConfiguration('editor', scope);
+  const ours = vscode.workspace.getConfiguration('acl2-session', scope);
+  // Alongside each language-scoped value, the value with the `[acl2]` block
+  // taken away. When indentation is not running, the interesting question
+  // is almost always whether the language defaults reached this document at
+  // all, and one reading cannot answer it.
+  const bare = vscode.workspace.getConfiguration('editor', doc.uri);
+  const both = (k: string): string => {
+    const lang = JSON.stringify(cfg.get(k));
+    const plain = JSON.stringify(bare.get(k));
+    return lang === plain ? lang : `${lang} (without [acl2]: ${plain})`;
+  };
   log(
     `effective for ${doc.uri.fsPath} [${doc.languageId}]: ` +
-      `formatOnType=${cfg.get('formatOnType')} ` +
-      `autoIndent=${JSON.stringify(cfg.get('autoIndent'))} ` +
-      `insertSpaces=${cfg.get('insertSpaces')} tabSize=${cfg.get('tabSize')} ` +
-      `detectIndentation=${cfg.get('detectIndentation')}; ` +
+      `formatOnType=${both('formatOnType')} autoIndent=${both('autoIndent')} ` +
+      `insertSpaces=${both('insertSpaces')} tabSize=${both('tabSize')} ` +
+      `detectIndentation=${both('detectIndentation')}; ` +
       `indentOnType(watcher)=${ours.get('indentOnType')}`
   );
 }
