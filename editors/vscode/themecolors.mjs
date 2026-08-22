@@ -181,6 +181,60 @@ for (const kind of ['light', 'dark']) {
     check('and is the one that pulses', bar.pulse, true);
   }
 
+  // The held target is a barrier between two forms, not a verdict about
+  // either, so it gets a rule across the top of the cell rather than a bar
+  // down the side of it. Shape first: given the bar shape it would read as a
+  // form with an odd status, and would be leaning on hue alone to say
+  // otherwise.
+  {
+    const { targetSvg, gutterSvg, INLINE_STOP, INLINE_BAR } = require('./out/bars.js');
+    const box = (svg) => {
+      const m = /<rect[^>]*width="([\d.]+)"[^>]*height="([\d.]+)"/.exec(svg);
+      return { w: +m[1], h: +m[2] };
+    };
+    const rule = box(targetSvg('#3794ff'));
+    const bar = box(gutterSvg('#3794ff'));
+    check('the target mark is wider than it is tall', rule.w > rule.h, true);
+    check('and a status bar is the other way round', bar.h > bar.w, true);
+    check('the two are not confusable even in one colour', rule.w > bar.w * 3, true);
+    check('the rule sits at the top edge, which is the boundary it marks',
+      /<rect[^>]*y="0"/.test(targetSvg('#3794ff')), true);
+    check('and it does not pulse -- a barrier is not working',
+      /@keyframes/.test(targetSvg('#3794ff')), false);
+
+    // Where the gutter cannot reach, the same mark turns ninety degrees: a
+    // barrier lies across the direction the reader is moving in.
+    const em = (v) => parseFloat(v);
+    check('the inline stop is narrower than an inline status bar',
+      em(INLINE_STOP.width) < em(INLINE_BAR.width), true);
+    check('and taller, so the two read apart when they land together',
+      em(INLINE_STOP.height) > em(INLINE_BAR.height), true);
+  }
+
+  // Its hue must be free: it is not a verdict, and it shares the gutter with
+  // four that are. Blue, which the column freed when running stopped needing
+  // a hue of its own.
+  {
+    const target = BARS.find((b) => b.icon === 'target');
+    check('the target has a colour of its own', target !== undefined, true);
+    check('and is no status, so no status can select it',
+      ['pending', 'running', 'admitted', 'conditional', 'skipped', 'failed']
+        .some((st) => target.statuses.includes(st)), false);
+    check('it is never returned as a bar', barFor('gutter', 'beyond'), 'pending');
+    for (const kind of ['light', 'dark']) {
+      const hue = (c) => c.match(/\d+/g).slice(0, 3).join(',');
+      const mine = hue(target[kind]);
+      for (const other of BARS.filter((b) => b.icon !== 'target')) {
+        check(`the target hue is not the ${other.icon} hue (${kind})`, hue(other[kind]) === mine, false);
+      }
+      // Blue is the one thing wash still says running in, and the target is
+      // never a wash -- the two live on different surfaces and never meet.
+      check(`the target is blue (${kind})`, hue(WASHES.running[kind]), mine);
+    }
+    check('it is not last in the table, which is the unknown-status fallback',
+      BARS[BARS.length - 1].icon === 'target', false);
+  }
+
   // What goes to the Problems view, in every mode.
   check('a failed form is a problem', isProblem('failed'), true);
   check('and so is a skipped one -- it failed, then was let through',

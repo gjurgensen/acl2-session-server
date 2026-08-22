@@ -39,6 +39,7 @@ import {
 import { Envelope, InductionWire, RulesReply, RuneWire } from './protocol';
 import { DecorationMode, Decorations } from './decorations';
 import { byteColumn, charOffset } from './positions';
+import { paintMap } from './paintmap';
 import { isProblem } from './bars';
 import { EVAL_SCHEME, OutputView, SCHEME } from './outputView';
 import { Highlighter } from './highlight';
@@ -1274,21 +1275,41 @@ function holdAt(s: BookSession, i: number): void {
 }
 
 /**
- * Where the barrier falls, for drawing: the end of the form it holds after.
+ * Where the barrier falls, for drawing: the first form the run will *not*
+ * reach.
  *
- * The glyph used to sit wherever the cursor was when the target was set,
- * which was the barrier only by coincidence -- target from the middle of a
- * form and checking stopped at the end of it while the mark stayed where the
- * click was. Anchoring on a form makes the barrier a thing with a position,
- * so it is drawn at that position.
+ * Not the last form inside it, which is the choice this had to make. Beside
+ * an included form the gutter is fully spoken for -- green, yellow and red
+ * each say something nothing else says -- so a mark there displaces a verdict
+ * instead of adding a fact. Beyond it every form is identical grey, hundreds
+ * of them, so the first one is free to be special and the region gains the
+ * one thing it was missing: where it begins.
+ *
+ * It degrades correctly at both ends. Held above everything, the first form
+ * beyond is the first form, which is exactly "none of this is in". Held on
+ * the last form there is nothing beyond and nothing is drawn -- honest,
+ * because a target at the end of a book is not a barrier at all.
+ *
+ * Read from the *client's* barrier rather than from the daemon's `beyond`, so
+ * the mark moves when the reader moves it rather than a round trip later. The
+ * two agree once the daemon has answered.
  */
-function barrierPos(s: BookSession): Pos | null {
-  if (!s.target) {
+function targetMark(
+  s: BookSession
+): { line: number; inline: { line: number; col: number } | null } | null {
+  const units = s.lastState?.units ?? [];
+  if (!s.target || units.length === 0) {
     return null;
   }
-  const i = barrierOf(s);
-  const u = i >= 0 ? s.lastState?.units[i] : undefined;
-  return u ? { line: u.line_end, column: u.col_end } : { line: 0, column: null };
+  const next = units[barrierOf(s) + 1];
+  if (!next) {
+    return null;
+  }
+  // `paintMap` has already worked out which form owns which gutter cell and
+  // where a form that owns none must be drawn instead. A barrier lands in
+  // exactly the same two cases, so it takes the same answer.
+  const p = paintMap(units).find((x) => x.index === next.index);
+  return { line: next.line_start, inline: p?.inlineAt ?? null };
 }
 
 /**
@@ -2165,7 +2186,7 @@ function paint(s: BookSession): void {
   for (const editor of vscode.window.visibleTextEditors) {
     if (editor.document === s.doc) {
       decorations.apply(editor, s.lastState.units, opts);
-      decorations.applyTarget(editor, barrierPos(s));
+      decorations.applyTarget(editor, targetMark(s));
       decorations.applyUnreadable(
         editor,
         s.unreadableFrom ?? null,

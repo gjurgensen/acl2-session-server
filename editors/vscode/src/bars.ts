@@ -243,6 +243,31 @@ export const BARS: Bar[] = [
     light: 'rgba(191, 136, 3, 0.75)',
     dark: 'rgba(204, 167, 0, 0.7)',
   },
+  // Not a status: the held target, which is a barrier between two forms
+  // rather than a fact about either. It lives here for the colour, since
+  // this is where a hue gets read from the theme, overridden by the reader
+  // and shipped as a fallback -- and nothing about that machinery cares
+  // whether the thing being coloured is a verdict.
+  //
+  // Blue, which the gutter freed when running stopped needing a hue of its
+  // own. `editorInfo.foreground` is the right word for it: the target is
+  // information the reader supplied, not a judgement the prover reached.
+  // Stronger than the status bars on purpose -- the mark is a rule three
+  // eighteenths of a cell tall, where they are the full height.
+  //
+  // Deliberately not the last entry: `barOfStatus` falls back to the final
+  // one for a status it does not know, and red is the right thing to be
+  // wrong with.
+  {
+    icon: 'target',
+    themeIds: {
+      light: ['editorInfo.foreground', 'charts.blue', 'terminal.ansiBlue'],
+      dark: ['editorInfo.foreground', 'charts.blue', 'terminal.ansiBrightBlue'],
+    },
+    statuses: ['target'],
+    light: 'rgba(26, 133, 255, 0.9)',
+    dark: 'rgba(55, 148, 255, 0.85)',
+  },
   {
     icon: 'red',
     themeIds: {
@@ -283,6 +308,45 @@ export const BARS: Bar[] = [
  * same amount is therefore always safe, and is how to make the bar taller.
  */
 const DROP = '0.25em';
+/**
+ * The held target's mark: a rule across the top of the gutter cell.
+ *
+ * A rule and not a bar, which is the whole distinction it has to carry. Every
+ * bar in that column is a verdict about the form beside it; the target is a
+ * barrier *between* two forms and a fact about neither. Given the bar shape it
+ * would read as "this form has an odd status", and would be relying on hue
+ * alone to say otherwise.
+ *
+ * Drawn at the top edge because that edge is the boundary: the line above is
+ * checked and this one is not. Full width rather than the bar's four
+ * eighteenths, so the two are not confusable at a glance even in one colour.
+ */
+export function targetSvg(color: string): string {
+  return (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18">' +
+    `<rect x="0" y="0" width="18" height="3" fill="${escapeAttr(color)}"/>` +
+    '</svg>'
+  );
+}
+
+/**
+ * The same mark where the gutter cannot reach: between two forms on a line.
+ *
+ * Vertical here, horizontal in the gutter, and that is not an inconsistency.
+ * A barrier lies across the direction the reader is moving in. Down the page
+ * that is a horizontal rule; along a line it is a vertical one.
+ *
+ * Narrower and taller than `INLINE_BAR`, because it can appear right beside
+ * one: the form it precedes is `beyond`, which in `gutter` mode still draws
+ * its own queued bar at the same spot. Two marks, saying two things -- where
+ * the run stops, and what the form after it is.
+ */
+export const INLINE_STOP = {
+  width: '0.14em',
+  height: '1.25em',
+  margin: `0 0.12em -${DROP} 0.08em`,
+};
+
 export const INLINE_BAR = {
   width: '0.25em',
   height: '1.15em',

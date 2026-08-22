@@ -19,6 +19,23 @@ form status is then shown is `acl2-session.decorations`:
 Each mode marks each fact once, which is the rule they are built around: never
 a bar *and* a wash, never a wash *and* a squiggle.
 
+A held target is drawn in every mode, and identically in all three: a blue rule
+across the top of the gutter cell beside the first form the run will **not**
+reach. A rule and not a bar, because every bar in that column is a verdict
+about the form beside it and the target is a barrier *between* two forms — a
+fact about neither. Where two forms share a line and the barrier falls between
+them, the gutter has no cell to use, so the rule turns ninety degrees and is
+drawn in the text at the column the second form begins. A barrier lies across
+the direction you are reading in: down the page that is horizontal, along a
+line it is vertical.
+
+It marks the first form *beyond* rather than the last form included, because
+that is the side with room. Beside an included form the gutter already says
+green, yellow or red, and a target there would displace a verdict instead of
+adding a fact; beyond it every form is the same grey. The scrollbar gets a tick
+too, at line resolution — two forms on a line share one, which makes it a
+"look around here" aid rather than a statement about which of them.
+
 A buffer that will not lex — a stray bracket — marks its whole tail rather
 than one form, because nothing below the bracket has been *read*, let alone
 checked. Which mark is still the mode's: a wash in `wash`, the status column

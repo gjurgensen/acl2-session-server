@@ -90,5 +90,29 @@ check('forward from the top takes the first form', stepBarrier(-1, 1, 4), 0);
 check('forward from the last form stays on it', stepBarrier(3, 1, 4), 3);
 check('an empty book has only the top', stepBarrier(-1, 1, 0), -1);
 
+// Which form carries the mark: the first one *beyond* the barrier, never the
+// last one inside it. The gutter beside an included form is fully spoken for
+// -- green, yellow and red each say something nothing else says -- so a mark
+// there would displace a verdict. Beyond it every form is the same grey, so
+// the first is free to be special.
+const marked = (anchor) => {
+  const i = barrierIndex(anchor, units);
+  return i + 1 < units.length ? i + 1 : undefined;
+};
+check('the mark goes on the form after the barrier', marked(at(5, 1)), 2);
+check('held above everything, it marks the first form -- "none of this is in"',
+  marked(null), 0);
+check('held on the last form there is nothing beyond, so nothing is drawn',
+  marked(at(9, 20)), undefined);
+check('a rounded-up barrier marks the form after where it landed',
+  marked(at(7, 1)), 2);
+
+// The invariant that pairs with the one above: the marked form is never a
+// form the run will reach, so the mark can never cover a verdict.
+for (const [line, column] of [[1, 0], [3, 4], [5, 1], [5, 8], [7, 1], [9, 10]]) {
+  const i = barrierIndex(at(line, column), units);
+  check(`the mark for (${line},${column}) is outside the barrier`, marked(at(line, column)) > i, true);
+}
+
 console.log(failures === 0 ? 'barrier: all green' : `barrier: ${failures} failed`);
 process.exit(failures === 0 ? 0 : 1);
