@@ -181,68 +181,48 @@ for (const kind of ['light', 'dark']) {
     check('and is the one that pulses', bar.pulse, true);
   }
 
-  // The held target is a barrier between two forms, not a verdict about
-  // either, so it gets a rule across the top of the cell rather than a bar
-  // down the side of it. Shape first: given the bar shape it would read as a
-  // form with an odd status, and would be leaning on hue alone to say
-  // otherwise.
+  // The held target's mark says what happens at a line rather than where a
+  // boundary lies, which is the third answer this question got. A gutter cell
+  // addresses a line, so anything drawn in one reads as being about that line;
+  // a rule along the top edge could not be seen, and a mark that could be seen
+  // read as a status of the form beside it. An octagon says "stops here" and
+  // does not need the geometry to say anything.
   {
-    const { targetSvg, targetDownSvg, gutterSvg, INLINE_TARGET } = require('./out/bars.js');
-    const arrow = targetSvg('#3794ff');
-    check('the target mark is a shape, not a bar', /<path/.test(arrow) && !/<rect/.test(arrow), true);
+    const { targetSvg, gutterSvg, INLINE_TARGET } = require('./out/bars.js');
+    const stop = targetSvg('#3794ff');
+    check('the target mark is a shape, not a bar', /<path/.test(stop) && !/<rect/.test(stop), true);
     check('and a status bar is a bar', /<rect/.test(gutterSvg('#3794ff')), true);
 
-    const pts = [...(/<path[^>]*d="([^"]+)"/.exec(arrow)[1])
+    const pts = [...(/<path[^>]*d="([^"]+)"/.exec(stop)[1])
       .matchAll(/(-?[\d.]+)\s+(-?[\d.]+)/g)].map((m) => [+m[1], +m[2]]);
     const xs = pts.map((p) => p[0]);
     const ys = pts.map((p) => p[1]);
-    const spanX = Math.max(...xs) - Math.min(...xs);
-    const spanY = Math.max(...ys) - Math.min(...ys);
+    check('it is an octagon', pts.length, 8);
+    // Regular, and centred: a stop sign leaning or sitting off to one side
+    // reads as a mistake rather than as a sign.
+    check('centred horizontally', (Math.min(...xs) + Math.max(...xs)) / 2, 9);
+    check('centred vertically', (Math.min(...ys) + Math.max(...ys)) / 2, 9);
+    check('and as wide as it is tall',
+      Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
 
-    // Which way it points is the whole of its meaning: at the first form the
-    // run will not reach, which from the gutter is to the right.
-    const tip = pts.filter((p) => p[0] === Math.max(...xs));
-    check('one vertex at the right edge -- it points right', tip.length, 1);
-
-    // A shaft with a head, not a solid triangle. A triangle is three points
-    // and as tall as it is wide; this is neither, and both halves matter --
-    // the head is what can be seen, the shaft is what lies along the boundary.
-    check('it is a shaft and a head, not three points', pts.length > 3, true);
-    check('it runs across the cell rather than filling it', spanX > spanY * 3, true);
-
-    // And it lies on the cell's *top* edge, because that edge is the boundary:
-    // above is checked, below is not. A mark centred in the cell sits on a
-    // line rather than between two, which is not where a barrier is.
-    check('it starts at the top edge', Math.min(...ys), 0);
-    check('and stays in the top third', Math.max(...ys) <= 6, true);
-    check('while spanning the cell across', spanX >= 15, true);
+    // Visibility is the thing the first two attempts lost, so it is asserted:
+    // the mark fills most of the cell, where a status bar is four eighteenths
+    // of it across.
+    check('it fills most of the cell', Math.max(...xs) - Math.min(...xs) >= 12, true);
     check('and it does not pulse -- a barrier is not working',
-      /@keyframes/.test(arrow), false);
+      /@keyframes/.test(stop), false);
 
-    // Where the gutter cannot reach, the mark points down instead: from the
-    // gutter the only thing to point at is the line, to the right; inline it
-    // is already in the text and can point at the column, below. The *same*
-    // arrow, transposed, because two hand-drawn ones drifted -- a polygon and
-    // a font glyph, differing in weight and proportion, with nothing but the
-    // colour to say they meant the same thing.
-    const dpts = [...(/<path[^>]*d="([^"]+)"/.exec(targetDownSvg('#3794ff'))[1])
-      .matchAll(/(-?[\d.]+)\s+(-?[\d.]+)/g)].map((m) => [+m[1], +m[2]]);
-    check('the inline mark is the same arrow with x and y exchanged',
-      dpts.map(([x, y]) => [y, x]), pts);
-    // Which makes "points down" the transpose of "points right", so the same
-    // reading applies turned ninety degrees.
-    const dtip = dpts.filter((p) => p[1] === Math.max(...dpts.map((q) => q[1])));
-    check('one vertex at the bottom edge -- it points down', dtip.length, 1);
-
-    // And it is an image in a box, not a glyph. What pushes a line box open is
-    // how far an attachment rises above the baseline: height minus drop, which
-    // `bars.ts` records must stay at or under about 0.9em.
-    check('the inline box rises no further than the safe height',
-      parseFloat(INLINE_TARGET.height) - parseFloat(/-([\d.]+)em/.exec(INLINE_TARGET.margin)[1])
-        <= 0.9 + 1e-9, true);
-    check('and is shaped to the arrow it holds',
-      Math.abs(parseFloat(INLINE_TARGET.width) / parseFloat(INLINE_TARGET.height) - 5 / 18) < 0.02,
-      true);
+    // Inline it is a glyph, because an image there pushes the line box open --
+    // which this file's neighbour already recorded, and which an inline icon
+    // turned out to do no less than an inline image. A shape this simple loses
+    // nothing to being drawn a second way: at this size an octagon and a
+    // filled circle are the same dot.
+    check('the inline mark is a glyph', typeof INLINE_TARGET.contentText, 'string');
+    check('and a round one, to match', INLINE_TARGET.contentText, '\u25cf');
+    check('with no box geometry to push the line open',
+      'width' in INLINE_TARGET || 'height' in INLINE_TARGET, false);
+    check('and no negative margin, which only a box needs',
+      /-/.test(INLINE_TARGET.margin), false);
   }
 
   // Its hue must be free: it is not a verdict, and it shares the gutter with

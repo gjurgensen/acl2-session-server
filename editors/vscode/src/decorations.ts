@@ -48,7 +48,6 @@ import {
   firstDefined,
   gutterSvg,
   targetSvg,
-  targetDownSvg,
   svgCanPaint,
   unreadableMark,
   washColorId,
@@ -391,18 +390,15 @@ export class Decorations {
       // which is on the *other* side of the barrier. Drawn in the text
       // instead, at the column the second form begins -- the same escape
       // hatch `paintmap` already gives a status in that position.
-      const down = (theme: 'light' | 'dark'): vscode.Uri | string => {
-        const c0 = c[theme];
-        return c0 === undefined || !svgCanPaint(c0)
-          ? this.context.asAbsolutePath(`media/target-down-${theme}.svg`)
-          : vscode.Uri.parse(
-              `data:image/svg+xml;base64,` +
-                `${Buffer.from(targetDownSvg(c0), 'utf8').toString('base64')}`
-            );
-      };
+      // A glyph, not an image: see `INLINE_TARGET`. An image here pushes the
+      // line box open, which is what this module already says about the
+      // inline *bar* and is no less true of an inline icon.
+      const dot = (color: string | vscode.ThemeColor) => ({
+        before: { ...INLINE_TARGET, color },
+      });
       this.targetInline = vscode.window.createTextEditorDecorationType({
-        light: { before: { ...INLINE_TARGET, contentIconPath: down('light') } },
-        dark: { before: { ...INLINE_TARGET, contentIconPath: down('dark') } },
+        light: dot(pick(c.light, barColorId('target'))),
+        dark: dot(pick(c.dark, barColorId('target'))),
       });
     }
     // The unreadable tail, from the paren that never closes to end of file.

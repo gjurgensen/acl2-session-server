@@ -326,100 +326,63 @@ export const BARS: Bar[] = [
  */
 const DROP = '0.25em';
 /**
- * The held target's mark: an arrow in the gutter, pointing at the code.
+ * The held target's mark: a stop sign beside the first form the run will not
+ * reach.
  *
- * A shape and not a bar, which is the distinction it has to carry. Every bar
- * in that column is a verdict about the form beside it; the target is a
- * barrier *between* two forms and a fact about neither. Given the bar shape it
- * would read as "this form has an odd status", and would be relying on hue
- * alone to say otherwise.
+ * Three attempts got here, and what they were each wrong about is worth
+ * keeping. A thin rule along the cell's top edge said "boundary" and could not
+ * be seen -- three units of eighteen is two or three pixels at an ordinary
+ * font size. A solid triangle filling the cell could be seen and said the
+ * wrong thing, sitting *on* a line where a barrier is between two. A shaft and
+ * a head along the top edge was both, and still fighting the surface: a gutter
+ * cell addresses a line, so whatever is drawn in one reads as being about that
+ * line, and no amount of drawing near the top edge changes that.
  *
- * A shaft with a head, and drawn along the cell's top edge, which is what the
- * two earlier attempts each had half of. A bare rule there was right about
- * meaning -- a line lying across the boundary, at the boundary -- and wrong
- * about physics: three units of eighteen is two or three pixels at an ordinary
- * font size. A solid triangle filling the cell was visible and said the wrong
- * thing: it sat *on* a line rather than between two, which is not where a
- * barrier is. The shaft is the rule and the head is the direction, and
- * together they are five units tall instead of twelve.
+ * So stop fighting it. The mark is about a line -- the head of the first form
+ * that will not be checked -- and the icon says what happens there rather than
+ * where the boundary lies. An octagon at a font size worth reading is a stop
+ * sign; at a small one it is a dot in the gutter, which is what every editor
+ * uses for "execution stops here". Both readings are the one meant.
  *
- * One polygon rather than a rect and a triangle. Two elements would each carry
- * their own fill, and the shipped icons are checked against `bars.ts` by
- * reading the first fill they contain -- so a second one could drift without
- * anything noticing.
+ * Shape simple enough to survive being drawn twice, which the arrow was not.
+ * The inline twin is a character, and a font decides a shaft-and-head arrow's
+ * proportions for itself; it has no opinion about a dot.
  */
 export function targetSvg(color: string): string {
   return (
     '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18">' +
-    `<path d="${TARGET_ARROW}" fill="${escapeAttr(color)}"/>` +
+    `<path d="${TARGET_STOP}" fill="${escapeAttr(color)}"/>` +
     '</svg>'
   );
 }
 
 /**
- * The inline twin: the same arrow, turned down, in a box shaped to it.
- *
- * A tall narrow viewBox rather than the gutter's square one, and that is the
- * difference between the two uses rather than between the two marks. In the
- * gutter the arrow has to sit at the top *of a line*, so it occupies the top
- * five eighteenths of a full-height cell. Inline the arrow *is* the mark, so
- * the box is the arrow's own shape and it fills it.
+ * A regular octagon centred in the cell: a square from 2.5 to 15.5 with its
+ * corners cut at `s / (2 + sqrt 2)`. Kept as a constant because
+ * `media/target-*.svg` has to draw the same shape and is otherwise a
+ * hand-copied pair.
  */
-export function targetDownSvg(color: string): string {
-  return (
-    '<svg xmlns="http://www.w3.org/2000/svg" width="5" height="18" viewBox="0 0 5 18">' +
-    `<path d="${transposePath(TARGET_ARROW)}" fill="${escapeAttr(color)}"/>` +
-    '</svg>'
-  );
-}
-
-/**
- * Shaft along the top edge, head at the right: `M0 1.75` to `L0 3.25` reads
- * anticlockwise from the shaft's top-left, out to the tip at `16.5 2.5` and
- * back. Kept as a constant because `media/target-*.svg` must draw the same
- * shape, and the two are otherwise a hand-copied pair.
- */
-export const TARGET_ARROW =
-  'M0 1.75 L9.5 1.75 L9.5 0 L16.5 2.5 L9.5 5 L9.5 3.25 L0 3.25 Z';
-
-/**
- * The same path with x and y exchanged: rightward-along-the-top becomes
- * downward-along-the-left.
- *
- * Derived rather than drawn, because the two marks are one mark seen from two
- * places and a second hand-authored path would drift from the first. Drawn
- * separately once, they did: a custom polygon in the gutter and a font glyph
- * inline, differing in weight, stroke and proportion, with nothing but the
- * colour to say they meant the same thing.
- */
-export function transposePath(d: string): string {
-  return d.replace(/(-?[\d.]+)\s+(-?[\d.]+)/g, (_, x: string, y: string) => `${y} ${x}`);
-}
+export const TARGET_STOP =
+  'M6.31 2.5 L11.69 2.5 L15.5 6.31 L15.5 11.69 L11.69 15.5 ' +
+  'L6.31 15.5 L2.5 11.69 L2.5 6.31 Z';
 
 /**
  * The same mark where the gutter cannot reach: between two forms on a line.
  *
- * Pointing down rather than right, and that is not an inconsistency. Both
- * point at what they mark. From the gutter the only thing to point at is the
- * line, which is to the right. Inline the mark is already in the text and can
- * point at the column itself, which is below.
+ * A character, and the reason is the one this file already records two
+ * paragraphs down and I did not believe: an inline attachment carrying an
+ * image pushes the line box open. `INLINE_BAR`'s geometry keeps a *coloured
+ * box* on the line, and putting an image in that box does not inherit the
+ * property -- tried, and it shifted every line the mark landed on.
  *
- * An image, and the *same* image transposed, rather than the arrow character
- * this used first. A glyph is whatever the reader's font makes of it, and no
- * font's arrow matches a polygon drawn here -- they differed in stroke weight
- * and in proportion, which is exactly the sort of difference that reads as two
- * marks meaning two things.
- *
- * The geometry is `INLINE_BAR`'s, and safe for the reason recorded there: what
- * pushes a line box open is how far an attachment rises above the baseline,
- * `height - drop`, and at 0.9em it cannot. That an image sits in the box
- * rather than a background colour does not change the box.
+ * A glyph is sized to the line by construction and needs no geometry at all,
+ * which is what the mark this replaced always did. It costs nothing here that
+ * it cost the arrow: at this size an octagon and a filled circle are the same
+ * dot, so the two marks agree without being the same drawing.
  */
 export const INLINE_TARGET = {
-  // 5 by 18 in its own viewBox, so the width is the height at that ratio.
-  width: '0.32em',
-  height: '1.15em',
-  margin: `0 0.12em -${DROP} 0.08em`,
+  contentText: '\u25cf',
+  margin: '0 0.08em 0 0.08em',
 };
 
 export const INLINE_BAR = {
