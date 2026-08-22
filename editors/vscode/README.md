@@ -8,6 +8,26 @@ The extension automatically syncs a background ACL2 session with the file. By
 default, form status is then indicated in the editor gutter (configurable by
 `acl2-session.decorations`).
 
+### Colours
+
+The status colours are theme colours — `acl2Session.bar.<status>` for the
+status column and `acl2Session.wash.<status>` for the washes — so a theme can
+restyle them and `workbench.colorCustomizations` can override them, with
+high-contrast variants.
+
+The gutter bar is the exception, and it is a platform one: it is drawn as an
+image, and an extension cannot read a theme colour back as a value to draw
+with. `acl2-session.colors` is what reaches it — the gutter icon is generated
+from the value you give — and the same value drives the inline bar, the wash
+and the overview ruler, so the status column cannot disagree with itself.
+
+```jsonc
+"acl2-session.colors": {
+  "failed":  { "bar": "#ff5555" },
+  "running": { "bar": { "light": "#0057b7", "dark": "#7fb8ff" } }
+}
+```
+
 ## The panel
 
 The editor title bar shows a "play" icon in the upper right, which starts the

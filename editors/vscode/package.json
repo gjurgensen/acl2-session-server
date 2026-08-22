@@ -144,6 +144,116 @@
           "highContrast": "foreground",
           "highContrastLight": "foreground"
         }
+      },
+      {
+        "id": "acl2Session.bar.pending",
+        "description": "The status column's bar for a pending form, and the same bar drawn inline where two forms share a line. Also its mark in the overview ruler.",
+        "defaults": {
+          "light": "#61616166",
+          "dark": "#cccccc59",
+          "highContrast": "#cccccc59",
+          "highContrastLight": "#61616166"
+        }
+      },
+      {
+        "id": "acl2Session.bar.running",
+        "description": "The status column's bar for a running form, and the same bar drawn inline where two forms share a line. Also its mark in the overview ruler.",
+        "defaults": {
+          "light": "#1565c0d9",
+          "dark": "#6a9fddd9",
+          "highContrast": "#6a9fddd9",
+          "highContrastLight": "#1565c0d9"
+        }
+      },
+      {
+        "id": "acl2Session.bar.admitted",
+        "description": "The status column's bar for a admitted form, and the same bar drawn inline where two forms share a line. Also its mark in the overview ruler.",
+        "defaults": {
+          "light": "#2e7d328c",
+          "dark": "#8ec07c80",
+          "highContrast": "#8ec07c80",
+          "highContrastLight": "#2e7d328c"
+        }
+      },
+      {
+        "id": "acl2Session.bar.conditional",
+        "description": "The status column's bar for a conditional form, and the same bar drawn inline where two forms share a line. Also its mark in the overview ruler.",
+        "defaults": {
+          "light": "#d4ac0dbf",
+          "dark": "#ffd633b3",
+          "highContrast": "#ffd633b3",
+          "highContrastLight": "#d4ac0dbf"
+        }
+      },
+      {
+        "id": "acl2Session.bar.skipped",
+        "description": "The status column's bar for a skipped form, and the same bar drawn inline where two forms share a line. Also its mark in the overview ruler.",
+        "defaults": {
+          "light": "#c62828b3",
+          "dark": "#fb4934a6",
+          "highContrast": "#fb4934a6",
+          "highContrastLight": "#c62828b3"
+        }
+      },
+      {
+        "id": "acl2Session.bar.failed",
+        "description": "The status column's bar for a failed form, and the same bar drawn inline where two forms share a line. Also its mark in the overview ruler.",
+        "defaults": {
+          "light": "#c62828b3",
+          "dark": "#fb4934a6",
+          "highContrast": "#fb4934a6",
+          "highContrastLight": "#c62828b3"
+        }
+      },
+      {
+        "id": "acl2Session.wash.admitted",
+        "description": "The background wash over a admitted form, in the 'wash' decoration mode.",
+        "defaults": {
+          "light": "#c8e6c9",
+          "dark": "#1c2e15",
+          "highContrast": "#1c2e15",
+          "highContrastLight": "#c8e6c9"
+        }
+      },
+      {
+        "id": "acl2Session.wash.conditional",
+        "description": "The background wash over a conditional form, in the 'wash' decoration mode.",
+        "defaults": {
+          "light": "#d9e8f5",
+          "dark": "#2c2908",
+          "highContrast": "#2c2908",
+          "highContrastLight": "#d9e8f5"
+        }
+      },
+      {
+        "id": "acl2Session.wash.skipped",
+        "description": "The background wash over a skipped form, in the 'wash' decoration mode.",
+        "defaults": {
+          "light": "#ffb3b3",
+          "dark": "#3d1e19",
+          "highContrast": "#3d1e19",
+          "highContrastLight": "#ffb3b3"
+        }
+      },
+      {
+        "id": "acl2Session.wash.failed",
+        "description": "The background wash over a failed form, in the 'wash' decoration mode.",
+        "defaults": {
+          "light": "#ffb3b3",
+          "dark": "#3d1e19",
+          "highContrast": "#3d1e19",
+          "highContrastLight": "#ffb3b3"
+        }
+      },
+      {
+        "id": "acl2Session.wash.running",
+        "description": "The background wash over a running form, in the 'wash' decoration mode.",
+        "defaults": {
+          "light": "#fff59d",
+          "dark": "#1a2841",
+          "highContrast": "#1a2841",
+          "highContrastLight": "#fff59d"
+        }
       }
     ],
     "commands": [
@@ -287,6 +397,74 @@
           "default": 4,
           "minimum": 1,
           "description": "Parallel jobs for cert.pl (-j) when certifying."
+        },
+        "acl2-session.colors": {
+          "type": "object",
+          "default": {},
+          "markdownDescription": "Override the status colours with concrete values, per status.\n\nMost customisation does not need this: the wash, the inline bar and the overview ruler are theme colours, so `workbench.colorCustomizations` on `acl2Session.bar.*` and `acl2Session.wash.*` already restyles them, follows the active theme, and has high-contrast variants.\n\nThe **gutter bar cannot** be a theme colour: it is drawn as an image, and an extension has no way to read a theme colour back as a value. Setting a colour here is what reaches it — the gutter icon is generated from the value — and the same value then drives the inline bar, the wash and the ruler, so the status column cannot end up disagreeing with itself.\n\nStatuses: `pending`, `running`, `admitted`, `conditional`, `skipped`, `failed`. Any CSS colour: `#fb4934`, `#fb493480`, `rgba(251, 73, 52, 0.65)`.",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "bar": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "description": "One colour for both light and dark themes."
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "light": {
+                        "type": "string"
+                      },
+                      "dark": {
+                        "type": "string"
+                      }
+                    },
+                    "additionalProperties": false,
+                    "description": "A colour per theme kind."
+                  }
+                ],
+                "description": "The status column bar, the inline bar, and the ruler mark."
+              },
+              "wash": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "description": "One colour for both light and dark themes."
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "light": {
+                        "type": "string"
+                      },
+                      "dark": {
+                        "type": "string"
+                      }
+                    },
+                    "additionalProperties": false,
+                    "description": "A colour per theme kind."
+                  }
+                ],
+                "description": "The background wash, in the 'wash' decoration mode."
+              }
+            },
+            "additionalProperties": false
+          },
+          "examples": [
+            {
+              "failed": {
+                "bar": "#ff5555"
+              },
+              "running": {
+                "bar": {
+                  "light": "#0057b7",
+                  "dark": "#7fb8ff"
+                }
+              }
+            }
+          ]
         }
       }
     },

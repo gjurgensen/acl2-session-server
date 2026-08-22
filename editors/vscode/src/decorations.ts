@@ -37,7 +37,17 @@ import * as vscode from 'vscode';
 import { UnitState } from './protocol';
 import { charOffset } from './positions';
 import { paintMap, Span } from './paintmap';
-import { Bar, BARS, INLINE_BAR } from './bars';
+import {
+  Bar,
+  BARS,
+  ColorSetting,
+  INLINE_BAR,
+  WASHES,
+  barColorId,
+  forTheme,
+  gutterSvg,
+  washColorId,
+} from './bars';
 
 export type DecorationMode = 'minimal' | 'wash';
 
@@ -47,13 +57,18 @@ export interface DecorationOptions {
   gutterAdmitted: boolean;
 }
 
-const WASH_COLORS: Record<string, { light: string; dark: string }> = {
-  admitted: { light: '#c8e6c9', dark: '#1c2e15' },
-  conditional: { light: '#d9e8f5', dark: '#2c2908' },
-  skipped: { light: '#ffb3b3', dark: '#3d1e19' },
-  failed: { light: '#ffb3b3', dark: '#3d1e19' },
-  running: { light: '#fff59d', dark: '#1a2841' },
-};
+/**
+ * A colour for one surface of one status, from the first source that has one.
+ *
+ * An override from the setting wins, because it is the only thing a user
+ * wrote by hand; otherwise the contributed theme colour, which is what makes
+ * a theme and `workbench.colorCustomizations` work. There is no third case
+ * here -- the shipped literals reach only the gutter icon, which is an image
+ * and takes no colour at all. See `gutterType`.
+ */
+function pick(override: string | undefined, id: string): string | vscode.ThemeColor {
+  return override !== undefined ? override : new vscode.ThemeColor(id);
+}
 
 /**
  * The gutter bar, drawn between two forms that share a line.
@@ -75,8 +90,11 @@ const WASH_COLORS: Record<string, { light: string; dark: string }> = {
  * `bars.ts` holds it once and `paintmap.mjs` asserts it still matches
  * `media/`.
  */
-function inlineBarType(bar: Bar): vscode.TextEditorDecorationType {
-  const mark = (color: string) => ({
+function inlineBarType(
+  light: string | vscode.ThemeColor,
+  dark: string | vscode.ThemeColor
+): vscode.TextEditorDecorationType {
+  const mark = (color: string | vscode.ThemeColor) => ({
     before: {
       // A space, not an empty string: an empty attachment has no box for a
       // background to fill. `width` overrides what the space would take.
@@ -88,28 +106,38 @@ function inlineBarType(bar: Bar): vscode.TextEditorDecorationType {
     },
   });
   return vscode.window.createTextEditorDecorationType({
-    light: mark(bar.light),
-    dark: mark(bar.dark),
+    light: mark(light),
+    dark: mark(dark),
   });
 }
 
+/**
+ * The gutter cell: the shipped SVG, or one generated for an overridden colour.
+ *
+ * The generated one travels as a `data:` URI rather than a written file --
+ * there is nothing to clean up afterwards, and the icon changes whenever the
+ * setting does. It is the *only* path in this module that a `ThemeColor`
+ * cannot serve, which is the whole reason the setting exists.
+ */
 function gutterType(
   context: vscode.ExtensionContext,
-  icon: string,
-  ruler?: string
+  bar: Bar,
+  override: { light?: string; dark?: string },
+  ruler: string | vscode.ThemeColor
 ): vscode.TextEditorDecorationType {
+  const icon = (theme: 'light' | 'dark'): vscode.Uri | string => {
+    const c = override[theme];
+    return c === undefined
+      ? context.asAbsolutePath(`media/${bar.icon}-${theme}.svg`)
+      : vscode.Uri.parse(
+          `data:image/svg+xml;base64,${Buffer.from(gutterSvg(c), 'utf8').toString('base64')}`
+        );
+  };
   return vscode.window.createTextEditorDecorationType({
-    ...(ruler
-      ? { overviewRulerLane: vscode.OverviewRulerLane.Left, overviewRulerColor: ruler }
-      : {}),
-    light: {
-      gutterIconPath: context.asAbsolutePath(`media/${icon}-light.svg`),
-      gutterIconSize: 'contain',
-    },
-    dark: {
-      gutterIconPath: context.asAbsolutePath(`media/${icon}-dark.svg`),
-      gutterIconSize: 'contain',
-    },
+    overviewRulerLane: vscode.OverviewRulerLane.Left,
+    overviewRulerColor: ruler,
+    light: { gutterIconPath: icon('light'), gutterIconSize: 'contain' },
+    dark: { gutterIconPath: icon('dark'), gutterIconSize: 'contain' },
   });
 }
 
@@ -121,25 +149,54 @@ export class Decorations {
   private gutterBars = new Map<string, vscode.TextEditorDecorationType>();
   /** The same bar inline, for a form with no gutter cell to claim. */
   private inlineBars = new Map<string, vscode.TextEditorDecorationType>();
-  private target: vscode.TextEditorDecorationType;
-  private unreadable: vscode.TextEditorDecorationType;
+  private target!: vscode.TextEditorDecorationType;
+  private unreadable!: vscode.TextEditorDecorationType;
 
-  constructor(context: vscode.ExtensionContext) {
-    for (const [status, c] of Object.entries(WASH_COLORS)) {
-      const ruler =
-        status === 'conditional'
-          ? 'rgba(212, 172, 13, 0.5)'
-          : status === 'skipped' || status === 'failed'
-            ? 'rgba(220, 60, 60, 0.6)'
-            : status === 'running'
-              ? 'rgba(255, 204, 51, 0.6)'
-              : undefined;
+  constructor(private readonly context: vscode.ExtensionContext) {
+    this.build();
+  }
+
+  /**
+   * Rebuild every type from the settings as they stand now.
+   *
+   * A decoration type carries its colours from the moment it is created, so
+   * a changed setting means new types -- there is nothing to mutate. Callers
+   * must re-apply afterwards: disposing a type removes what it was drawing.
+   */
+  reload(): void {
+    for (const t of this.everyType()) {
+      t.dispose();
+    }
+    this.washes.clear();
+    this.washParts.clear();
+    this.gutterBars.clear();
+    this.inlineBars.clear();
+    this.build();
+  }
+
+  private build(): void {
+    const set =
+      vscode.workspace.getConfiguration('acl2-session').get<ColorSetting>('colors') ?? {};
+    const over = (status: string, surface: 'bar' | 'wash', theme: 'light' | 'dark') =>
+      forTheme(set[status]?.[surface], theme);
+    // The ruler follows the *bar*, whatever the surface: it is the same
+    // status seen from the scrollbar, and an override that recoloured the
+    // column while leaving the ruler behind would be half a change.
+    const rulerOf = (status: string) =>
+      pick(over(status, 'bar', 'dark') ?? over(status, 'bar', 'light'), barColorId(status));
+
+    for (const status of Object.keys(WASHES)) {
+      // Admitted alone gets no ruler mark: on a book that goes green it
+      // would be a solid bar down the scrollbar saying nothing.
       const paint = {
-        ...(ruler
-          ? { overviewRulerLane: vscode.OverviewRulerLane.Left, overviewRulerColor: ruler }
-          : {}),
-        light: { backgroundColor: c.light },
-        dark: { backgroundColor: c.dark },
+        ...(status === 'admitted'
+          ? {}
+          : {
+              overviewRulerLane: vscode.OverviewRulerLane.Left,
+              overviewRulerColor: rulerOf(status),
+            }),
+        light: { backgroundColor: pick(over(status, 'wash', 'light'), washColorId(status)) },
+        dark: { backgroundColor: pick(over(status, 'wash', 'dark'), washColorId(status)) },
       };
       // Two types, one colour. Whole-line is the look this mode is for --
       // the wash reaching the edge of the viewport is what makes a form read
@@ -152,15 +209,28 @@ export class Decorations {
       );
       this.washParts.set(status, vscode.window.createTextEditorDecorationType(paint));
     }
+
     // The bars: pending neutral gray, running BLUE (true blue, hue 262),
     // admitted green, conditional YELLOW, red for the reds.
     for (const bar of BARS) {
-      this.gutterBars.set(bar.icon, gutterType(context, bar.icon, bar.ruler));
-      this.inlineBars.set(bar.icon, inlineBarType(bar));
+      // A bar can speak for two statuses (skipped and failed share one), and
+      // an override on either recolours it.
+      const named = bar.statuses.find((st) => set[st]?.bar !== undefined) ?? bar.statuses[0];
+      const light = over(named, 'bar', 'light');
+      const dark = over(named, 'bar', 'dark');
+      this.gutterBars.set(
+        bar.icon,
+        gutterType(this.context, bar, { light, dark }, rulerOf(named))
+      );
+      this.inlineBars.set(
+        bar.icon,
+        inlineBarType(pick(light, barColorId(named)), pick(dark, barColorId(named)))
+      );
     }
+
     // The held-target indicator: a Q.E.D.-style box.
     this.target = vscode.window.createTextEditorDecorationType({
-      after: { contentText: ' □', color: '#fabd2f', fontWeight: 'bold' },
+      after: { contentText: ' \u25a1', color: '#fabd2f', fontWeight: 'bold' },
     });
     // The unreadable tail, from the paren that never closes to end of file.
     // Deliberately the same red as a failure: both mean "none of this is
@@ -169,9 +239,9 @@ export class Decorations {
     this.unreadable = vscode.window.createTextEditorDecorationType({
       isWholeLine: true,
       overviewRulerLane: vscode.OverviewRulerLane.Left,
-      overviewRulerColor: 'rgba(220, 60, 60, 0.6)',
-      light: { backgroundColor: WASH_COLORS.failed.light },
-      dark: { backgroundColor: WASH_COLORS.failed.dark },
+      overviewRulerColor: rulerOf('failed'),
+      light: { backgroundColor: pick(over('failed', 'wash', 'light'), washColorId('failed')) },
+      dark: { backgroundColor: pick(over('failed', 'wash', 'dark'), washColorId('failed')) },
     });
   }
 

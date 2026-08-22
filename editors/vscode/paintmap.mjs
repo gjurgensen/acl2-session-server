@@ -119,11 +119,12 @@ const unit = (index, line_start, col_start, line_end, col_end, status = 'admitte
 
 check('an empty book paints nothing', paintMap([]), []);
 
-// The inline bar is a coloured rectangle and the gutter bar is an SVG, so the
-// colour exists twice: once as a value in `bars.ts` and once as a fill in
-// `media/`. Nothing in the type system connects them, and an earlier version
-// of this feature drifted apart exactly here -- a hand-copied table that
-// could not notice if the files moved. So compare them.
+// The same colour now lives in three places, none of which the type system
+// connects: a value in `bars.ts`, a fill in `media/*.svg` for the gutter
+// icon, and a contributed theme-colour default in `package.json`. An earlier
+// version of this feature drifted apart at exactly the first two -- a
+// hand-copied table with no way to notice if the files moved. So compare all
+// three.
 {
   const { BARS } = require('./out/bars.js');
   const { readFileSync } = require('fs');
@@ -144,6 +145,48 @@ check('an empty book paints nothing', paintMap([]), []);
         `rgba(${r}, ${g}, ${b}, ${alpha[1]})`
       );
     }
+  }
+
+  // And the contributed defaults, which are the same colours as #rrggbbaa.
+  // Compared channel by channel with a tolerance of one, because the alpha
+  // makes a round trip through a byte and 0.5 has no exact eighth-bit form.
+  const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+  const byId = new Map(pkg.contributes.colors.map((c) => [c.id, c.defaults]));
+  const channels = (hex) =>
+    [0, 2, 4, 6].map((i) => parseInt(hex.slice(1 + i, 3 + i), 16)).filter((n) => !isNaN(n));
+  const rgbaChannels = (c) => {
+    const m = /rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([0-9.]+))?\)/.exec(c);
+    return m
+      ? [+m[1], +m[2], +m[3], Math.round(parseFloat(m[4] ?? '1') * 255)]
+      : channels(c).concat(channels(c).length === 3 ? [255] : []);
+  };
+  for (const bar of BARS) {
+    for (const status of bar.statuses) {
+      const d = byId.get(`acl2Session.bar.${status}`);
+      if (!d) {
+        failures++;
+        console.log(`FAIL: package.json contributes no acl2Session.bar.${status}`);
+        continue;
+      }
+      for (const theme of ['light', 'dark']) {
+        const want = rgbaChannels(bar[theme]);
+        const got = rgbaChannels(d[theme]);
+        const near = want.length === got.length && want.every((n, i) => Math.abs(n - got[i]) <= 1);
+        if (!near) {
+          failures++;
+          console.log(`FAIL: acl2Session.bar.${status} (${theme}) is ${d[theme]}, not ${bar[theme]}`);
+        }
+      }
+    }
+  }
+  check('every bar has a contributed default', true, true);
+
+  // The washes only ever existed as values, but they are contributed now too.
+  const { WASHES } = require('./out/bars.js');
+  for (const [status, c] of Object.entries(WASHES)) {
+    const d = byId.get(`acl2Session.wash.${status}`);
+    check(`wash.${status} light is contributed`, d && d.light, c.light);
+    check(`wash.${status} dark is contributed`, d && d.dark, c.dark);
   }
 }
 

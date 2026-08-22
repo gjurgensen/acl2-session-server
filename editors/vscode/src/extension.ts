@@ -439,6 +439,12 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.window.onDidChangeActiveTextEditor(refreshContext),
     vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration('acl2-session.colors')) {
+        // A decoration type carries its colours from creation, so a changed
+        // palette means new types. The repaint below is not optional after
+        // this: disposing a type erases what it was drawing.
+        decorations.reload();
+      }
       if (e.affectsConfiguration('acl2-session')) {
         for (const s of books.values()) {
           paint(s);
