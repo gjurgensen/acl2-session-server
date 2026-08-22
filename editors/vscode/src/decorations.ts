@@ -1,6 +1,6 @@
 // The status column and the washes: two renderers over the same paint map.
 //
-// `minimal` (the default) is a continuous gutter status column of bars, the
+// `gutter` (the default) is a continuous gutter status column of bars, the
 // Dafny shape, and nothing else -- the buffer text stays entirely unmarked.
 // Gray over lines queued but not yet processed (the load-bearing signal on
 // a book that takes minutes), blue over the form being proved, green over
@@ -55,7 +55,7 @@ import {
 } from './bars';
 import { themeColors } from './highlight';
 
-export type DecorationMode = 'minimal' | 'wash';
+export type DecorationMode = 'gutter' | 'wash';
 
 export interface DecorationOptions {
   mode: DecorationMode;

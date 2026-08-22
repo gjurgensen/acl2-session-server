@@ -9,7 +9,7 @@
 // client state, sent with every update, so retraction holds exactly as
 // prescribed.
 //
-// Rendering modes: `minimal` marks pending/running work in the
+// Rendering modes: `gutter` marks pending/running work in the
 // gutter, admitted forms with a checkmark, reds as head-line diagnostics,
 // and keeps only the conditional wash; `wash` draws whole-form washes,
 // reds included, and no diagnostics. One treatment per fact, never two.
@@ -188,7 +188,7 @@ let channel: vscode.OutputChannel;
 let windowIcon: { light: vscode.Uri; dark: vscode.Uri };
 
 function mode(): DecorationMode {
-  return vscode.workspace.getConfiguration('acl2-session').get<DecorationMode>('decorations', 'minimal');
+  return vscode.workspace.getConfiguration('acl2-session').get<DecorationMode>('decorations', 'gutter');
 }
 
 function gutterAdmitted(): boolean {
