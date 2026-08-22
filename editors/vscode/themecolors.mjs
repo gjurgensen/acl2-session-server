@@ -152,6 +152,14 @@ for (const kind of ['light', 'dark']) {
   check('and that bar is the running one', markFor('gutter', 'running').icon, 'running');
   check('wash draws no marks at all', markFor('wash', 'running'), undefined);
 
+  // A buffer that will not lex marks its whole tail, but which mark is still
+  // the mode's to choose -- it used to be a red wash in all three, which put
+  // a wash in the two modes built around not having one.
+  const { unreadableMark } = require('./out/bars.js');
+  check('wash washes the unreadable tail', unreadableMark('wash'), 'wash');
+  check('gutter marks it in the status column', unreadableMark('gutter'), 'bar');
+  check('minimal leaves it to the diagnostic', unreadableMark('minimal'), undefined);
+
   // The spinner turns, where the bar can only pulse -- a bar is tiled down
   // every line of the form and would march in step; this is one icon.
   const spun = spinnerSvg('#cccccc');

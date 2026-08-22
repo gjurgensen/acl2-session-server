@@ -47,6 +47,7 @@ import {
   firstDefined,
   gutterSvg,
   svgCanPaint,
+  unreadableMark,
   washColorId,
   withAlpha,
   withThemeHue,
@@ -167,6 +168,14 @@ export class Decorations {
   private spinner!: vscode.TextEditorDecorationType;
   private target!: vscode.TextEditorDecorationType;
   private unreadable!: vscode.TextEditorDecorationType;
+  /**
+   * The same tail in the status column, for the mode that speaks in bars.
+   *
+   * Its own type rather than the `red` one the failed forms use: setting a
+   * decoration type replaces every range it holds, so sharing would mean
+   * whichever of the two painted last erased the other.
+   */
+  private unreadableBar!: vscode.TextEditorDecorationType;
 
   constructor(private readonly context: vscode.ExtensionContext) {
     this.build();
@@ -347,6 +356,12 @@ export class Decorations {
     // Deliberately the same red as a failure: both mean "none of this is
     // going in". The hover says which, because the remedies are nothing
     // alike -- one wants a proof, the other wants a bracket.
+    this.unreadableBar = gutterType(
+      this.context,
+      BARS.find((b) => b.icon === 'red') ?? BARS[BARS.length - 1],
+      {},
+      rulerOf('failed')
+    );
     this.unreadable = vscode.window.createTextEditorDecorationType({
       isWholeLine: true,
       overviewRulerLane: vscode.OverviewRulerLane.Left,
@@ -364,20 +379,32 @@ export class Decorations {
    * the reader stopped at that paren, so nothing below it has been seen, and
    * marking only the opening line would suggest the rest is merely waiting.
    */
-  applyUnreadable(editor: vscode.TextEditor, line: number | null, why?: string): void {
-    if (line === null) {
+  applyUnreadable(
+    editor: vscode.TextEditor,
+    line: number | null,
+    mode: DecorationMode,
+    why?: string
+  ): void {
+    const how = line === null ? undefined : unreadableMark(mode);
+    if (line === null || how === undefined) {
+      // Both, always: the mode may have just changed, and the mark it used to
+      // wear has to come off even though nothing about the file did.
       editor.setDecorations(this.unreadable, []);
+      editor.setDecorations(this.unreadableBar, []);
       return;
     }
     const doc = editor.document;
     const from = Math.max(0, Math.min(line, doc.lineCount) - 1);
     const last = Math.max(from, doc.lineCount - 1);
-    editor.setDecorations(this.unreadable, [
+    const range = new vscode.Range(from, 0, last, doc.lineAt(last).range.end.character);
+    const marks = [
       {
-        range: new vscode.Range(from, 0, last, doc.lineAt(last).range.end.character),
+        range,
         hoverMessage: `ACL2: ${why ?? 'the file cannot be read from here'} \u2014 nothing below this point has been checked.`,
       },
-    ]);
+    ];
+    editor.setDecorations(this.unreadable, how === 'wash' ? marks : []);
+    editor.setDecorations(this.unreadableBar, how === 'bar' ? marks : []);
   }
 
   apply(editor: vscode.TextEditor, units: UnitState[], opts: DecorationOptions): void {
@@ -517,6 +544,7 @@ export class Decorations {
       ...this.washParts.values(),
       ...this.gutterBars.values(),
       ...this.inlineBars.values(),
+      this.unreadableBar,
       this.target,
     ];
   }

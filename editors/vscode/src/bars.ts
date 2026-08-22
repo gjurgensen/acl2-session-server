@@ -82,6 +82,32 @@ export function barFor(mode: DecorationMode, status: string): string | undefined
   }
 }
 
+/**
+ * How a buffer that stopped being readable is shown, per mode.
+ *
+ * A stray bracket is not a failed form -- nothing below it has been *read*,
+ * let alone checked -- so it marks the whole tail rather than one form. But it
+ * is still a fact about the file, and the rule that each mode marks each fact
+ * once applies to it as much as to a failure: a wash where washes are the
+ * idiom, the status column where that is, and in `minimal` nothing at all,
+ * because what is wrong there is a diagnostic. The diagnostic is published in
+ * every mode, exactly as a failed form's is.
+ *
+ * This used to be a red wash in all three, which was not a decision -- the
+ * wash was written when the wash *was* how failure looked, and the modes
+ * arrived afterwards without it.
+ */
+export function unreadableMark(mode: DecorationMode): 'wash' | 'bar' | undefined {
+  switch (mode) {
+    case 'wash':
+      return 'wash';
+    case 'gutter':
+      return 'bar';
+    default:
+      return undefined;
+  }
+}
+
 /** What a status is drawn as: a bar down the form, or a spinner at its head. */
 export type Mark = { kind: 'bar'; icon: string } | { kind: 'spinner' };
 

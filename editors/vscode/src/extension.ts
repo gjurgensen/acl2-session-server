@@ -108,6 +108,13 @@ interface BookSession {
   /** The held barrier; null checks the whole book. */
   target: Held | null;
   lastState?: StateEvent;
+  /**
+   * Where the reader stopped, when it did: the line of the bracket that is
+   * never closed. Held rather than painted and forgotten, because how it is
+   * shown depends on the decoration mode, and that can change under it.
+   */
+  unreadableFrom?: number;
+  unreadableWhy?: string;
   /** Latest envelope per unit index, for diagnostics, form view and output view. */
   unitEvents: Map<number, UnitEvent>;
   /**
@@ -2042,14 +2049,23 @@ function onSettled(p: SettledEvent): void {
   // it to the end of the file, and take the paint off again on any settle
   // that is not a split error -- which is how it clears the moment the
   // bracket is typed, without waiting for anything to be admitted.
-  markUnreadable(s, p.reason === 'split_error' ? (p.line ?? null) : null, p.message);
+  const stopped = p.reason === 'split_error' ? p.line : undefined;
+  s.unreadableFrom = stopped;
+  s.unreadableWhy = stopped === undefined ? undefined : p.message;
+  markUnreadable(s);
+  updateProblems(s);
 }
 
-/** Paint (or clear) the tail of a buffer the reader could not get through. */
-function markUnreadable(s: BookSession, line: number | null, why?: string): void {
+/**
+ * Paint (or clear) the tail of a buffer the reader could not get through.
+ *
+ * Reads the mode rather than being told it, so that the one caller who cares
+ * about a *changed* mode -- `paint` -- needs to know nothing about this.
+ */
+function markUnreadable(s: BookSession): void {
   for (const editor of vscode.window.visibleTextEditors) {
     if (editor.document === s.doc) {
-      decorations.applyUnreadable(editor, line, why);
+      decorations.applyUnreadable(editor, s.unreadableFrom ?? null, mode(), s.unreadableWhy);
     }
   }
 }
@@ -2093,6 +2109,22 @@ function updateProblems(s: BookSession): void {
   }
   const doc = s.doc;
   const out: vscode.Diagnostic[] = [];
+  // A bracket that never closes, first: it is the reason nothing below it has
+  // a status to report, so it belongs above whatever statuses survive. It is
+  // reported in every mode, exactly as a failed form is -- and in `minimal`
+  // it is the only mark there is.
+  if (s.unreadableFrom !== undefined && s.unreadableFrom <= doc.lineCount) {
+    const line = Math.max(0, s.unreadableFrom - 1);
+    const text = doc.lineAt(line).text;
+    const d = new vscode.Diagnostic(
+      new vscode.Range(line, 0, line, Math.max(1, text.length)),
+      `ACL2: ${s.unreadableWhy ?? 'the file cannot be read from here'} \u2014 ` +
+        'nothing below this point has been checked.',
+      vscode.DiagnosticSeverity.Error
+    );
+    d.source = 'ACL2';
+    out.push(d);
+  }
   for (const u of s.lastState?.units ?? []) {
     if (!isProblem(u.status) || u.line_start > doc.lineCount) {
       continue;
@@ -2134,6 +2166,12 @@ function paint(s: BookSession): void {
     if (editor.document === s.doc) {
       decorations.apply(editor, s.lastState.units, opts);
       decorations.applyTarget(editor, barrierPos(s));
+      decorations.applyUnreadable(
+        editor,
+        s.unreadableFrom ?? null,
+        opts.mode,
+        s.unreadableWhy
+      );
     }
   }
 }

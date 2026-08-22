@@ -19,6 +19,11 @@ form status is then shown is `acl2-session.decorations`:
 Each mode marks each fact once, which is the rule they are built around: never
 a bar *and* a wash, never a wash *and* a squiggle.
 
+A buffer that will not lex — a stray bracket — marks its whole tail rather
+than one form, because nothing below the bracket has been *read*, let alone
+checked. Which mark is still the mode's: a wash in `wash`, the status column
+in `gutter`, and in `minimal` the diagnostic alone.
+
 Failed and skipped forms are reported in the **Problems** view in every mode,
 which is also where the squiggle comes from — VSCode gives no way to have the
 entry without the mark. `acl2-session.problems` turns both off. In `minimal`
