@@ -64,6 +64,17 @@ export interface IndentOptions {
    * (`indent-def-beginning-functions-like-defun`) and the books bear it out.
    */
   defPrefix?: boolean;
+  /**
+   * What a line with nothing on it should get.
+   *
+   * `empty` for a whole-buffer pass: a blank line carries no structure and
+   * trailing spaces on it are litter. `indent` for the keystroke path, and
+   * it is the whole of what pressing Enter means -- at the moment the
+   * on-type provider is asked, the new line holds a copy of the previous
+   * line's whitespace and nothing else, so treating it as blank is treating
+   * every Enter as nothing to do.
+   */
+  blankLines?: 'empty' | 'indent';
 }
 
 const DEFAULTS: Required<Omit<IndentOptions, 'forms'>> = {
@@ -71,6 +82,7 @@ const DEFAULTS: Required<Omit<IndentOptions, 'forms'>> = {
   distinguished: 2,
   firstArg: 1,
   defPrefix: true,
+  blankLines: 'empty',
 };
 
 /**
@@ -791,7 +803,10 @@ export function plannedIndent(
 ): number | undefined {
   const nl = text.indexOf('\n', lineStart);
   const line = text.slice(lineStart, nl === -1 ? text.length : nl);
-  if (!line.trim() || keepsOwnColumn(line)) {
+  if (keepsOwnColumn(line)) {
+    return undefined;
+  }
+  if (!line.trim() && (opts.blankLines ?? DEFAULTS.blankLines) === 'empty') {
     return undefined;
   }
   const from = enclosingStart(starts, lineStart);

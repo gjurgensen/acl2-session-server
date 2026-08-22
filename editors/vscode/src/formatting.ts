@@ -18,7 +18,7 @@
 // can be measured against the books; this is the glue that carries it.
 
 import * as vscode from 'vscode';
-import { plannedIndent, reindent, topLevelStarts } from './indent';
+import { IndentOptions, plannedIndent, reindent, topLevelStarts } from './indent';
 
 /**
  * Where each top-level form starts, remembered per document version.
@@ -53,9 +53,13 @@ function startsOf(doc: vscode.TextDocument): number[] {
  * The decision is `plannedIndent`'s, in `indent.ts`, where it is measured.
  * What is left here is the editor's coordinates.
  */
-function indentLineEdit(doc: vscode.TextDocument, lineNo: number): vscode.TextEdit | undefined {
+function indentLineEdit(
+  doc: vscode.TextDocument,
+  lineNo: number,
+  opts: IndentOptions = {}
+): vscode.TextEdit | undefined {
   const line = doc.lineAt(lineNo);
-  const want = plannedIndent(doc.getText(), doc.offsetAt(line.range.start), startsOf(doc));
+  const want = plannedIndent(doc.getText(), doc.offsetAt(line.range.start), startsOf(doc), opts);
   if (want === undefined) {
     return undefined;
   }
@@ -115,11 +119,13 @@ function indentRangeEdits(doc: vscode.TextDocument, first: number, last: number)
 
 const onType: vscode.OnTypeFormattingEditProvider = {
   provideOnTypeFormattingEdits(doc, position, ch) {
-    // Enter puts the cursor on a new line whose indentation is whatever
-    // `editor.autoIndent` left there; a closing delimiter has just changed
-    // what the current line belongs to. Both are answered the same way.
+    // Enter puts the cursor on a line that so far holds only a copy of the
+    // previous line's whitespace, so this is the one caller that must treat
+    // an empty line as something to indent rather than something to leave
+    // alone. A closing delimiter arrives on a line with content on it, and
+    // only changes which form that content belongs to.
     void ch;
-    const e = indentLineEdit(doc, position.line);
+    const e = indentLineEdit(doc, position.line, { blankLines: 'indent' });
     return e ? [e] : [];
   },
 };

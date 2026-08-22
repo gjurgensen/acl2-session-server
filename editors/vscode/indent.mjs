@@ -170,12 +170,12 @@ ind('an unclosed form still indents what follows it', `
 // What the editor's providers ask, checked here rather than through a
 // stubbed editor: `formatting.ts` holds no decision of its own, so these are
 // the decisions it makes.
-function plan(what, source, line, want) {
+function plan(what, source, line, want, opts) {
   const text = source.replace(/^\n/, '');
   const starts = topLevelStarts(text);
   let off = 0;
   for (let i = 0; i < line; i++) off = text.indexOf('\n', off) + 1;
-  const got = plannedIndent(text, off, starts);
+  const got = plannedIndent(text, off, starts, opts);
   const ok = got === want;
   if (!ok) unitBad++;
   console.log(`${ok ? 'ok' : 'FAIL'}: ${what}${ok ? '' : ` (got ${got}, want ${want})`}`);
@@ -199,6 +199,21 @@ plan('a lone-semicolon comment is not planned at all', BOOK, 4, undefined);
 plan('a blank line is not planned', BOOK, 6, undefined);
 plan('a line inside a string is not planned', BOOK, 9, undefined);
 plan('a top-level form is planned at column zero', BOOK, 2, 0);
+
+// Pressing Enter. This is what the buffer holds at the instant the on-type
+// provider is asked: `editor.autoIndent: keep` has copied the previous
+// line's whitespace onto the new line, and there is nothing else on it. The
+// whole-buffer pass wants such a line emptied; this caller wants it
+// indented, and getting that backwards makes Enter do nothing whatsoever.
+const AFTER_ENTER = `(defun f (x)
+  (+ x 1)
+  `;
+plan('Enter inside a form lands the cursor at the body indent',
+     AFTER_ENTER, 2, 2, { blankLines: 'indent' });
+plan('and the same line is left alone by a whole-buffer pass',
+     AFTER_ENTER, 2, undefined);
+plan('Enter after a finished form lands at column zero',
+     `(defun f (x) 1)\n`, 1, 0, { blankLines: 'indent' });
 
 {
   const starts = [0, 100, 250];
