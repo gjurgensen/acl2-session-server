@@ -33,6 +33,61 @@
 // Kept free of `vscode`, like `positions.ts` and `paintmap.ts`, so all of it
 // is testable without an editor.
 
+/** How unit statuses are rendered. See each value's `enumDescription`. */
+export type DecorationMode = 'gutter' | 'wash' | 'minimal';
+
+/**
+ * Which bar a status wears in a given mode, if it wears one.
+ *
+ * The whole difference between the three modes, in one function, and away from
+ * the editor so it can be argued with and tested. Each mode marks each fact
+ * exactly once -- that rule is what keeps them from becoming a pile of toggles:
+ *
+ * - `gutter` gives every status a bar and leaves the text alone.
+ * - `wash` gives every status a background and no bars.
+ * - `minimal` marks only what is *happening* or *wrong*: a bar for the form
+ *   being proved, and nothing else. An admitted form is unremarkable, a
+ *   conditional one is understood from the failure above it, and a form not
+ *   reached yet is understood from being below the running one. What is wrong
+ *   is a diagnostic, which is not a bar and does not belong here.
+ *
+ * `gutterAdmitted` is the one place a reader can disagree with `gutter`: off,
+ * the absence of a bar means admitted, and the column carries only work in
+ * progress and trouble.
+ */
+export function barFor(
+  mode: DecorationMode,
+  status: string,
+  gutterAdmitted: boolean
+): string | undefined {
+  if (mode === 'wash') {
+    return undefined;
+  }
+  if (mode === 'minimal') {
+    return status === 'running' ? 'running' : undefined;
+  }
+  switch (status) {
+    case 'pending':
+      return 'pending';
+    case 'running':
+      return 'running';
+    case 'admitted':
+      return gutterAdmitted ? 'admitted' : undefined;
+    case 'conditional':
+      return gutterAdmitted ? 'cond' : undefined;
+    case 'skipped':
+    case 'failed':
+      return 'red';
+    default:
+      return undefined;
+  }
+}
+
+/** Whether a status is worth a line in the Problems view, and a squiggle. */
+export function isProblem(status: string): boolean {
+  return status === 'failed' || status === 'skipped';
+}
+
 export interface Bar {
   /** The `media/<icon>-{light,dark}.svg` basename, and the map key. */
   icon: string;

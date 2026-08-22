@@ -107,5 +107,55 @@ for (const kind of ['light', 'dark']) {
     check(`the shipped running-${theme} icon pulses too`, /@keyframes/.test(shipped), true);
   }}
 
+// The three modes, as one table. Each marks each fact once: `gutter` draws
+// every status and leaves the text alone, `wash` draws backgrounds and no
+// bars, `minimal` draws only the form being proved and leaves what is *wrong*
+// to a diagnostic.
+{
+  const { barFor, isProblem } = require('./out/bars.js');
+  const ALL = ['pending', 'running', 'admitted', 'conditional', 'skipped', 'failed'];
+
+  const expect = {
+    gutter:  { pending: 'pending', running: 'running', admitted: 'admitted',
+               conditional: 'cond', skipped: 'red', failed: 'red' },
+    minimal: { pending: undefined, running: 'running', admitted: undefined,
+               conditional: undefined, skipped: undefined, failed: undefined },
+    wash:    { pending: undefined, running: undefined, admitted: undefined,
+               conditional: undefined, skipped: undefined, failed: undefined },
+  };
+  for (const mode of Object.keys(expect)) {
+    for (const st of ALL) {
+      check(`${mode}: ${st}`, barFor(mode, st, true), expect[mode][st]);
+    }
+  }
+
+  // The one place a reader can disagree with `gutter`: with admitted bars off,
+  // absence means admitted and the column carries only work and trouble.
+  check('gutter, admitted bars off: admitted', barFor('gutter', 'admitted', false), undefined);
+  check('gutter, admitted bars off: conditional', barFor('gutter', 'conditional', false), undefined);
+  check('gutter, admitted bars off: failed still marked', barFor('gutter', 'failed', false), 'red');
+  // That setting is about the gutter, and minimal has no admitted bar to hide.
+  check('minimal is unmoved by it', barFor('minimal', 'running', false), 'running');
+
+  // Every bar the table can name has to exist, or a status silently loses its
+  // mark at the point of drawing.
+  for (const mode of Object.keys(expect)) {
+    for (const st of ALL) {
+      const icon = barFor(mode, st, true);
+      if (icon !== undefined) {
+        check(`${mode}/${st} names a real bar`, BARS.some((b) => b.icon === icon), true);
+      }
+    }
+  }
+
+  // What goes to the Problems view, in every mode.
+  check('a failed form is a problem', isProblem('failed'), true);
+  check('and so is a skipped one -- it failed, then was let through',
+    isProblem('skipped'), true);
+  for (const st of ['pending', 'running', 'admitted', 'conditional']) {
+    check(`${st} is not a problem`, isProblem(st), false);
+  }
+}
+
 console.log(failures === 0 ? 'themecolors: all green' : `themecolors: ${failures} failed`);
 process.exit(failures === 0 ? 0 : 1);

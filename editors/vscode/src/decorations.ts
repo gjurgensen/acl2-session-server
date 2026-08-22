@@ -41,9 +41,11 @@ import {
   Bar,
   BARS,
   ColorSetting,
+  DecorationMode,
   INLINE_BAR,
   WASHES,
   barColorId,
+  barFor,
   forTheme,
   firstDefined,
   gutterSvg,
@@ -55,7 +57,9 @@ import {
 } from './bars';
 import { themeColors } from './highlight';
 
-export type DecorationMode = 'gutter' | 'wash';
+// The modes and what each draws live in `bars.ts`, beside the table of bars
+// they choose between; re-exported so a caller needs one import, not two.
+export { DecorationMode };
 
 export interface DecorationOptions {
   mode: DecorationMode;
@@ -399,24 +403,10 @@ export class Decorations {
       inline.set(bar.icon, []);
     }
 
-    // Which bar a status wears, and whether it wears one at all.
-    const barOf = (status: string): string | undefined => {
-      switch (status) {
-        case 'pending':
-          return 'pending';
-        case 'running':
-          return 'running';
-        case 'admitted':
-          return opts.gutterAdmitted ? 'admitted' : undefined;
-        case 'conditional':
-          return opts.gutterAdmitted ? 'cond' : undefined;
-        case 'skipped':
-        case 'failed':
-          return 'red';
-        default:
-          return undefined;
-      }
-    };
+    // Which bar a status wears, and whether it wears one at all: `bars.ts`,
+    // where the three modes differ and can be tested without an editor.
+    const barOf = (status: string): string | undefined =>
+      barFor(opts.mode, status, opts.gutterAdmitted);
 
     for (const p of painted) {
       if (opts.mode === 'wash') {

@@ -361,12 +361,14 @@
           "type": "string",
           "enum": [
             "gutter",
-            "wash"
+            "wash",
+            "minimal"
           ],
           "default": "gutter",
           "enumDescriptions": [
             "A status column of bars beside every form -- grey queued, blue proving, green admitted, yellow conditional, red failed -- and nothing on the text itself.",
-            "A background wash over the whole of every form, reds included."
+            "A background wash over the whole of every form, reds included.",
+            "Only what is happening or wrong: a bar beside the form being proved, and failures as problems. An admitted form is unremarkable, a conditional one follows from the failure above it, and one not reached yet follows from sitting below the running one."
           ],
           "description": "How unit statuses are rendered."
         },
