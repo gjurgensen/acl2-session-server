@@ -424,6 +424,67 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   check(lockedIndex(at(4, 1), units) === undefined, 'and neither is a line with no form on it');
 }
 
+// ---- one editor action, in every state the editor can be in ----
+{
+  const { readFileSync } = require('fs');
+  const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
+
+  // VSCode's UX guidance asks for at most one action in the editor title bar.
+  // Ours is play/pause/resume: one slot, three commands, and the `when`
+  // clauses are the only thing keeping two of them from showing at once. That
+  // is not a property anyone can see by reading three separate entries, and it
+  // breaks by *addition* -- someone puts a fourth useful button in
+  // `navigation` and nothing complains.
+  //
+  // So enumerate the states. `editorLangId == acl2` is a given here; the rest
+  // of the vocabulary is two booleans.
+  const truth = (when, active, paused) => {
+    const src = when
+      .replace(/editorLangId == acl2/g, 'true')
+      .replace(/acl2Session\.active/g, String(active))
+      .replace(/acl2Session\.paused/g, String(paused));
+    return Function(`"use strict"; return (${src});`)();
+  };
+
+  // Only the editor's own toolbar: the form view's lock and unlock live on the
+  // webview panel's title bar, which is a different bar with its own slot.
+  const editorBar = pkg.contributes.menus['editor/title'].filter((m) =>
+    /editorLangId == acl2/.test(m.when)
+  );
+  const nav = editorBar.filter((m) => (m.group ?? '').startsWith('navigation'));
+
+  for (const active of [false, true]) {
+    for (const paused of [false, true]) {
+      const shown = nav.filter((m) => truth(m.when, active, paused));
+      check(shown.length <= 1,
+        `at most one editor action with active=${active} paused=${paused}` +
+        ` (got ${shown.map((m) => m.command).join(', ') || 'none'})`);
+    }
+  }
+  // And exactly one whenever there is anything to say, or the toolbar goes
+  // empty and the feature loses its only visible affordance.
+  for (const [active, paused] of [[false, false], [true, false], [true, true]]) {
+    check(nav.filter((m) => truth(m.when, active, paused)).length === 1,
+      `exactly one editor action with active=${active} paused=${paused}`);
+  }
+
+  // The rest are reachable, just not as icons: a non-navigation group is what
+  // puts them in the overflow menu rather than the title bar.
+  const overflow = editorBar.filter((m) => !(m.group ?? '').startsWith('navigation'));
+  check(overflow.some((m) => m.command === 'acl2-session.stop'),
+    'stop is in the overflow menu rather than the title bar');
+  check(overflow.some((m) => m.command === 'acl2-session.certify'),
+    'and so is certify, which used to be a second icon');
+
+  // Every command the toolbar names has to exist, and carry an icon -- a
+  // navigation entry without one renders as its title, which is a sentence.
+  const byId = new Map(pkg.contributes.commands.map((c) => [c.command, c]));
+  for (const m of nav) {
+    check(byId.has(m.command), `${m.command} is a contributed command`);
+    check(!!byId.get(m.command)?.icon, `${m.command} has an icon to draw`);
+  }
+}
+
 // ---- no command handler may take an argument it did not ask for ----
 {
   const { readFileSync } = require('fs');

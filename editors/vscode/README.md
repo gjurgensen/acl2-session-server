@@ -287,11 +287,35 @@ Repackage and reinstall to pick up later changes.
 ## Commands
 
 **Starting is one action**: `ctrl+alt+a` (`cmd+alt+a` on a Mac), or the
-&#9654; button in the editor's title bar, which becomes a stop button once
-the session is live. Both run **ACL2: Start Live Checking**, which opens the
-form view too — there is no moment where you want the session but not the place
-its failures explain themselves. The form view opens without taking the cursor.
-Clicking the status bar brings it back if you close it.
+&#9654; button in the editor's title bar. Both run **ACL2: Start Live
+Checking**, which opens the form view too — there is no moment where you want
+the session but not the place its failures explain themselves. The form view
+opens without taking the cursor. Clicking the status bar brings it back if you
+close it.
+
+That button is the editor's **only** title-bar action, which is what VSCode's
+own guidance asks for, so it carries all three states: &#9654; to start, then
+&#10074;&#10074; to pause, then &#9654; again to resume. `ctrl+alt+a` follows
+it — on a paused session it resumes, because from your side that is the same
+gesture. **Stop** and **Certify Book** are in the `…` overflow beside it, and
+in the command palette.
+
+### Pausing
+
+A paused session stops admitting forms, and stops doing nothing else. It still
+retracts as you edit — so the gutter never claims more than the text supports —
+still answers hover, completion and go-to-definition, and still evaluates forms
+in the console. Only the proving waits.
+
+That is the difference from **Interrupt** (`ctrl+alt+i`), which aborts the form
+in flight and then carries on at your next keystroke. Interrupt means "stop,
+I'm about to fix that form". Pause means "leave me alone for a while", and
+survives every edit until you press play.
+
+While paused, forms that have not been checked are reported as *beyond* rather
+than *pending*, for the same reason they are past a target: nothing is coming
+for them. So **Go to Next Attention Point** and **Go to Frontier** decline to
+send you to one, instead of pointing at a form the session will never reach.
 
 | key | command |
 | --- | --- |

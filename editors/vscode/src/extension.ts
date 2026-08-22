@@ -109,6 +109,17 @@ interface BookSession {
   doc: vscode.TextDocument;
   /** The held barrier; null checks the whole book. */
   target: Held | null;
+  /**
+   * Whether the reader has stopped this session admitting forms.
+   *
+   * Not a stall, which is what the daemon calls stopping because a form
+   * failed or the buffer will not lex: those clear on the next edit and this
+   * one does not, which is the whole of the difference and the reason a
+   * reader can rely on it while restructuring a file.
+   */
+  paused?: boolean;
+  /** Why the last run stopped, so an interrupt is not reported as an ending. */
+  lastSettle?: string;
   lastState?: StateEvent;
   /**
    * Where the reader stopped, when it did: the line of the bracket that is
@@ -384,6 +395,14 @@ export function activate(context: vscode.ExtensionContext): void {
       forBook((s) => consoleFor(s).open())
     ),
     vscode.commands.registerCommand('acl2-session.stop', () => forBook(stopBook)),
+    // Pause and resume are one button, so they are one command: a toolbar
+    // with two of them would show whichever is inapplicable half the time.
+    vscode.commands.registerCommand('acl2-session.pause', () =>
+      forBook((s) => setPaused(s, true))
+    ),
+    vscode.commands.registerCommand('acl2-session.resume', () =>
+      forBook((s) => setPaused(s, false))
+    ),
     vscode.commands.registerCommand('acl2-session.interrupt', () =>
       forBook((s) => void client?.request('interrupt', { book: s.id }).catch(report))
     ),
@@ -1428,7 +1447,14 @@ async function startCommand(initial?: Held): Promise<void> {
   // text at the daemon.
   const existing = bookFor(doc);
   if (existing) {
-    sendUpdate(existing);
+    // Play means resume when there is something to resume. The button shows
+    // the same triangle in both states and the key is the same key, because
+    // from the reader's side it is the same gesture: get on with it.
+    if (existing.paused) {
+      setPaused(existing, false);
+    } else {
+      sendUpdate(existing);
+    }
     return;
   }
   const c = ensureClient();
@@ -1531,8 +1557,23 @@ async function noteProveOverride(inherited: string | undefined): Promise<void> {
  */
 function refreshContext(): void {
   const editor = vscode.window.activeTextEditor;
-  const live = !!editor && books.has(editor.document.uri.toString());
-  void vscode.commands.executeCommand('setContext', 'acl2Session.active', live);
+  const s = editor && books.get(editor.document.uri.toString());
+  void vscode.commands.executeCommand('setContext', 'acl2Session.active', !!s);
+  void vscode.commands.executeCommand('setContext', 'acl2Session.paused', !!s?.paused);
+}
+
+/**
+ * Stop admitting forms, or start again.
+ *
+ * The flag is kept here as well as in the daemon, because the toolbar has to
+ * know which button to show before any event comes back -- and a button that
+ * changed a beat after the click would read as a click that missed.
+ */
+function setPaused(s: BookSession, on: boolean): void {
+  s.paused = on;
+  void client?.request(on ? 'pause' : 'resume', { book: s.id }).catch(report);
+  refreshContext();
+  updateStatusBar(s);
 }
 
 function stopBook(s: BookSession): void {
@@ -1609,6 +1650,7 @@ function sendUpdate(s: BookSession): void {
   // truth. Only worth doing for a file the buffer cannot carry, and only
   // sound while there is nothing unsaved.
   const fromFile = s.carriesFile === false && !s.doc.isDirty;
+  s.lastSettle = undefined;
   client?.notify('update', {
     book: s.id,
     text: fromFile ? undefined : s.doc.getText(),
@@ -2048,6 +2090,10 @@ function onSettled(p: SettledEvent): void {
   }
   s.runningUnit = undefined;
   s.runningRef = undefined;
+  // An interrupted run is not a finished one, and the counts alone cannot
+  // tell them apart -- both end with nothing running. Without this the status
+  // bar answered an interrupt with a tick and a total, which reads as done.
+  s.lastSettle = p.reason;
   updateStatusBar(s);
   // The outline carries each unit's status as its detail, and those are only
   // as fresh as the last time VSCode asked -- but renew only when they have
@@ -2226,8 +2272,14 @@ function updateStatusBar(s: BookSession): void {
   const green = units.filter((u) => u.status === 'admitted' || u.status === 'conditional').length;
   const reds = units.filter((u) => u.status === 'skipped' || u.status === 'failed').length;
   const running = units.find((u) => u.status === 'running');
-  if (running) {
+  if (s.paused) {
+    // Ahead of the counts because it explains them: a paused book stops where
+    // it stops, and a bare "12/40 admitted" would read as a run still coming.
+    status.text = `$(debug-pause) ACL2: paused \u2014 ${green}/${total} admitted`;
+  } else if (running) {
     status.text = `$(sync~spin) ACL2: proving ${running.index + 1}/${total}`;
+  } else if (s.lastSettle === 'interrupted') {
+    status.text = `$(circle-slash) ACL2: interrupted \u2014 ${green}/${total} admitted`;
   } else if (reds > 0) {
     status.text = `$(error) ACL2: ${green}/${total} admitted, ${reds} red`;
   } else {
