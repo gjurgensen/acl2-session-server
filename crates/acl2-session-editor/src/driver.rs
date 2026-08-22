@@ -24,6 +24,16 @@ use serde_json::Value;
 use crate::wire;
 use crate::Out;
 
+/// Everything a `reached_target` settle is a claim about. See `settled_at`.
+#[derive(PartialEq, Eq)]
+struct SettleMark {
+    revision: u64,
+    frontier: usize,
+    skipped: Vec<usize>,
+    target_line: Option<usize>,
+    target_column: Option<usize>,
+}
+
 /// One instruction from the protocol loop.
 pub enum Cmd {
     Update {
@@ -161,6 +171,26 @@ pub struct Driver {
     /// be read honestly after it: the world may still hold units the new
     /// text rolled out from under.
     reconciled: bool,
+    /// What the last `reached_target` settle described, or `None` if none has
+    /// been sent since anything last moved.
+    ///
+    /// Every command the protocol loop applies is followed by a `drive`, and
+    /// a book that has already reached its target reaches it again on every
+    /// pass -- so a hover, a completion or an outline request each re-emitted
+    /// the whole state and settled a run that finished long ago. On a
+    /// three-hundred form book that is 28 KB pushed at the client per question
+    /// asked, and a full repaint at the other end, for news it already has.
+    ///
+    /// Revision and frontier between them determine the state; the target is
+    /// what decides which forms are `beyond`, and skipped is carried rather
+    /// than argued to be implied by the other two.
+    ///
+    /// Cleared by every command that asks the world to move, which is the
+    /// difference between not repeating yourself and not answering. A
+    /// question gets silence when there is no news. A `retract` gets a settle
+    /// even when it retracted nothing, because the client asked for one and
+    /// is waiting to hear that it happened.
+    settled_at: Option<SettleMark>,
     /// Evals waiting for the session to be free, oldest first.
     ///
     /// A queue rather than a rejection: the session is single-threaded, so an
@@ -271,6 +301,7 @@ impl Driver {
             have_snapshot: false,
             failed_unit: None,
             reconciled: false,
+            settled_at: None,
             eval_queue: VecDeque::new(),
             eval_in_flight: None,
             details: HashMap::new(),
@@ -380,6 +411,7 @@ impl Driver {
         match cmd {
             Cmd::Update { bytes, target_line, target_column, revision } => {
                 self.revision = revision;
+                self.settled_at = None;
                 self.target_line = target_line;
                 self.target_column = target_column;
                 self.parked = false;
@@ -408,6 +440,7 @@ impl Driver {
                 self.failed_unit = None;
                 self.parked = false;
                 self.reconciled = false;
+                self.settled_at = None;
                 // Hold the target where the retraction puts the world, so the
                 // drive that follows does not immediately re-admit.
                 let kept = keep.checked_sub(1).and_then(|k| self.units.get(k));
@@ -434,6 +467,10 @@ impl Driver {
                 // never has to guess which of the two the silence is.
                 self.eval_state("queued", ahead);
                 self.eval_queue.push_back((id, form));
+                // An eval runs a form against the world and undoes it again.
+                // Net nothing, usually -- but "usually" is not a thing to
+                // stay quiet on the strength of.
+                self.settled_at = None;
                 Flow::Continue
             }
             Cmd::Describe { id, name, cols } => {
@@ -1312,6 +1349,16 @@ impl Driver {
                                 return Flow::Continue;
                             }
                         }
+                        // Nothing moved since this was last said, so do not
+                        // say it again. Skipping `emit_state` skips its cache
+                        // clearing too, which is right for exactly the same
+                        // reason: what it drops are answers about a world
+                        // that has not changed.
+                        let now = self.settle_mark();
+                        if self.settled_at.as_ref() == Some(&now) {
+                            return Flow::Continue;
+                        }
+                        self.settled_at = Some(now);
                         self.emit_state(None);
                         self.settle("reached_target", None);
                         return Flow::Continue;
@@ -1577,6 +1624,27 @@ impl Driver {
             running,
             units,
         });
+    }
+
+    /// Everything a `reached_target` settle is a claim about.
+    ///
+    /// The point of comparing marks rather than setting a dirty flag is that
+    /// there is no single place where "something moved" can be observed: the
+    /// text moves it, a retraction moves it, a target moves it, and an eval
+    /// can move it and put it back. A description of the result is a thing
+    /// the driver can always compute; a record of every way in is not.
+    fn settle_mark(&self) -> SettleMark {
+        let (frontier, skipped) = {
+            let book = self.book.lock().expect("book lock");
+            (book.admitted_lines().len(), book.skipped_units())
+        };
+        SettleMark {
+            revision: self.revision,
+            frontier,
+            skipped,
+            target_line: self.target_line,
+            target_column: self.target_column,
+        }
     }
 
     fn settle(&self, reason: &'static str, message: Option<String>) {

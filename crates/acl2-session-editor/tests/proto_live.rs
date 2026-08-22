@@ -1593,3 +1593,76 @@ fn a_target_on_a_form_head_admits_that_form() {
     let events = d.events_until_settled();
     assert_eq!(statuses(&last_state(&events)), ["beyond"; 4]);
 }
+
+/// A question about a settled book is answered without re-announcing it.
+///
+/// Every command the protocol loop applies is followed by a drive pass, and a
+/// book that has already reached its target reaches it again on every one --
+/// so a hover, a completion or an outline request each re-emitted the whole
+/// state and settled a run that finished long ago. Measured on a book this
+/// size before the guard: 28 KB of unsolicited events per question asked, each
+/// one repainting every decoration in the editor for news it already had.
+///
+/// Read by asking twice. Anything the first query provoked arrives while the
+/// second's reply is being waited for, so it lands in `pending` -- which is
+/// empty exactly when the driver said nothing.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_query_on_a_settled_book_says_nothing() {
+    let Some(acl2) = acl2() else {
+        eprintln!("ACL2 not set; skipping");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("acl2-editord-quiet-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let book_path: PathBuf = dir.join("quiet.lisp");
+    let mut text = String::from("(in-package \"ACL2\")\n");
+    for i in 0..40 {
+        text.push_str(&format!("(defun f{i} (x) x)\n"));
+    }
+    std::fs::write(&book_path, &text).expect("write book");
+
+    let mut d = Daemon::start(&acl2);
+    let opened = d.request("open", json!({ "path": book_path.to_str().unwrap() }));
+    let book = opened["book"].as_str().expect("book id").to_string();
+    d.notify("update", json!({ "book": book, "text": text, "revision": 1 }));
+    let events = d.events_until_settled();
+    assert_eq!(events.last().expect("settled").1["reason"], "reached_target");
+    assert!(d.pending.is_empty(), "nothing left over: {:?}", d.pending);
+
+    // Every read-only verb the editor leans on while the reader is just
+    // reading. `symbols` and `links` are the ones that hurt -- VSCode asks
+    // for both after edits -- and `complete` runs per keystroke.
+    let asks = [
+        ("describe", json!({ "book": book, "name": "f7", "cols": 40 })),
+        ("definition", json!({ "book": book, "name": "f7" })),
+        ("symbols", json!({ "book": book })),
+        ("complete", json!({ "book": book, "prefix": "f1" })),
+        ("links", json!({ "book": book })),
+        ("rules", json!({ "book": book, "names": ["f7"] })),
+    ];
+    for (verb, params) in &asks {
+        let _ = d.request(verb, params.clone());
+        // A second request, whose reply cannot arrive before anything the
+        // first provoked. It has to be a verb the *driver* answers: the
+        // driver applies one command, drives it, and only then takes the
+        // next, so its events precede the next reply by construction. A verb
+        // the protocol loop answers on its own -- `status` -- races them, and
+        // this read silently passed for whichever query lost.
+        let _ = d.request("rules", json!({ "book": book, "names": ["f0"] }));
+        assert!(d.pending.is_empty(), "{verb} spoke: {:?}", d.pending);
+    }
+
+    // The guard is about repetition, not about silence: something that moves
+    // still settles. A retraction moves the frontier without touching a byte.
+    d.notify("retract", json!({ "book": book, "keep": 3 }));
+    let events = d.events_until_settled();
+    assert_eq!(events.last().expect("settled").1["reason"], "reached_target");
+    assert_eq!(statuses(&last_state(&events))[3], "beyond", "the world moved and said so");
+
+    // And having said it, it goes quiet again.
+    let _ = d.request("symbols", json!({ "book": book }));
+    let _ = d.request("rules", json!({ "book": book, "names": ["f0"] }));
+    assert!(d.pending.is_empty(), "settled twice for one retraction: {:?}", d.pending);
+}
