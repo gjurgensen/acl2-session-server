@@ -130,6 +130,28 @@ const unit = (index, line_start, col_start, line_end, col_end, status = 'admitte
 
 check('an empty book paints nothing', paintMap([]), []);
 
+// One gutter cell, one icon. The form the target marks is the first one
+// beyond the barrier, so in `gutter` mode it has a queued bar of its own aimed
+// at the very same cell -- and the first version of the target mark lost that
+// contest silently, and was invisible in the one mode it was built for.
+{
+  const { gutterMinus } = require('./out/paintmap.js');
+  check('a multi-line form gives up its head and keeps the rest',
+    gutterMinus({ from: 10, to: 14 }, 10), { from: 11, to: 14 });
+  check('a one-line form gives up its only cell',
+    gutterMinus({ from: 10, to: 10 }, 10), null);
+  check('a mark elsewhere in the form takes nothing -- it only ever lands on a head',
+    gutterMinus({ from: 10, to: 14 }, 12), { from: 10, to: 14 });
+  check('a mark below the form takes nothing',
+    gutterMinus({ from: 10, to: 14 }, 20), { from: 10, to: 14 });
+  check('a mark above it takes nothing',
+    gutterMinus({ from: 10, to: 14 }, 3), { from: 10, to: 14 });
+  check('no mark at all changes nothing',
+    gutterMinus({ from: 10, to: 14 }, null), { from: 10, to: 14 });
+  check('a form with no cell of its own has none to give up',
+    gutterMinus(null, 10), null);
+}
+
 // The same colour now lives in three places, none of which the type system
 // connects: a value in `bars.ts`, a fill in `media/*.svg` for the gutter
 // icon, and a contributed theme-colour default in `package.json`. An earlier

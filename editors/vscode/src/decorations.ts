@@ -31,14 +31,14 @@
 import * as vscode from 'vscode';
 import { UnitState } from './protocol';
 import { charOffset } from './positions';
-import { paintMap, Span } from './paintmap';
+import { gutterMinus, paintMap, Span } from './paintmap';
 import {
   Bar,
   BARS,
   ColorSetting,
   DecorationMode,
   INLINE_BAR,
-  INLINE_STOP,
+  INLINE_TARGET,
   WASHES,
   barColorId,
   barFor,
@@ -63,6 +63,8 @@ export { DecorationMode };
 
 export interface DecorationOptions {
   mode: DecorationMode;
+  /** Where the held target's mark goes, so no status contests its cell. */
+  target?: { line: number; inline: { line: number; col: number } | null } | null;
 }
 
 /**
@@ -389,7 +391,7 @@ export class Decorations {
       // instead, at the column the second form begins -- the same escape
       // hatch `paintmap` already gives a status in that position.
       const stop = (color: string | vscode.ThemeColor) => ({
-        before: { contentText: ' ', backgroundColor: color, ...INLINE_STOP },
+        before: { ...INLINE_TARGET, color },
       });
       this.targetInline = vscode.window.createTextEditorDecorationType({
         light: stop(pick(c.light, barColorId('target'))),
@@ -490,6 +492,14 @@ export class Decorations {
       inline.set(bar.icon, []);
     }
 
+    // The cell the target's mark takes, so no status tries to share it.
+    // Null in `wash` and `minimal`, which draw no bars for it to displace.
+    const contested = opts.mode === 'gutter' ? (opts.target ?? null) : null;
+    const targetLine = contested && !contested.inline ? contested.line : null;
+    const targetInline = contested?.inline ?? null;
+    const sameSpot = (a: { line: number; col: number }, b: { line: number; col: number }) =>
+      a.line === b.line && a.col === b.col;
+
     // Spinners: at the head of the form, one line, never a column.
     const spins: vscode.Range[] = [];
 
@@ -514,14 +524,20 @@ export class Decorations {
         spins.push(new vscode.Range(p.head - 1, 0, p.head - 1, 0));
         continue;
       }
-      if (p.gutter) {
-        bars.get(mark.icon)?.push(new vscode.Range(p.gutter.from - 1, 0, p.gutter.to - 1, 0));
+      // Minus whatever cell the target's mark has claimed: one icon per cell,
+      // and the mark is the one worth seeing there.
+      const g = gutterMinus(p.gutter, targetLine);
+      if (g) {
+        bars.get(mark.icon)?.push(new vscode.Range(g.from - 1, 0, g.to - 1, 0));
       }
       // No gutter cell of its own: the bar goes between the two forms, at
       // the column this one starts in. A form that has both -- it opens on
       // a line it does not own and runs on past it -- gets both, which is
       // right: the mark says where it starts, the cells say how far it runs.
-      if (p.inlineAt) {
+      // Same rule inline. Two `before` attachments at one column stack rather
+      // than overdraw, so this is legibility rather than necessity -- but a
+      // boundary said twice, in two shapes, is a boundary said worse.
+      if (p.inlineAt && !(targetInline && sameSpot(p.inlineAt, targetInline))) {
         inline.get(mark.icon)?.push(at(p.inlineAt));
       }
     }

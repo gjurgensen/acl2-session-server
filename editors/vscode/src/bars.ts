@@ -309,22 +309,24 @@ export const BARS: Bar[] = [
  */
 const DROP = '0.25em';
 /**
- * The held target's mark: a rule across the top of the gutter cell.
+ * The held target's mark: an arrow in the gutter, pointing at the code.
  *
- * A rule and not a bar, which is the whole distinction it has to carry. Every
- * bar in that column is a verdict about the form beside it; the target is a
+ * A shape and not a bar, which is the distinction it has to carry. Every bar
+ * in that column is a verdict about the form beside it; the target is a
  * barrier *between* two forms and a fact about neither. Given the bar shape it
  * would read as "this form has an odd status", and would be relying on hue
  * alone to say otherwise.
  *
- * Drawn at the top edge because that edge is the boundary: the line above is
- * checked and this one is not. Full width rather than the bar's four
- * eighteenths, so the two are not confusable at a glance even in one colour.
+ * An arrow rather than the rule this was first drawn as. The rule was right
+ * about meaning -- a line across the boundary -- and wrong about physics: three
+ * units of eighteen is two or three pixels at an ordinary font size, which is
+ * faint even with the cell to itself. An arrow fills the cell, and points at
+ * the thing it is about: the first form the run will not reach.
  */
 export function targetSvg(color: string): string {
   return (
     '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18">' +
-    `<rect x="0" y="0" width="18" height="3" fill="${escapeAttr(color)}"/>` +
+    `<path d="M4 3 L14 9 L4 15 Z" fill="${escapeAttr(color)}"/>` +
     '</svg>'
   );
 }
@@ -332,19 +334,21 @@ export function targetSvg(color: string): string {
 /**
  * The same mark where the gutter cannot reach: between two forms on a line.
  *
- * Vertical here, horizontal in the gutter, and that is not an inconsistency.
- * A barrier lies across the direction the reader is moving in. Down the page
- * that is a horizontal rule; along a line it is a vertical one.
+ * Pointing down rather than right, and that is not an inconsistency. Both
+ * point at what they mark. From the gutter the only thing to point at is the
+ * line, which is to the right. Inline the mark is already in the text and can
+ * point at the column itself, which is below.
  *
- * Narrower and taller than `INLINE_BAR`, because it can appear right beside
- * one: the form it precedes is `beyond`, which in `gutter` mode still draws
- * its own queued bar at the same spot. Two marks, saying two things -- where
- * the run stops, and what the form after it is.
+ * A character rather than an image, unlike its gutter twin. An inline
+ * attachment sits on the text baseline and an image at line height reaches
+ * above the line box and pushes it open -- the geometry `INLINE_BAR` exists to
+ * work around. A glyph is sized to the line by construction, and needs no
+ * geometry at all.
  */
-export const INLINE_STOP = {
-  width: '0.14em',
-  height: '1.25em',
-  margin: `0 0.12em -${DROP} 0.08em`,
+export const INLINE_TARGET = {
+  contentText: '\u25be',
+  margin: '0 0.05em 0 0.05em',
+  fontWeight: 'bold',
 };
 
 export const INLINE_BAR = {

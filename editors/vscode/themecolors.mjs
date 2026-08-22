@@ -187,28 +187,35 @@ for (const kind of ['light', 'dark']) {
   // form with an odd status, and would be leaning on hue alone to say
   // otherwise.
   {
-    const { targetSvg, gutterSvg, INLINE_STOP, INLINE_BAR } = require('./out/bars.js');
-    const box = (svg) => {
-      const m = /<rect[^>]*width="([\d.]+)"[^>]*height="([\d.]+)"/.exec(svg);
-      return { w: +m[1], h: +m[2] };
-    };
-    const rule = box(targetSvg('#3794ff'));
-    const bar = box(gutterSvg('#3794ff'));
-    check('the target mark is wider than it is tall', rule.w > rule.h, true);
-    check('and a status bar is the other way round', bar.h > bar.w, true);
-    check('the two are not confusable even in one colour', rule.w > bar.w * 3, true);
-    check('the rule sits at the top edge, which is the boundary it marks',
-      /<rect[^>]*y="0"/.test(targetSvg('#3794ff')), true);
-    check('and it does not pulse -- a barrier is not working',
-      /@keyframes/.test(targetSvg('#3794ff')), false);
+    const { targetSvg, gutterSvg, INLINE_TARGET } = require('./out/bars.js');
+    const arrow = targetSvg('#3794ff');
+    check('the target mark is a shape, not a bar', /<path/.test(arrow) && !/<rect/.test(arrow), true);
+    check('and a status bar is a bar', /<rect/.test(gutterSvg('#3794ff')), true);
 
-    // Where the gutter cannot reach, the same mark turns ninety degrees: a
-    // barrier lies across the direction the reader is moving in.
-    const em = (v) => parseFloat(v);
-    check('the inline stop is narrower than an inline status bar',
-      em(INLINE_STOP.width) < em(INLINE_BAR.width), true);
-    check('and taller, so the two read apart when they land together',
-      em(INLINE_STOP.height) > em(INLINE_BAR.height), true);
+    const pts = [...(/<path[^>]*d="([^"]+)"/.exec(arrow)[1])
+      .matchAll(/(-?[\d.]+)\s+(-?[\d.]+)/g)].map((m) => [+m[1], +m[2]]);
+    check('the mark is a triangle', pts.length, 3);
+    // Which way it points is the whole of its meaning: at the first form the
+    // run will not reach, which from the gutter is to the right.
+    const maxX = Math.max(...pts.map((p) => p[0]));
+    const tip = pts.filter((p) => p[0] === maxX);
+    check('with one vertex at its right edge -- it points right', tip.length, 1);
+    check('and that vertex is level with the middle of the cell', tip[0][1], 9);
+
+    // Visibility, which is why this is an arrow and not the rule it started
+    // as: three units of eighteen is two pixels at an ordinary font size.
+    const spanX = maxX - Math.min(...pts.map((p) => p[0]));
+    const spanY = Math.max(...pts.map((p) => p[1])) - Math.min(...pts.map((p) => p[1]));
+    check('it spans most of the cell in both directions', spanX >= 9 && spanY >= 9, true);
+    check('and it does not pulse -- a barrier is not working',
+      /@keyframes/.test(arrow), false);
+
+    // Where the gutter cannot reach, the mark points down instead: from the
+    // gutter the only thing to point at is the line, to the right; inline it
+    // is already in the text and can point at the column, below.
+    check('the inline mark points down', INLINE_TARGET.contentText, '\u25be');
+    check('and is a glyph, so it needs no geometry to sit on the line',
+      typeof INLINE_TARGET.contentText === 'string' && !('width' in INLINE_TARGET), true);
   }
 
   // Its hue must be free: it is not a verdict, and it shares the gutter with

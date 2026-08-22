@@ -2182,11 +2182,11 @@ function paint(s: BookSession): void {
   // Not inside the editor loop below: a diagnostic belongs to the document,
   // and is worth publishing whether or not the file is on screen.
   updateProblems(s);
-  const opts = { mode: mode() };
+  const opts = { mode: mode(), target: targetMark(s) };
   for (const editor of vscode.window.visibleTextEditors) {
     if (editor.document === s.doc) {
       decorations.apply(editor, s.lastState.units, opts);
-      decorations.applyTarget(editor, targetMark(s));
+      decorations.applyTarget(editor, opts.target);
       decorations.applyUnreadable(
         editor,
         s.unreadableFrom ?? null,
