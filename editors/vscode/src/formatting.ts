@@ -220,11 +220,21 @@ export async function indentCommand(): Promise<void> {
     return;
   }
   const doc = editor.document;
-  const edits = editor.selections.flatMap((s) =>
-    s.isEmpty
-      ? indentRangeEdits(doc, s.active.line, s.active.line)
-      : indentRangeEdits(doc, s.start.line, s.end.line)
-  );
+  const edits = editor.selections.flatMap((s) => {
+    if (!s.isEmpty) {
+      return indentRangeEdits(doc, s.start.line, s.end.line);
+    }
+    // A blank line is where this is asked for most, and it is the one line a
+    // whole-buffer pass must leave alone: there, blank means trailing
+    // whitespace to be cleared; here it means an empty line inside a form,
+    // waiting to be typed into at the column its body starts at. `blankLines`
+    // is which of the two, and the cursor case is `indent`.
+    //
+    // Without this, Tab on an empty line did nothing at all -- and so did
+    // every remap built on this command, which is how it was noticed.
+    const one = indentLineEdit(doc, s.active.line, { blankLines: 'indent' });
+    return one ? [one] : [];
+  });
   if (!edits.length) {
     return;
   }
@@ -236,6 +246,26 @@ export async function indentCommand(): Promise<void> {
     },
     { undoStopBefore: true, undoStopAfter: true }
   );
+  // On a line that is now nothing but indentation, the caret belongs at the
+  // end of it. Nowhere else on that line means anything, and the end of a
+  // replaced range is the one position an edit does not carry along in any
+  // dependable way -- which is knowable here, unlike in a document handler,
+  // because this runs when a person asked it to and nothing else is in
+  // flight. Reassigned only when it would actually move.
+  const moved = editor.selections.map((s) => {
+    if (!s.isEmpty) {
+      return s;
+    }
+    const line = editor.document.lineAt(s.active.line);
+    if (line.text.trim() || s.active.character === line.text.length) {
+      return s;
+    }
+    const end = new vscode.Position(s.active.line, line.text.length);
+    return new vscode.Selection(end, end);
+  });
+  if (moved.some((s, i) => !s.isEqual(editor.selections[i]))) {
+    editor.selections = moved;
+  }
 }
 
 /**

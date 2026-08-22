@@ -210,6 +210,63 @@ blocked or answered falsely absent.
 **ACL2: Show Documentation** opens the full xdoc topic for the name at the
 cursor in a read-only view, where the hover shows only its first sentence.
 
+## Indentation
+
+Indentation follows Emacs' `lisp-indent-function` model, with the tables from
+`emacs-acl2.el`, `acl2-indent.el` and `lisp-mode` transcribed rather than
+invented — and then checked, because "better indentation" is a matter of taste
+right up until it is a number. `indent.mjs` reindents the community books and
+counts the lines that come back unchanged: 95.7% over 271 files. A macro whose
+body sits at the wrong column is a table entry away, and the measurement says
+whether the entry helped.
+
+A book's own definers outnumber any table, so an unknown head beginning `def`
+is indented like a definition. Anything else that is not in the table is a
+plain call, with its arguments under the first one.
+
+Three ways in, all the same rules:
+
+- **As you type.** Enter indents the new line; a closing delimiter re-indents
+  the line it finished. This is `editor.formatOnType`, which the extension
+  turns on for `acl2` files only.
+- **On request.** Format Document and Format Selection. Both change *leading
+  whitespace and nothing else* — no re-wrapping, no reflowing, no normalising
+  of anything you aligned by hand. Format-on-paste is on for the same reason:
+  it can only move a pasted form to the right column. Lines inside a string or
+  a block comment are never touched, and neither is a line whose `;` comment
+  column you chose yourself.
+- **Tab**, as in Emacs, re-indenting the current line or the selected lines.
+  Off by default, behind `acl2-session.tabIndents`, because outside a
+  selection VSCode's Tab inserts and taking that away from someone who did not
+  ask for it is worse than not offering it. **ACL2: Indent Line or Selection**
+  is in the command palette either way.
+
+### Opening a line with Vim's `o`
+
+`o` and `O` leave the cursor at the previous line's indent rather than the
+right one, and this is worth explaining because it is not a bug anyone can fix
+from here. VSCode triggers as-you-type formatting from *typing*: a line made
+by a command instead goes through the editor's own newline machinery, which
+consults the regex rules in a language configuration and never asks a
+formatter. Those regexes can express C and cannot express Lisp — the column a
+line belongs at depends on the paren nesting above it and on the head symbol
+of the enclosing form, which no regex over one line can see. So the languages
+that ride the regexes get `o` for free, and the languages that have to compute
+do not. VSCode's own Clojure support sidesteps it by having no indentation at
+all, and Calva does not solve it either.
+
+Tab fixes the line. To have `o` do it for you:
+
+```json
+"vim.normalModeKeyBindingsNonRecursive": [
+  { "before": ["o"], "after": ["o"], "commands": ["acl2-session.indent"] },
+  { "before": ["O"], "after": ["O"], "commands": ["acl2-session.indent"] }
+]
+```
+
+VSCodeVim runs the `after` keys first, so the real `o` opens the line and
+enters insert mode, and the command then indents it.
+
 ## Highlighting the output log
 
 The log is not a Lisp file. It is prose with Lisp embedded in it, and prose
