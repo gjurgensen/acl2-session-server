@@ -47,7 +47,8 @@
         "editor.colorDecorators": false,
         "editor.wordSeparators": "()[]{}'\"`,;|",
         "editor.autoIndent": "keep",
-        "editor.insertSpaces": true
+        "editor.insertSpaces": true,
+        "editor.formatOnType": true
       },
       "[acl2-output]": {
         "editor.colorDecorators": false
@@ -590,8 +591,8 @@
         },
         "acl2-session.indentOnType": {
           "type": "boolean",
-          "default": true,
-          "description": "Re-indent the current line as you type -- on Enter, and on a closing delimiter. This watches the document rather than relying on editor.formatOnType, because an extension that replaces VSCode's `type` command (VSCodeVim does) stops on-type formatting from ever being called."
+          "default": false,
+          "description": "Fallback: re-indent the current line by watching the document rather than through VSCode's on-type formatting. Off, because the two cannot be measured against each other while both run -- the watcher's edit lands on the trigger line, and the editor cancels an in-flight on-type format the moment any change lands at or above it. Turn this on only if the on-type provider proves unreachable in your editor; `acl2-session.indentTrace` shows which one ran."
         },
         "acl2-session.indentTrace": {
           "type": "boolean",
