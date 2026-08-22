@@ -1418,6 +1418,83 @@ fn a_target_column_picks_between_two_forms_on_a_line() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Moving the target back is a request to undo, and takes effect on its own.
+///
+/// Rollback is otherwise driven by the text and never by the target, which
+/// left a target moved backwards doing nothing at all: the barrier said stop
+/// here, the world stayed where it was, and only an unrelated edit -- whose
+/// reconcile rolls back for its own reasons -- ever made it take effect. The
+/// statuses are the proof either way, since `admitted` is read from the
+/// frontier rather than from any bookkeeping the target touches.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_target_moved_back_retracts_without_an_edit() {
+    let Some(acl2) = acl2() else {
+        eprintln!("ACL2 not set; skipping");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("acl2-editord-back-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let book_path: PathBuf = dir.join("back.lisp");
+    let text = "(in-package \"ACL2\")\n\
+                (defun one (x) x)\n\
+                (defun two (x) x)\n\
+                (defun three (x) x)\n";
+    std::fs::write(&book_path, text).expect("write book");
+
+    let mut d = Daemon::start(&acl2);
+    let opened = d.request("open", json!({ "path": book_path.to_str().unwrap() }));
+    let book = opened["book"].as_str().expect("book id").to_string();
+
+    // No target: the whole book goes in.
+    d.notify("update", json!({ "book": book, "text": text, "revision": 1 }));
+    let events = d.events_until_settled();
+    assert_eq!(statuses(&last_state(&events)), ["admitted"; 4]);
+
+    // Now hold at the second form, with the text untouched. Nothing about the
+    // buffer changed, so nothing but the target can cause this.
+    d.notify("update", json!({
+        "book": book, "text": text, "target_line": 3, "target_column": 17, "revision": 2,
+    }));
+    let events = d.events_until_settled();
+    let state = last_state(&events);
+    assert_eq!(statuses(&state), ["admitted", "admitted", "admitted", "beyond"],
+               "the target alone rolled the last form back: {state}");
+    assert_eq!(events.last().expect("settled").1["reason"], "reached_target");
+
+    // All the way back, to before the first form.
+    d.notify("update", json!({
+        "book": book, "text": text, "target_line": 0, "revision": 3,
+    }));
+    let events = d.events_until_settled();
+    assert_eq!(statuses(&last_state(&events)), ["beyond"; 4],
+               "a target before the first form empties the world: {:?}", last_state(&events));
+
+    // And forward again, which never needed the target to move anything.
+    d.notify("update", json!({ "book": book, "text": text, "revision": 4 }));
+    let events = d.events_until_settled();
+    assert_eq!(statuses(&last_state(&events)), ["admitted"; 4]);
+
+    // Once more, and then ask the *session* what it holds. Left to the end on
+    // purpose: a request runs a drive pass of its own, so each one settles,
+    // and reading events after one reads that settle instead of the next
+    // update's.
+    d.notify("update", json!({
+        "book": book, "text": text, "target_line": 3, "target_column": 17, "revision": 5,
+    }));
+    let events = d.events_until_settled();
+    assert_eq!(statuses(&last_state(&events)), ["admitted", "admitted", "admitted", "beyond"]);
+
+    // `three` is gone from the world, not merely relabelled. Asked of the
+    // session rather than of the buffer: `definition` answers a name defined
+    // in this file lexically, and would find it in the text either way.
+    let g = d.request("describe", json!({ "book": book, "name": "three", "cols": 40 }));
+    assert_eq!(g["found"], false, "the retracted definition is out of the world: {g}");
+    let k = d.request("describe", json!({ "book": book, "name": "two", "cols": 40 }));
+    assert_eq!(k["found"], true, "and the form before the target is still in it: {k}");
+}
+
 /// A form past the target is not queued for anything, and does not say it is.
 #[test]
 #[ignore = "needs ACL2"]

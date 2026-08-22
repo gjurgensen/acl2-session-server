@@ -1292,6 +1292,26 @@ impl Driver {
                         Some((u.line_end, Some(u.col_end)))
                     }
                     _ => {
+                        // Past the target. Rollback is otherwise driven by
+                        // the text and never by the target, which left a
+                        // target moved *backwards* doing nothing at all: the
+                        // barrier said stop here, the world stayed where it
+                        // was, and only an unrelated edit -- whose reconcile
+                        // rolls back for its own reasons -- ever made it
+                        // take effect. Moving the barrier back is a request
+                        // to undo, so undo.
+                        let keep = goal.map_or(0, |g| g + 1);
+                        if self.frontier() > keep {
+                            let r = {
+                                let mut book = self.book.lock().expect("book lock");
+                                book.retract_to(&self.bytes, keep, RETRACT_DEADLINE)
+                            };
+                            if let Err(e) = r {
+                                self.parked = true;
+                                self.settle("error", Some(e.to_string()));
+                                return Flow::Continue;
+                            }
+                        }
                         self.emit_state(None);
                         self.settle("reached_target", None);
                         return Flow::Continue;
