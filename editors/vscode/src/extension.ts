@@ -30,6 +30,7 @@ import {
 import { Envelope, InductionWire, RulesReply, RuneWire } from './protocol';
 import { DecorationMode, Decorations } from './decorations';
 import { byteColumn, charOffset } from './positions';
+import { isProblem } from './bars';
 import { EVAL_SCHEME, OutputView, SCHEME } from './outputView';
 import { Highlighter } from './highlight';
 import { FormEnvelope, FormInduction, FormModel, FormNameRules, FormView } from './formView';
@@ -251,6 +252,8 @@ export function activate(context: vscode.ExtensionContext): void {
   status.command = 'acl2-session.showFormView';
   status.tooltip = 'ACL2: show the formView';
   channel = vscode.window.createOutputChannel('ACL2');
+  problems = vscode.languages.createDiagnosticCollection('acl2');
+  context.subscriptions.push(problems);
 
   formView.onGoal = (m, goal, slot) => void fetchGoal(m, goal, slot);
   formView.onCols = (cols) => setLayout(cols);
@@ -1257,6 +1260,7 @@ function stopBook(s: BookSession): void {
  * none of the `close` above: there is nobody left to tell.
  */
 function dropBook(s: BookSession): void {
+  problems.delete(s.doc.uri);
   if (locked && locked.book === s.id) {
     releaseLock('its book was closed');
   }
@@ -1771,10 +1775,81 @@ function markUnreadable(s: BookSession, line: number | null, why?: string): void
   }
 }
 
+/**
+ * Failures, as things VSCode can list.
+ *
+ * One collection for every book: a `DiagnosticCollection` is keyed by URI, so
+ * the same one serves them all and closing one book clears only its own.
+ */
+let problems!: vscode.DiagnosticCollection;
+
+
+/** Whether failures are published at all. */
+function reportProblems(): boolean {
+  return vscode.workspace.getConfiguration('acl2-session').get<boolean>('problems', true);
+}
+
+/**
+ * Publish this book's failures, or take them down.
+ *
+ * In every mode, deliberately. A diagnostic is the only thing here that
+ * survives leaving the file -- it is a line in the Problems view, somewhere to
+ * jump from, and a mark on the scrollbar -- and none of that competes with a
+ * bar or a wash for the reader's attention the way a second mark on the text
+ * would. VSCode draws a squiggle along with it whether we want one or not:
+ * `Diagnostic` has no rendering control, `DiagnosticTag` offers only fading
+ * and strikethrough, and `editor.renderValidationDecorations` -- which would
+ * do exactly this -- is an internal editor option that no extension can set.
+ * So the squiggle is the price of the Problems entry, and
+ * `acl2-session.problems` is how someone declines to pay it.
+ *
+ * Turning it off in `minimal` leaves a failed form marked by nothing at all,
+ * scrollbar included. That is the honest consequence of a mode whose only
+ * mark for a failure *is* this, and the setting's description says so.
+ */
+function updateProblems(s: BookSession): void {
+  if (!reportProblems()) {
+    problems.delete(s.doc.uri);
+    return;
+  }
+  const doc = s.doc;
+  const out: vscode.Diagnostic[] = [];
+  for (const u of s.lastState?.units ?? []) {
+    if (!isProblem(u.status) || u.line_start > doc.lineCount) {
+      continue;
+    }
+    const line = u.line_start - 1;
+    const text = doc.lineAt(line).text;
+    const from = charOffset(text, u.col_start);
+    // To where the form ends when it ends on this line, and to the end of the
+    // line when it runs on. Not simply to the end of the line either way: a
+    // line can hold two forms, and marking the whole of it would blame the
+    // one that is fine for the one that is not.
+    const to =
+      u.line_end === u.line_start ? charOffset(text, u.col_end) : text.length;
+    const e = s.unitEvents.get(u.index);
+    const why =
+      e?.error_line?.trim() ||
+      (e?.abort_cause ? `the proof gave up: ${e.abort_cause}` : undefined) ||
+      (u.status === 'skipped' ? 'admitted with its proofs skipped' : 'this form did not go in');
+    const d = new vscode.Diagnostic(
+      new vscode.Range(line, from, line, Math.max(from + 1, to)),
+      u.status === 'skipped' ? `ACL2 skipped this form's proofs \u2014 ${why}` : `ACL2: ${why}`,
+      vscode.DiagnosticSeverity.Error
+    );
+    d.source = 'ACL2';
+    out.push(d);
+  }
+  problems.set(doc.uri, out);
+}
+
 function paint(s: BookSession): void {
   if (!s.lastState) {
     return;
   }
+  // Not inside the editor loop below: a diagnostic belongs to the document,
+  // and is worth publishing whether or not the file is on screen.
+  updateProblems(s);
   const opts = { mode: mode(), gutterAdmitted: gutterAdmitted() };
   for (const editor of vscode.window.visibleTextEditors) {
     if (editor.document === s.doc) {

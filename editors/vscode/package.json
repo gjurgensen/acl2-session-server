@@ -377,6 +377,11 @@
           "default": true,
           "description": "In gutter mode, mark admitted forms with a green gutter bar (olive for conditional). Off, absence means admitted."
         },
+        "acl2-session.problems": {
+          "type": "boolean",
+          "default": true,
+          "description": "Report failed and skipped forms in the Problems view. VSCode draws a squiggle along with each one and gives no way to have the entry without it, so this is both. Turning it off in the 'minimal' decoration mode leaves a failed form marked by nothing at all, scrollbar included -- that mode's only mark for a failure is this."
+        },
         "acl2-session.highlightOutput": {
           "type": "boolean",
           "default": true,

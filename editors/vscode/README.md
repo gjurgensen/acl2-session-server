@@ -4,9 +4,28 @@ Live form-by-form checking of ACL2 books, as a thin client of the
 `acl2-session-editor` daemon. The daemon owns the session; this extension
 renders its event stream.
 
-The extension automatically syncs a background ACL2 session with the file. By
-default, form status is then indicated in the editor gutter (configurable by
-`acl2-session.decorations`).
+The extension automatically syncs a background ACL2 session with the file. How
+form status is then shown is `acl2-session.decorations`:
+
+- **`gutter`** (the default) — a status column beside every form: grey queued,
+  blue proving, green admitted, yellow conditional, red failed. The text itself
+  is left alone. `acl2-session.gutterAdmitted` turns off the green and the
+  yellow, so absence means admitted and the column carries only work in
+  progress and trouble.
+- **`wash`** — a background wash over the whole of every form, reds included.
+- **`minimal`** — only what is happening or wrong. A bar beside the form being
+  proved, and nothing else: an admitted form is unremarkable, a conditional one
+  follows from the failure above it, and one not reached yet follows from
+  sitting below the running one.
+
+Each mode marks each fact once, which is the rule they are built around: never
+a bar *and* a wash, never a wash *and* a squiggle.
+
+Failed and skipped forms are reported in the **Problems** view in every mode,
+which is also where the squiggle comes from — VSCode gives no way to have the
+entry without the mark. `acl2-session.problems` turns both off. In `minimal`
+that leaves a failure marked by nothing at all, scrollbar included, since in
+that mode this *is* the mark.
 
 ### Colours
 
