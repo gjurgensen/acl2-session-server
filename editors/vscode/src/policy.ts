@@ -256,3 +256,59 @@ export function attentionPoints(
   }
   return points;
 }
+
+// ---- Where the barrier stands -----------------------------------------------
+
+/** A form, as far as the barrier is concerned: where it starts. */
+export interface Head {
+  index: number;
+  line_start: number;
+  col_start: number;
+}
+
+/**
+ * The index the barrier stands after: `-1` holds before the first form.
+ *
+ * A target names a *form*, anchored on its first character the way a lock is,
+ * because that is the point edits move least: typing inside the target form
+ * is the ordinary workflow, and anchoring on the form's end would lose the
+ * barrier on the first keystroke.
+ *
+ * The anchor is tracked through edits by `keepAnchor`, which is exact or
+ * gives up. It giving up is not the only way to arrive here with an anchor
+ * that no longer names a form -- the daemon re-splits the buffer, and a split
+ * can merge two forms or produce different ones entirely -- so this rounds
+ * *up*: to the last form starting strictly above the barrier, and to `-1`
+ * when there is none.
+ *
+ * Up rather than down on purpose, and it is the only safe direction. Rounding
+ * down admits a form the reader did not ask for, and admitting is the half of
+ * this that cannot be taken back cheaply; rounding up only means checking
+ * less than was asked, which the next keystroke corrects.
+ */
+export function barrierIndex(anchor: Anchor | null, units: readonly Head[]): number {
+  if (anchor === null) {
+    return -1;
+  }
+  const exact = units.find((u) => u.line_start === anchor.line && u.col_start === anchor.column);
+  if (exact) {
+    return exact.index;
+  }
+  let up = -1;
+  for (const u of units) {
+    if (u.line_start < anchor.line || (u.line_start === anchor.line && u.col_start < anchor.column)) {
+      up = u.index;
+    }
+  }
+  return up;
+}
+
+/**
+ * Where a step of `delta` forms lands, from a barrier at `from`.
+ *
+ * `-1` is a real place -- before the first form, checking nothing -- so it is
+ * the floor rather than an error, and stepping back from it stays there.
+ */
+export function stepBarrier(from: number, delta: number, count: number): number {
+  return Math.max(-1, Math.min(count - 1, from + delta));
+}

@@ -241,6 +241,8 @@ Clicking the status bar brings it back if you close it.
 | `ctrl+alt+a` | Start Live Checking (and open the form view) |
 | `ctrl+alt+i` | Interrupt |
 | `ctrl+alt+n` | Target at Cursor — check up to here |
+| `ctrl+alt+]` | Target Forward One Form |
+| `ctrl+alt+[` | Target Back One Form |
 | `ctrl+alt+u` | Retract to Cursor |
 | `ctrl+alt+b` | Clear Target — check the whole book |
 | `ctrl+alt+p` | Show Form view |
@@ -251,6 +253,40 @@ Clicking the status bar brings it back if you close it.
 | `ctrl+alt+r` | Go to Frontier |
 
 All are scoped to `editorLangId == acl2`, so they are inert everywhere else.
-Three commands have no key and live in the command palette: **Stop Live
-Checking** (the title-bar button covers it), **Certify Book**, and **Show
-Documentation**.
+Four commands have no key and live in the command palette: **Stop Live
+Checking** (the title-bar button covers it), **Target Before First Form**,
+**Certify Book**, and **Show Documentation**.
+
+## The target
+
+The target is a barrier: check as far as this form and no further. Setting one
+is how you stop a book racing ahead of you, and how you walk it a form at a
+time.
+
+It names a **form**, not a line. The distinction shows up the moment you edit:
+a line number is invalidated by every insertion above it, where a form is still
+the same form, so the barrier is anchored on the target form's first character
+and carried across edits from there. Anchored on its *first* character
+specifically, because editing the target form is the ordinary thing to be
+doing and its end moves on every keystroke.
+
+When an edit destroys that anchor outright the barrier **rounds up**, to the
+nearest form above that the same edit left alone, and to the top of the file
+when there is none. Never down. Checking less than you asked for is a keypress
+from being fixed; checking more has already run.
+
+Four things follow from being a barrier rather than a bookmark:
+
+- **Moving it back retracts.** The target is the whole statement about how far
+  the world should extend, so pulling it back above the frontier rolls the
+  world back to meet it, with no edit required.
+- **The step commands take hold of a running book.** With no target held there
+  is no barrier to step from, so the first step plants one at the frontier —
+  which stops the run where it has actually got to, and moves from there.
+- **Any of them will start the session.** "Check as far as here" is most useful
+  said *before* anything has been checked. A command that starts a session
+  starts it held before the first form, so nothing is admitted and then undone
+  while it waits to be told where to stop.
+- **Forms past it say so.** They are `beyond`, not queued: nothing will reach
+  them until the barrier moves, and **Go to Next Attention Point** and **Go to
+  Frontier** both decline to send you to one.

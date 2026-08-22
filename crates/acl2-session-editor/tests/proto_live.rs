@@ -1531,3 +1531,65 @@ fn forms_past_the_target_are_beyond_rather_than_pending() {
     assert_eq!(statuses(&last_state(&events)), ["admitted", "admitted", "admitted"],
                "clearing the target lets the run reach it: {:?}", last_state(&events));
 }
+
+/// A target given as a form's *first* character means "through this form".
+///
+/// Which is what the editor sends, and it sends it because that is the point
+/// an edit moves least: typing inside the target form moves its end on every
+/// keystroke and leaves its head alone. `goal_unit` already reads a target as
+/// the last form covering or ending by the position, so a head resolves to its
+/// own form -- but nothing said so, and the client now depends on it.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_target_on_a_form_head_admits_that_form() {
+    let Some(acl2) = acl2() else {
+        eprintln!("ACL2 not set; skipping");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("acl2-editord-head-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let book_path: PathBuf = dir.join("head.lisp");
+    //                                          1         2         3
+    //                                 123456789012345678901234567890123456
+    let text = "(in-package \"ACL2\")\n\
+                (defun one (x) x)\n\
+                (defun two (x) x) (defun three (x) x)\n";
+    std::fs::write(&book_path, text).expect("write book");
+
+    let mut d = Daemon::start(&acl2);
+    let opened = d.request("open", json!({ "path": book_path.to_str().unwrap() }));
+    let book = opened["book"].as_str().expect("book id").to_string();
+
+    // The head of `one`: through it, and not past it.
+    d.notify("update", json!({
+        "book": book, "text": text, "target_line": 2, "target_column": 1, "revision": 1,
+    }));
+    let events = d.events_until_settled();
+    assert_eq!(statuses(&last_state(&events)), ["admitted", "admitted", "beyond", "beyond"],
+               "a head admits its own form: {:?}", last_state(&events));
+
+    // The head of the *second* form on a line resolves to that form, not to
+    // the one it shares the line with -- the case the column exists for.
+    d.notify("update", json!({
+        "book": book, "text": text, "target_line": 3, "target_column": 19, "revision": 2,
+    }));
+    let events = d.events_until_settled();
+    assert_eq!(statuses(&last_state(&events)), ["admitted"; 4],
+               "the later head takes both: {:?}", last_state(&events));
+
+    // And the head of the first of the two takes only it.
+    d.notify("update", json!({
+        "book": book, "text": text, "target_line": 3, "target_column": 1, "revision": 3,
+    }));
+    let events = d.events_until_settled();
+    assert_eq!(statuses(&last_state(&events)), ["admitted", "admitted", "admitted", "beyond"],
+               "the earlier head holds the line's second form out: {:?}", last_state(&events));
+
+    // A head above every form is the top, and empties the world.
+    d.notify("update", json!({
+        "book": book, "text": text, "target_line": 0, "revision": 4,
+    }));
+    let events = d.events_until_settled();
+    assert_eq!(statuses(&last_state(&events)), ["beyond"; 4]);
+}

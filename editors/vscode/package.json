@@ -288,6 +288,18 @@
         "title": "ACL2: Target at Cursor"
       },
       {
+        "command": "acl2-session.targetForward",
+        "title": "ACL2: Target Forward One Form"
+      },
+      {
+        "command": "acl2-session.targetBackward",
+        "title": "ACL2: Target Back One Form"
+      },
+      {
+        "command": "acl2-session.targetTop",
+        "title": "ACL2: Target Before First Form"
+      },
+      {
         "command": "acl2-session.clearTarget",
         "title": "ACL2: Clear Target"
       },
@@ -566,6 +578,18 @@
         "command": "acl2-session.targetAtCursor",
         "key": "ctrl+alt+n",
         "mac": "cmd+alt+n",
+        "when": "editorLangId == acl2"
+      },
+      {
+        "command": "acl2-session.targetForward",
+        "key": "ctrl+alt+]",
+        "mac": "cmd+alt+]",
+        "when": "editorLangId == acl2"
+      },
+      {
+        "command": "acl2-session.targetBackward",
+        "key": "ctrl+alt+[",
+        "mac": "cmd+alt+[",
         "when": "editorLangId == acl2"
       },
       {

@@ -15,7 +15,16 @@
 // reds included, and no diagnostics. One treatment per fact, never two.
 
 import * as vscode from 'vscode';
-import { Anchor, Edit, attentionPoints, keepAnchor, lockedIndex, planTail } from './policy';
+import {
+  Anchor,
+  Edit,
+  attentionPoints,
+  barrierIndex,
+  keepAnchor,
+  lockedIndex,
+  planTail,
+  stepBarrier,
+} from './policy';
 import { readFileSync } from 'fs';
 import {
   DaemonClient,
@@ -51,6 +60,16 @@ import {
   xdocText,
 } from './names';
 
+/**
+ * How long a command that starts a session waits for the first split.
+ *
+ * Long enough to cover starting ACL2 on a slow machine, short enough that a
+ * daemon which never answers does not leave a keypress hanging. Overrunning it
+ * is not an error: the session is up and held before the first form, which is
+ * where the command would have left it anyway if the file had no forms.
+ */
+const START_SPLIT_WAIT_MS = 30_000;
+
 const UPDATE_DEBOUNCE_MS = 300;
 
 /**
@@ -61,16 +80,33 @@ const UPDATE_DEBOUNCE_MS = 300;
  * column says which. An editor always has a real cursor, so it always sends
  * one; the daemon takes a missing column to mean the whole line.
  */
-interface Target {
+interface Pos {
   line: number;
   column: number | null;
+}
+
+/**
+ * The held barrier: check through the form anchored here, and no further.
+ *
+ * A *form*, not a position. The two coincided while the target was whatever
+ * the cursor happened to point at, and came apart as soon as the barrier had
+ * to survive an edit: a line number is invalidated by every insertion above
+ * it, where a form is still the same form.
+ *
+ * `anchor` is that form's first character, tracked through edits exactly as a
+ * lock's is. `null` holds before the first form -- a barrier above everything,
+ * which no form can anchor. A session with no barrier at all has no `Held` to
+ * begin with, and checks the whole book.
+ */
+interface Held {
+  anchor: Anchor | null;
 }
 
 interface BookSession {
   id: string;
   doc: vscode.TextDocument;
-  /** Held target; null checks the whole book, line 0 holds before the first. */
-  target: Target | null;
+  /** The held barrier; null checks the whole book. */
+  target: Held | null;
   lastState?: StateEvent;
   /** Latest envelope per unit index, for diagnostics, form view and output view. */
   unitEvents: Map<number, UnitEvent>;
@@ -111,6 +147,15 @@ interface BookSession {
    */
   inductionByUnit: Map<number, Promise<FormInduction[]>>;
   debounce?: ReturnType<typeof setTimeout>;
+  /**
+   * Resolves when the daemon has split the book for the first time.
+   *
+   * Only the daemon splits, so until this settles there are no forms and any
+   * verb that counts them has nothing to count. The commands that start a
+   * session wait on it rather than guessing.
+   */
+  ready?: Promise<void>;
+  markReady?: () => void;
   /** Said once per book: the editor could not decode this file's bytes. */
   warnedEncoding?: boolean;
   /**
@@ -335,11 +380,35 @@ export function activate(context: vscode.ExtensionContext): void {
         retractTo(s, keep);
       })
     ),
+    // The four barrier commands all start the session when there is none.
+    // Holding a barrier is a statement about a run, and refusing to hear it
+    // until a run exists gets the order backwards: "check as far as here" is
+    // most useful said *before* anything has been checked, which is the one
+    // moment the old commands answered with "no live session for this file".
     vscode.commands.registerCommand('acl2-session.targetAtCursor', () =>
-      forBook((s) => {
-        s.target = cursorTarget();
-        sendUpdate(s);
+      onBook((s) => {
+        const at = cursorTarget();
+        // The form the cursor is in, or the last one starting above it: the
+        // same reading the daemon gives a bare position, made explicit here
+        // because from now on it is a form that gets held and not a point.
+        const units = s.lastState?.units ?? [];
+        let pick = -1;
+        for (const u of units) {
+          if (startsAtOrBefore(u, at)) {
+            pick = u.index;
+          }
+        }
+        holdAt(s, pick);
       })
+    ),
+    vscode.commands.registerCommand('acl2-session.targetTop', () =>
+      onBook((s) => holdAt(s, -1))
+    ),
+    vscode.commands.registerCommand('acl2-session.targetForward', () =>
+      onBook((s) => stepBarrierBy(s, 1))
+    ),
+    vscode.commands.registerCommand('acl2-session.targetBackward', () =>
+      onBook((s) => stepBarrierBy(s, -1))
     ),
     vscode.commands.registerCommand('acl2-session.clearTarget', () =>
       forBook((s) => {
@@ -399,21 +468,22 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!s || e.contentChanges.length === 0) {
         return;
       }
+      const es: Edit[] = e.contentChanges.map((c) => ({
+        startLine: c.range.start.line + 1,
+        startChar: c.range.start.character,
+        endLine: c.range.end.line + 1,
+        endChar: c.range.end.character,
+        newLines: c.text.split('\n').length,
+      }));
       if (locked && locked.book === s.id) {
-        const edits: Edit[] = e.contentChanges.map((c) => ({
-          startLine: c.range.start.line + 1,
-          startChar: c.range.start.character,
-          endLine: c.range.end.line + 1,
-          endChar: c.range.end.character,
-          newLines: c.text.split('\n').length,
-        }));
-        const moved = keepAnchor(locked.anchor, edits);
+        const moved = keepAnchor(locked.anchor, es);
         if (moved) {
           locked = { book: locked.book, anchor: moved };
         } else {
           releaseLock('the form it was held on was edited away');
         }
       }
+      keepBarrier(s, es);
       if (s.debounce) {
         clearTimeout(s.debounce);
       }
@@ -1025,16 +1095,132 @@ function paintDocs(): void {
 }
 
 /** Where a unit starts, from the last state event. */
-function unitStart(s: BookSession, index: number): Target | undefined {
+function unitStart(s: BookSession, index: number): Pos | undefined {
   const u = s.lastState?.units.find((x) => x.index === index);
   return u && { line: u.line_start, column: u.col_start };
 }
 
 /** A daemon position as an editor one, converting the column it counts in bytes. */
-function positionOf(doc: vscode.TextDocument, at: Target): vscode.Position {
+function positionOf(doc: vscode.TextDocument, at: Pos): vscode.Position {
   const line = Math.min(Math.max(at.line, 1), doc.lineCount) - 1;
   const character = at.column === null ? 0 : charOffset(doc.lineAt(line).text, at.column);
   return new vscode.Position(line, character);
+}
+
+/**
+ * Like `forBook`, but starts the session first when there is not one.
+ *
+ * For the verbs that make sense on a book nobody has started yet -- every one
+ * of them is about where a run should *stop*, which is worth saying before it
+ * begins. The barrier is placed after the session exists, so the very first
+ * `update` carries it and nothing is admitted only to be rolled back.
+ */
+function onBook(f: (s: BookSession) => unknown): void {
+  const editor = vscode.window.activeTextEditor;
+  const s = editor && bookFor(editor.document);
+  if (s) {
+    void f(s);
+    return;
+  }
+  // Held before the first form from the very first `update`, so the session
+  // comes up having checked nothing. Not politeness: `f` is about to name a
+  // form by counting them, and a book left to run free would be admitting
+  // forms while it waited to be told where to stop.
+  void startCommand({ anchor: null }).then(async () => {
+    const started = editor && bookFor(editor.document);
+    if (!started) {
+      return;
+    }
+    // The daemon does the splitting, so there are no forms to count until it
+    // has. A book that never splits -- unreadable, or no daemon -- leaves this
+    // pending, and the barrier stays where `start` put it.
+    await Promise.race([
+      started.ready ?? Promise.resolve(),
+      new Promise<void>((res) => setTimeout(res, START_SPLIT_WAIT_MS)),
+    ]);
+    void f(started);
+  });
+}
+
+/**
+ * Re-seat the barrier on the split the daemon actually made.
+ *
+ * `keepBarrier` tracks the anchor through edits, but the anchor is a claim
+ * about where a form starts and only the daemon splits the file. A change can
+ * leave the anchor intact by the edit's own arithmetic and still dissolve the
+ * form -- delete a closing paren and two forms become one, whose head is the
+ * *earlier* of the two -- and then the anchor names a point inside a form
+ * rather than the start of one. Left alone that resolves to whatever form
+ * contains it, which is a form the reader never pointed at.
+ *
+ * `barrierIndex` rounds such an anchor up, and this writes the rounding back
+ * so the next edit tracks the form that is really there.
+ *
+ * Only against a split of the buffer as it stands: mid-edit the daemon's
+ * units describe an older text, and rounding up against those would walk the
+ * barrier backwards a form at a time for as long as someone kept typing.
+ */
+function settleBarrier(s: BookSession): void {
+  const units = s.lastState?.units ?? [];
+  if (!s.target?.anchor || units.length === 0 || s.lastState?.revision !== s.doc.version) {
+    return;
+  }
+  const i = barrierIndex(s.target.anchor, units);
+  const u = i >= 0 ? units[i] : undefined;
+  if (u && u.line_start === s.target.anchor.line && u.col_start === s.target.anchor.column) {
+    return;
+  }
+  s.target = { anchor: u ? anchorOf(s.doc, u) : null };
+}
+
+/**
+ * Carry the barrier across an edit.
+ *
+ * The same machinery the lock uses, and it has to be: a barrier that drifts
+ * by a line admits or withholds the wrong form, and both are wrong silently.
+ * What differs is the answer when the anchor does not survive. A lock lets go,
+ * which is the conservative end of *that* feature -- showing nothing beats
+ * showing the wrong form. Letting go here would mean no barrier, which is
+ * "check the whole book": the least conservative thing available, and reached
+ * by way of the reader deleting something.
+ *
+ * So it rounds up instead, to the nearest form above that does survive the
+ * same edits, and to the top when none does. Each candidate is judged by
+ * `keepAnchor` rather than assumed safe for being higher up -- one edit can
+ * span both -- and each failure walks one form further from the change.
+ */
+function keepBarrier(s: BookSession, es: readonly Edit[]): void {
+  if (!s.target?.anchor) {
+    return;
+  }
+  const moved = keepAnchor(s.target.anchor, es);
+  if (moved) {
+    s.target = { anchor: moved };
+    return;
+  }
+  const units = s.lastState?.units ?? [];
+  // Where it stood before the edit, so the walk starts from the right place
+  // even though the anchor itself is now unusable.
+  const from = barrierIndex(s.target.anchor, units);
+  for (let i = from - 1; i >= 0; i--) {
+    // Built against the document as it is *now*: the pre-edit text is already
+    // gone, and the UTF-16 offset is only consulted for an edit on the
+    // anchor's own line. Getting it wrong there makes `keepAnchor` decline,
+    // which walks one further up -- wrong in the safe direction.
+    const up = keepAnchor(anchorOf(s.doc, units[i]), es);
+    if (up) {
+      s.target = { anchor: up };
+      return;
+    }
+  }
+  s.target = { anchor: null };
+}
+
+/** Move the barrier by whole forms, taking hold of a free-running book. */
+function stepBarrierBy(s: BookSession, delta: number): void {
+  const units = s.lastState?.units ?? [];
+  const from = s.target ? barrierIndex(s.target.anchor, units) : frontierIndex(s);
+  holdAt(s, stepBarrier(from, delta, units.length));
 }
 
 function forBook(f: (s: BookSession) => unknown): void {
@@ -1049,8 +1235,72 @@ function forBook(f: (s: BookSession) => unknown): void {
   void f(s);
 }
 
+/** A form's first character, in every coordinate the barrier needs. */
+function anchorOf(doc: vscode.TextDocument, u: { line_start: number; col_start: number }): Anchor {
+  const line = Math.min(Math.max(u.line_start, 1), doc.lineCount);
+  return {
+    line: u.line_start,
+    column: u.col_start,
+    character: charOffset(doc.lineAt(line - 1).text, u.col_start),
+  };
+}
+
+/** The index the barrier stands after, `-1` for before the first form. */
+function barrierOf(s: BookSession): number {
+  const units = s.lastState?.units ?? [];
+  // No barrier at all is the whole book, whose last form is the last index.
+  // Not a special case anywhere else: every step and every redraw wants a
+  // number, and "the end" is the honest one.
+  return s.target ? barrierIndex(s.target.anchor, units) : units.length - 1;
+}
+
+/** Hold the barrier after form `i`; `-1` holds before the first. */
+function holdAt(s: BookSession, i: number): void {
+  const units = s.lastState?.units ?? [];
+  const u = i >= 0 ? units[i] : undefined;
+  s.target = { anchor: u ? anchorOf(s.doc, u) : null };
+  sendUpdate(s);
+}
+
+/**
+ * Where the barrier falls, for drawing: the end of the form it holds after.
+ *
+ * The glyph used to sit wherever the cursor was when the target was set,
+ * which was the barrier only by coincidence -- target from the middle of a
+ * form and checking stopped at the end of it while the mark stayed where the
+ * click was. Anchoring on a form makes the barrier a thing with a position,
+ * so it is drawn at that position.
+ */
+function barrierPos(s: BookSession): Pos | null {
+  if (!s.target) {
+    return null;
+  }
+  const i = barrierOf(s);
+  const u = i >= 0 ? s.lastState?.units[i] : undefined;
+  return u ? { line: u.line_end, column: u.col_end } : { line: 0, column: null };
+}
+
+/**
+ * The last form in the world: where a step starts from when nothing is held.
+ *
+ * A session with no barrier is racing through the book, and "back one" said
+ * against the *book* would move a barrier the reader cannot see and stop
+ * nothing. Said against the frontier it does what stepping means -- take hold
+ * where the run has actually got to, and move from there.
+ */
+function frontierIndex(s: BookSession): number {
+  const units = s.lastState?.units ?? [];
+  let last = -1;
+  for (const u of units) {
+    if (u.status === 'admitted' || u.status === 'conditional' || u.status === 'skipped') {
+      last = u.index;
+    }
+  }
+  return last;
+}
+
 /** Where the cursor is, in the daemon's coordinates. */
-function cursorTarget(): Target {
+function cursorTarget(): Pos {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
     return { line: 1, column: null };
@@ -1063,7 +1313,7 @@ function cursorTarget(): Target {
 }
 
 /** Whether a unit starts at or before a position. */
-function startsAtOrBefore(u: UnitState, at: Target): boolean {
+function startsAtOrBefore(u: UnitState, at: Pos): boolean {
   if (u.line_start !== at.line || at.column === null) {
     return u.line_start <= at.line;
   }
@@ -1128,7 +1378,7 @@ function ensureClient(): DaemonClient {
   return c;
 }
 
-async function startCommand(): Promise<void> {
+async function startCommand(initial?: Held): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor || editor.document.uri.scheme !== 'file') {
     // By contract: an untitled buffer has no directory, hence no
@@ -1153,13 +1403,20 @@ async function startCommand(): Promise<void> {
     const s: BookSession = {
       id: r.book as string,
       doc,
-      target: null,
+      // Placed before the first `update`, which is the point: a barrier
+      // arriving a moment later would arrive after the daemon had already
+      // begun on a book it was told to check all of.
+      target: initial ?? null,
+      ready: undefined,
       unitEvents: new Map(),
       rulesByUnit: new Map(),
       inductionByUnit: new Map(),
       evalQueue: [],
       evalReplies: new Map(),
     };
+    s.ready = new Promise<void>((res) => {
+      s.markReady = res;
+    });
     books.set(key, s);
     byId.set(s.id, s);
     // The outline could not be answered before this session existed, and
@@ -1321,7 +1578,12 @@ function sendUpdate(s: BookSession): void {
   client?.notify('update', {
     book: s.id,
     text: fromFile ? undefined : s.doc.getText(),
-    target_line: s.target?.line ?? null,
+    // The *head* of the target form, not the barrier itself. The daemon's
+    // own `goal_unit` reads a target as "the last form covering or ending by
+    // this position", so a form's first character resolves back to that form
+    // -- and the head is the point that survives editing the form, which its
+    // end does not.
+    target_line: s.target ? (s.target.anchor?.line ?? 0) : null,
     // The column only means anything if the daemon is splitting the same
     // bytes this column was measured against.
     //
@@ -1336,7 +1598,7 @@ function sendUpdate(s: BookSession): void {
     // then would point at the wrong place in the wrong units. Lines survive
     // that, since a newline is a newline in any encoding, so the target
     // falls back to naming a whole line: less precise, and not wrong.
-    target_column: fromFile ? null : (s.target?.column ?? null),
+    target_column: fromFile ? null : (s.target?.anchor?.column ?? null),
     // The document's own monotone version is exactly the revision the
     // protocol wants stamped back on events.
     revision: s.doc.version,
@@ -1370,9 +1632,11 @@ function bufferCarriesFile(doc: vscode.TextDocument): boolean {
 function retractTo(s: BookSession, keep: number): void {
   const units = s.lastState?.units ?? [];
   const kept = keep > 0 ? units[keep - 1] : undefined;
-  // The end of the kept form, column included: held at its line alone, a
-  // form sharing that line would be admitted straight back.
-  s.target = kept ? { line: kept.line_end, column: kept.col_end } : { line: 0, column: null };
+  // A retraction leaves a barrier behind it, or the next drive would re-admit
+  // what was just rolled back. The kept *form*, not its end position: it is
+  // held from here exactly as any other barrier is, and survives editing the
+  // form it names for the same reason.
+  s.target = { anchor: kept ? anchorOf(s.doc, kept) : null };
   client?.notify('retract', { book: s.id, keep });
 }
 
@@ -1596,7 +1860,7 @@ function gotoAttention(s: BookSession): void {
   // first line and still be standing on it.
   const here = cursorTarget();
   const on = unitAt(s, here);
-  const standingOn = (p: { at: Target }): boolean =>
+  const standingOn = (p: { at: Pos }): boolean =>
     p.at.line === here.line &&
     // Where that line holds a second form, though, the cursor has to be on
     // *this* one; where it holds only this one, anywhere along it will do.
@@ -1651,6 +1915,9 @@ function onState(p: StateEvent): void {
     return;
   }
   s.lastState = p;
+  s.markReady?.();
+  s.markReady = undefined;
+  settleBarrier(s);
   paint(s);
   updateStatusBar(s);
   const shown = formView.shown();
@@ -1857,7 +2124,7 @@ function paint(s: BookSession): void {
   for (const editor of vscode.window.visibleTextEditors) {
     if (editor.document === s.doc) {
       decorations.apply(editor, s.lastState.units, opts);
-      decorations.applyTarget(editor, s.target);
+      decorations.applyTarget(editor, barrierPos(s));
     }
   }
 }
@@ -1887,7 +2154,7 @@ function updateStatusBar(s: BookSession): void {
  * caret sits between characters and the one just past a closing paren
  * belongs to the form it closes. Matches the daemon's `Form::covers`.
  */
-function unitAt(s: BookSession, at: Target): UnitState | undefined {
+function unitAt(s: BookSession, at: Pos): UnitState | undefined {
   const units = s.lastState?.units;
   if (!units) {
     return undefined;
