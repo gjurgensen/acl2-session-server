@@ -791,7 +791,9 @@ pub struct UnitState {
     /// closing paren, so the pair reads as a range. See `BookSymbol`.
     pub col_start: usize,
     pub col_end: usize,
-    /// `pending`, `admitted`, `conditional`, `skipped`, `failed`, `running`.
+    /// `pending`, `beyond`, `admitted`, `conditional`, `skipped`, `failed`,
+    /// `running`. `beyond` is past an explicit target: unchecked, and not
+    /// queued to be, until the target moves.
     pub status: &'static str,
 }
 

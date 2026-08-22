@@ -62,6 +62,11 @@ export function barFor(mode: DecorationMode, status: string): string | undefined
   }
   switch (status) {
     case 'pending':
+    // Drawn as queued for now. `beyond` exists so the *client* can tell the
+    // two apart -- a form the run will reach from one it will not -- and the
+    // question of whether the gutter should say so differently is the target's
+    // appearance, which is its own decision.
+    case 'beyond':
       return 'pending';
     case 'running':
       return 'running';

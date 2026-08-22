@@ -22,7 +22,7 @@ body { font-family: var(--vscode-font-family); color: var(--vscode-foreground);
 .status.conditional { background: rgba(212, 172, 13, 0.25); }
 .status.skipped, .status.failed { background: rgba(198, 40, 40, 0.25); }
 .status.running { background: rgba(90, 140, 210, 0.3); }
-.status.pending, .status.queued { background: rgba(136, 136, 136, 0.2); }
+.status.pending, .status.queued, .status.beyond { background: rgba(136, 136, 136, 0.2); }
 .meta { opacity: 0.7; font-size: 12px; }
 h3 { margin: 14px 0 4px; font-size: 11px; text-transform: uppercase;
      letter-spacing: 0.05em; opacity: 0.75; }

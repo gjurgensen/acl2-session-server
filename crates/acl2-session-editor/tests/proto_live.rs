@@ -432,12 +432,14 @@ fn the_daemon_triages_a_book_and_holds_a_retraction() {
     let st = d.request("status", json!({ "book": book }));
     assert!(st["running"].is_null());
 
-    // Retract to the defun; the held target keeps the rest pending.
+    // Retract to the defun; the held target keeps the rest out. `beyond`
+    // rather than `pending`: a retraction leaves a target behind it, and
+    // these two forms are not queued for anything until it moves.
     d.notify("retract", json!({ "book": book, "keep": 2 }));
     let more = d.events_until_settled();
     assert_eq!(more.last().expect("settled").1["reason"], "reached_target");
     let state = last_state(&more);
-    assert_eq!(statuses(&state), ["admitted", "admitted", "pending", "pending"]);
+    assert_eq!(statuses(&state), ["admitted", "admitted", "beyond", "beyond"]);
     assert!(state["conditional_from"].is_null());
 
     // Back to the whole book, fully settled again.
@@ -1372,7 +1374,7 @@ fn a_target_column_picks_between_two_forms_on_a_line() {
     }));
     let events = d.events_until_settled();
     let state = last_state(&events);
-    assert_eq!(statuses(&state), ["admitted", "admitted", "pending"],
+    assert_eq!(statuses(&state), ["admitted", "admitted", "beyond"],
                "the second form on the line is held out: {state}");
     let units = state["units"].as_array().expect("units");
     assert_eq!((units[1]["line_start"].as_u64(), units[2]["line_start"].as_u64()),
@@ -1397,7 +1399,7 @@ fn a_target_column_picks_between_two_forms_on_a_line() {
         "target_line": 2, "target_column": 18, "revision": 3,
     }));
     let events = d.events_until_settled();
-    assert_eq!(statuses(&last_state(&events)), ["admitted", "admitted", "pending"],
+    assert_eq!(statuses(&last_state(&events)), ["admitted", "admitted", "beyond"],
                "the retraction holds: {:?}", last_state(&events));
 
     // Every position the daemon reports carries its column.
@@ -1414,4 +1416,41 @@ fn a_target_column_picks_between_two_forms_on_a_line() {
 
     d.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A form past the target is not queued for anything, and does not say it is.
+#[test]
+#[ignore = "needs ACL2"]
+fn forms_past_the_target_are_beyond_rather_than_pending() {
+    let Some(acl2) = acl2() else {
+        eprintln!("ACL2 not set; skipping");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("acl2-editord-beyond-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let book_path: PathBuf = dir.join("beyond.lisp");
+    let text = "(in-package \"ACL2\")\n\
+                (defun one (x) x)\n\
+                (defun two (x) x)\n";
+    std::fs::write(&book_path, text).expect("write book");
+
+    let mut d = Daemon::start(&acl2);
+    let opened = d.request("open", json!({ "path": book_path.to_str().unwrap() }));
+    let book = opened["book"].as_str().expect("book id").to_string();
+
+    d.notify("update", json!({
+        "book": book, "text": text, "target_line": 2, "target_column": 18, "revision": 1,
+    }));
+    let events = d.events_until_settled();
+    assert_eq!(statuses(&last_state(&events)), ["admitted", "admitted", "beyond"]);
+
+    // Without a target the same unchecked form is `pending`, which is the
+    // distinction: one will be reached, the other will not.
+    d.notify("retract", json!({ "book": book, "keep": 2 }));
+    let _ = d.events_until_settled();
+    d.notify("update", json!({ "book": book, "text": text, "revision": 2 }));
+    let events = d.events_until_settled();
+    assert_eq!(statuses(&last_state(&events)), ["admitted", "admitted", "admitted"],
+               "clearing the target lets the run reach it: {:?}", last_state(&events));
 }

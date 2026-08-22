@@ -1625,9 +1625,15 @@ function gotoFrontier(s: BookSession): void {
   if (!editor || units.length === 0) {
     return;
   }
+  // `beyond` is deliberately not a frontier: the run stops before it and no
+  // amount of waiting brings the session there. That also moves the last
+  // resort, which used to be the end of the *book* -- for a targeted run the
+  // place to land is the barrier, so it is the last form the run can reach.
+  const reachable = units.filter((u) => u.status !== 'beyond');
   const frontier =
     units.find((u) => u.status === 'running') ??
     units.find((u) => u.status === 'pending') ??
+    reachable[reachable.length - 1] ??
     units[units.length - 1];
   const pos = positionOf(editor.document, {
     line: frontier.line_start,
@@ -2287,9 +2293,9 @@ function buildFormModel(s: BookSession, index: number): FormModel | undefined {
     rules: [],
     skipped: u.status === 'skipped',
   };
-  // A pending or running unit's cached envelope describes an earlier life
+  // An unchecked or running unit's cached envelope describes an earlier life
   // (before a rollback re-queued it), so it is not shown.
-  if (u.status === 'pending' || u.status === 'running') {
+  if (u.status === 'pending' || u.status === 'beyond' || u.status === 'running') {
     return model;
   }
   const e = s.unitEvents.get(index);

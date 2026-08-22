@@ -66,5 +66,25 @@ check('a running form outranks a pending one',
 check('conditional forms are not stops',
   attentionPoints(book('conditional', 'conditional')), [{ unit: null, kind: 'eof' }]);
 
+// A form past an explicit target is not somewhere to send anyone. Before
+// `beyond` existed these were `pending`, so a finished targeted run reported a
+// frontier the session had no intention of ever reaching, and sitting there
+// waiting did nothing.
+check('everything up to the target done: nothing left to attend to',
+  attentionPoints(book('admitted', 'admitted', 'beyond', 'beyond')),
+  [{ unit: null, kind: 'eof' }]);
+check('the frontier is the queued form, not the one past the barrier',
+  attentionPoints(book('admitted', 'pending', 'beyond')),
+  [{ unit: 1, kind: 'frontier' }]);
+// A red form is by construction inside the barrier: the run stopped there, so
+// it never reached past.
+check('a failure still comes first, and the frontier after it is still queued',
+  attentionPoints(book('admitted', 'failed', 'pending', 'beyond')),
+  [{ unit: 1, kind: 'failed' }, { unit: 2, kind: 'frontier' }]);
+// With no target nothing is `beyond`, so the split is invisible.
+check('an untargeted book behaves exactly as before',
+  attentionPoints(book('admitted', 'pending', 'pending')),
+  [{ unit: 1, kind: 'frontier' }]);
+
 console.log(failures === 0 ? 'attention: all green' : `attention: ${failures} failed`);
 process.exit(failures === 0 ? 0 : 1);

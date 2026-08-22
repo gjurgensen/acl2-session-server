@@ -1507,6 +1507,18 @@ impl Driver {
         // file's; the frontier is the authority.
         self.file_names.retain(|_, (_, _, unit)| *unit < admitted);
         let conditional_from = skipped.first().copied();
+        // A form past an explicit target is not queued for anything: the run
+        // stops before it, and nothing will reach it until the target moves.
+        // Saying "pending" there was a promise the driver had no intention of
+        // keeping -- and one the client acted on, sending "go to frontier" to
+        // a form the session would never arrive at.
+        //
+        // Counted as units, not as an index, so "the barrier is before the
+        // first form" is 0 rather than a missing value: `goal_unit` answers
+        // `None` both for that and for having no target at all, and only the
+        // first of those makes every form beyond.
+        let barrier =
+            self.target_line.is_some().then(|| self.goal_unit().map_or(0, |g| g + 1));
         let units = self
             .units
             .iter()
@@ -1523,6 +1535,8 @@ impl Driver {
                     "running"
                 } else if Some(i) == self.failed_unit {
                     "failed"
+                } else if barrier.is_some_and(|b| i >= b) {
+                    "beyond"
                 } else {
                     "pending"
                 };

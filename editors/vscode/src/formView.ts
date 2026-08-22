@@ -714,6 +714,9 @@ function render() {
   if (m.status === 'pending') {
     h += '<p class="meta">Not processed yet.</p>';
   }
+  if (m.status === 'beyond') {
+    h += '<p class="meta">Beyond the target \u2014 not processed, and not queued to be.</p>';
+  }
   h += envelope(
     withDetail({ ...m, failed: m.status === 'skipped' || m.status === 'failed' }),
     'goal-',
