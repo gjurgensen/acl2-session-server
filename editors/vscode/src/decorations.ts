@@ -31,7 +31,7 @@
 import * as vscode from 'vscode';
 import { UnitState } from './protocol';
 import { charOffset } from './positions';
-import { gutterMinus, paintMap, Span } from './paintmap';
+import { paintMap, Span } from './paintmap';
 import {
   Bar,
   BARS,
@@ -47,7 +47,6 @@ import {
   forTheme,
   firstDefined,
   gutterSvg,
-  targetSvg,
   svgCanPaint,
   unreadableMark,
   washColorId,
@@ -63,8 +62,6 @@ export { DecorationMode };
 
 export interface DecorationOptions {
   mode: DecorationMode;
-  /** Where the held target's mark goes, so no status contests its cell. */
-  target?: { line: number; inline: { line: number; col: number } | null } | null;
 }
 
 /**
@@ -171,7 +168,6 @@ export class Decorations {
   /** `minimal`'s one mark: a spinner at the head of the running form. */
   private spinner!: vscode.TextEditorDecorationType;
   private target!: vscode.TextEditorDecorationType;
-  private targetInline!: vscode.TextEditorDecorationType;
   private unreadable!: vscode.TextEditorDecorationType;
   /**
    * The same tail in the status column, for the mode that speaks in bars.
@@ -317,9 +313,7 @@ export class Decorations {
     // being proved -- admitted green, conditional YELLOW, red for the reds.
     // Running used to be blue; the pulse says it better than a fifth hue did.
     for (const bar of BARS) {
-      // The target is in this table for its colour only. It is not a status
-      // and has no status bar; its own two shapes are built below.
-      if (bar.icon === 'target') {
+      if (bar.inlineOnly) {
         continue;
       }
       // A bar can speak for two statuses (skipped and failed share one), and
@@ -358,47 +352,22 @@ export class Decorations {
       });
     }
 
-    // The held target, in two shapes for the two places it can fall.
-    //
-    // It replaces a gold phantom square drawn at whatever column the target
-    // was set from. That mark said "something is here" without saying what,
-    // sat in a hue a hand's breadth from the conditional yellow, and pointed
-    // at a position that was the barrier only by coincidence.
+    // The held target: one mark, in the text, just after the last form that
+    // will be checked. See `INLINE_TARGET` for why it is not in the gutter.
     {
       const c = { light: over('target', 'bar', 'light'), dark: over('target', 'bar', 'dark') };
-      const rule = (theme: 'light' | 'dark'): vscode.Uri | string => {
-        const c0 = c[theme];
-        return c0 === undefined || !svgCanPaint(c0)
-          ? this.context.asAbsolutePath(`media/target-${theme}.svg`)
-          : vscode.Uri.parse(
-              `data:image/svg+xml;base64,${Buffer.from(targetSvg(c0), 'utf8').toString('base64')}`
-            );
-      };
-      // The ruler mark is line-resolution, which is all a scrollbar has: two
-      // forms on a line share a tick. That is the right precision for "look
-      // around here" and the wrong precision for the barrier itself, which is
-      // why the two marks below exist and the tick does not replace them.
+      const arrow = (color: string | vscode.ThemeColor) => ({
+        after: { ...INLINE_TARGET, color },
+      });
+      // A tick on the scrollbar as well, at the only resolution a scrollbar
+      // has: two forms on a line share one. That is the right precision for
+      // "look around here" and the wrong precision for the barrier itself,
+      // which the mark in the text gives exactly.
       this.target = vscode.window.createTextEditorDecorationType({
         overviewRulerLane: vscode.OverviewRulerLane.Left,
         overviewRulerColor: pick(c.dark ?? c.light, barColorId('target')),
-        light: { gutterIconPath: rule('light'), gutterIconSize: 'contain' },
-        dark: { gutterIconPath: rule('dark'), gutterIconSize: 'contain' },
-      });
-      // And where the gutter cannot reach. A gutter cell addresses a line,
-      // so a barrier falling between two forms written on one line has no
-      // cell of its own: the cell belongs to the form that starts the line,
-      // which is on the *other* side of the barrier. Drawn in the text
-      // instead, at the column the second form begins -- the same escape
-      // hatch `paintmap` already gives a status in that position.
-      // A glyph, not an image: see `INLINE_TARGET`. An image here pushes the
-      // line box open, which is what this module already says about the
-      // inline *bar* and is no less true of an inline icon.
-      const dot = (color: string | vscode.ThemeColor) => ({
-        before: { ...INLINE_TARGET, color },
-      });
-      this.targetInline = vscode.window.createTextEditorDecorationType({
-        light: dot(pick(c.light, barColorId('target'))),
-        dark: dot(pick(c.dark, barColorId('target'))),
+        light: arrow(pick(c.light, barColorId('target'))),
+        dark: arrow(pick(c.dark, barColorId('target'))),
       });
     }
     // The unreadable tail, from the paren that never closes to end of file.
@@ -495,14 +464,6 @@ export class Decorations {
       inline.set(bar.icon, []);
     }
 
-    // The cell the target's mark takes, so no status tries to share it.
-    // Null in `wash` and `minimal`, which draw no bars for it to displace.
-    const contested = opts.mode === 'gutter' ? (opts.target ?? null) : null;
-    const targetLine = contested && !contested.inline ? contested.line : null;
-    const targetInline = contested?.inline ?? null;
-    const sameSpot = (a: { line: number; col: number }, b: { line: number; col: number }) =>
-      a.line === b.line && a.col === b.col;
-
     // Spinners: at the head of the form, one line, never a column.
     const spins: vscode.Range[] = [];
 
@@ -527,20 +488,14 @@ export class Decorations {
         spins.push(new vscode.Range(p.head - 1, 0, p.head - 1, 0));
         continue;
       }
-      // Minus whatever cell the target's mark has claimed: one icon per cell,
-      // and the mark is the one worth seeing there.
-      const g = gutterMinus(p.gutter, targetLine);
-      if (g) {
-        bars.get(mark.icon)?.push(new vscode.Range(g.from - 1, 0, g.to - 1, 0));
+      if (p.gutter) {
+        bars.get(mark.icon)?.push(new vscode.Range(p.gutter.from - 1, 0, p.gutter.to - 1, 0));
       }
       // No gutter cell of its own: the bar goes between the two forms, at
       // the column this one starts in. A form that has both -- it opens on
       // a line it does not own and runs on past it -- gets both, which is
       // right: the mark says where it starts, the cells say how far it runs.
-      // Same rule inline. Two `before` attachments at one column stack rather
-      // than overdraw, so this is legibility rather than necessity -- but a
-      // boundary said twice, in two shapes, is a boundary said worse.
-      if (p.inlineAt && !(targetInline && sameSpot(p.inlineAt, targetInline))) {
+      if (p.inlineAt) {
         inline.get(mark.icon)?.push(at(p.inlineAt));
       }
     }
@@ -564,36 +519,32 @@ export class Decorations {
   /**
    * Draw (or clear, with null) the mark for the held target.
    *
-   * `at` is the *first form beyond* the barrier, not the last form inside it,
-   * and the reason is which gutter has room. Beside an included form the
-   * column is fully spoken for -- green, yellow and red each say something
-   * nothing else says -- so marking there would displace a verdict rather
-   * than add a mark. Beyond it every form is the same grey, hundreds of them,
-   * so specialising the first costs nothing and supplies the one fact that
-   * region needs: where it starts.
+   * `at` is the end of the last form that will be checked: the mark goes
+   * immediately after it, pointing back at it. A position and not a line,
+   * which is the whole reason it is here and not in the gutter -- two forms
+   * can share a line, and only a column can say which of them the barrier
+   * falls after.
    *
-   * `inline` when the form does not own its line's gutter cell. See the
-   * construction of the two types.
+   * Line 0 is held above everything, and the mark leads the file: there is no
+   * last included form to sit after, and the top of the buffer is where "none
+   * of this is in" belongs.
    */
-  applyTarget(
-    editor: vscode.TextEditor,
-    at: { line: number; inline: { line: number; col: number } | null } | null
-  ): void {
+  applyTarget(editor: vscode.TextEditor, at: { line: number; column: number | null } | null): void {
     if (at === null) {
       editor.setDecorations(this.target, []);
-      editor.setDecorations(this.targetInline, []);
       return;
     }
-    if (at.inline) {
-      const l = Math.min(Math.max(at.inline.line, 1), editor.document.lineCount) - 1;
-      const c = charOffset(editor.document.lineAt(l).text, at.inline.col);
-      editor.setDecorations(this.target, []);
-      editor.setDecorations(this.targetInline, [new vscode.Range(l, c, l, c)]);
+    if (at.line < 1) {
+      editor.setDecorations(this.target, [new vscode.Range(0, 0, 0, 0)]);
       return;
     }
-    const l = Math.min(Math.max(at.line, 1), editor.document.lineCount) - 1;
-    editor.setDecorations(this.target, [new vscode.Range(l, 0, l, 0)]);
-    editor.setDecorations(this.targetInline, []);
+    const l = Math.min(at.line, editor.document.lineCount) - 1;
+    const text = editor.document.lineAt(l).text;
+    const p =
+      at.column === null
+        ? editor.document.lineAt(l).range.end
+        : new vscode.Position(l, charOffset(text, at.column));
+    editor.setDecorations(this.target, [new vscode.Range(p, p)]);
   }
 
   clear(editor: vscode.TextEditor): void {

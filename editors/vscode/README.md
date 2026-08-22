@@ -19,44 +19,20 @@ form status is then shown is `acl2-session.decorations`:
 Each mode marks each fact once, which is the rule they are built around: never
 a bar *and* a wash, never a wash *and* a squiggle.
 
-A held target is drawn in every mode, and identically in all three: a red
-no-entry sign in the gutter beside the first form the run will **not** reach. A
-sign and not a bar, because every bar in that column is a verdict about the form
-beside it and the target is not a verdict at all. It says what happens at that
-line rather than where the boundary lies — a gutter cell addresses a line, so an
-icon in one is always read as being about that line, and a mark that tried to
-sit *between* two either could not be seen or read as a status of the form
-beside it. Where two forms share a line and the barrier falls between them, the
-gutter has no cell to use, so the mark goes in the text at the column the second
-form begins.
+A held target is drawn in every mode, and identically in all three: a small blue
+arrow in the text, immediately after the last form that will be checked,
+pointing back at it. Everything up to the arrow is in.
 
-It is the same red as a failure, which is a trade rather than an oversight: a
-no-entry sign that is not red is not a no-entry sign, and this is the one mark
-in that column whose *shape* carries its meaning, so it can afford to share a
-hue. What it costs is red's uniqueness — with a target held, red no longer means
-"a form failed" on its own, and a red disc has to be told from a red bar.
+In the text rather than in the gutter, and that is not an aesthetic choice. A
+gutter cell addresses a *line*, so it cannot say "after this form" on a line
+holding two — and a cell holds one icon, so a mark there would have to take it
+from the status bar that wants it. A column is what the position actually is,
+so the mark goes where the position is. The scrollbar gets a tick as well, at
+the only resolution a scrollbar has: two forms on a line share one, which makes
+it a "look around here" aid rather than a statement about which of them.
 
-It marks the first form *beyond* rather than the last form included, because
-that is the side with room. Beside an included form the gutter already says
-green, yellow or red, and a target there would displace a verdict instead of
-adding a fact; beyond it every form is the same grey. That form gives up its
-own gutter cell to the mark — one cell holds one icon — and keeps the rest, so
-a multi-line form still reads as grey below its head. The scrollbar gets a tick
-too, at line resolution: two forms on a line share one, which makes it a "look
-around here" aid rather than a statement about which of them.
-
-A buffer that will not lex — a stray bracket — marks its whole tail rather
-than one form, because nothing below the bracket has been *read*, let alone
-checked. Which mark is still the mode's: a wash in `wash`, the status column
-in `gutter`, and in `minimal` the diagnostic alone.
-
-Conditional forms can be warnings there too, with
-`acl2-session.conditionalWarnings`. Off by default: a conditional form was
-proved, and proved correctly, on top of a claim that was not, so nothing is
-wrong with it in isolation — and *every* form below the first skip is one, so
-turning it on can mean a great many yellow squiggles at once. The warning
-names the line the skipping started at, which is the form actually worth
-fixing.
+With the target held above everything the arrow leads the file, since there is
+no included form for it to follow.
 
 Failed and skipped forms are reported in the **Problems** view in every mode,
 which is also where the squiggle comes from — VSCode gives no way to have the

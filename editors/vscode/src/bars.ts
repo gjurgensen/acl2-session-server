@@ -177,6 +177,16 @@ export function problemFor(
 export interface Bar {
   /** The `media/<icon>-{light,dark}.svg` basename, and the map key. */
   icon: string;
+  /**
+   * Set for an entry that names a colour but draws no gutter icon.
+   *
+   * Only the held target, which is a character in the text. It is in this
+   * table because this is where a hue gets read from the theme, overridden by
+   * the reader and shipped as a fallback, and none of that machinery cares
+   * what shape the thing is -- but it has no `media/` asset, so anything that
+   * walks the table looking for one has to skip it.
+   */
+  inlineOnly?: boolean;
   /** Whether this bar breathes. See `PULSE`; only a running form does. */
   pulse?: boolean;
   /**
@@ -266,29 +276,35 @@ export const BARS: Bar[] = [
   // and shipped as a fallback -- and nothing about that machinery cares
   // whether the thing being coloured is a verdict.
   //
-  // Red, and deliberately the *same* red as a failure rather than a near one.
-  // A no-entry sign that is not red is not a no-entry sign, and this is the
-  // one place in the column where a hue is not doing the work: the silhouette
-  // says what the mark means, so sharing red costs nothing a second glance
-  // does not recover. What it does cost is red's uniqueness -- a reader
-  // scanning for failures gets a hit on a held target -- and that is the
-  // trade, made knowingly.
+  // Blue, which the gutter freed when running stopped needing a hue of its
+  // own. `editorInfo.foreground` is the right word for it: the target is
+  // information the reader supplied, not a judgement the prover reached.
   //
-  // Stronger than the status bars on purpose: a sign wants to be read, where
-  // a status bar wants to be noticed and then ignored.
+  // Red was tried, and was only ever needed because the mark was a no-entry
+  // sign and a no-entry sign that is not red is not one. An arrow carries no
+  // such obligation, so red goes back to meaning a form failed and nothing
+  // else -- which is the most important thing this file says.
+  //
+  // Stronger than the status bars on purpose: this one is read rather than
+  // scanned.
   //
   // Deliberately not the last entry: `barOfStatus` falls back to the final
   // one for a status it does not know, and red is the right thing to be
   // wrong with.
   {
     icon: 'target',
+    // No gutter icon and no shipped asset: this one is a character in the
+    // text. It is in this table for the colour alone, since this is where a
+    // hue is read from the theme, overridden by the reader and shipped as a
+    // fallback -- and none of that cares what shape the thing is.
+    inlineOnly: true,
     themeIds: {
-      light: ['editorError.foreground', 'charts.red', 'terminal.ansiRed'],
-      dark: ['editorError.foreground', 'charts.red', 'terminal.ansiBrightRed'],
+      light: ['editorInfo.foreground', 'charts.blue', 'terminal.ansiBlue'],
+      dark: ['editorInfo.foreground', 'charts.blue', 'terminal.ansiBrightBlue'],
     },
     statuses: ['target'],
-    light: 'rgba(229, 20, 0, 0.9)',
-    dark: 'rgba(241, 76, 76, 0.85)',
+    light: 'rgba(26, 133, 255, 0.9)',
+    dark: 'rgba(55, 148, 255, 0.85)',
   },
   {
     icon: 'red',
@@ -331,74 +347,33 @@ export const BARS: Bar[] = [
  */
 const DROP = '0.25em';
 /**
- * The held target's mark: a stop sign beside the first form the run will not
- * reach.
+ * The held target's mark: an arrow just after the last form that will be
+ * checked, pointing back at it.
  *
- * Three attempts got here, and what they were each wrong about is worth
- * keeping. A thin rule along the cell's top edge said "boundary" and could not
- * be seen -- three units of eighteen is two or three pixels at an ordinary
- * font size. A solid triangle filling the cell could be seen and said the
- * wrong thing, sitting *on* a line where a barrier is between two. A shaft and
- * a head along the top edge was both, and still fighting the surface: a gutter
- * cell addresses a line, so whatever is drawn in one reads as being about that
- * line, and no amount of drawing near the top edge changes that.
+ * Inline, always, and a character. Four drawings went into the gutter before
+ * this and every one of them failed to the same cause, which is worth writing
+ * down: a gutter cell addresses a *line*. It cannot say "after this form" on a
+ * line that holds two, so the mark needed a second shape for that case; the
+ * two shapes then had to be one drawing to look alike, which put an image
+ * inline, which pushed every line it landed on open. And a cell holds one
+ * icon, so the mark also had to take the cell away from the status bar that
+ * wanted it.
  *
- * So stop fighting it. The mark is about a line -- the head of the first form
- * that will not be checked -- and the icon says what happens there rather than
- * where the boundary lies.
+ * A column is what the position actually is. Inline there is no second case,
+ * no second shape, no cell to win, and nothing displaced -- the form beside it
+ * keeps its bar, and a form sharing a line is handled by the same code as
+ * every other, because it *is* the same code.
  *
- * A no-entry sign and not the octagon that came before it, because at this
- * size an octagon *is* a circle: its meaning lives in an outline that a
- * nineteen-pixel cell does not resolve. What survives at this size is a
- * silhouette with a hole in it. The slot is the message, and it is legible
- * for the same reason the outline was not.
+ * Pointing left because it points at what it is about: everything up to here
+ * is in. Which also fixes the end of the book, where "the first form beyond"
+ * is nothing at all and the mark had nowhere to go.
  *
- * Shape simple enough to survive being drawn twice, which the arrow was not.
- * The inline twin is a character, and a font decides a shaft-and-head arrow's
- * proportions for itself; a disc with a bar through it it can manage.
- */
-export function targetSvg(color: string): string {
-  return (
-    '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18">' +
-    `<path d="${TARGET_STOP}" fill-rule="evenodd" fill="${escapeAttr(color)}"/>` +
-    '</svg>'
-  );
-}
-
-/**
- * A disc with a slot through it: the no-entry sign, centred in the cell.
- *
- * Two subpaths -- the disc, then the bar -- and the bar is a *hole*, which is
- * what `fill-rule="evenodd"` is doing and why it is not decoration. Without it
- * the two subpaths merge and the icon is a plain disc, which is the thing this
- * shape exists to stop being.
- *
- * Kept as a constant because `media/target-*.svg` has to draw the same shape
- * and is otherwise a hand-copied pair.
- */
-export const TARGET_STOP =
-  'M2.5 9 A6.5 6.5 0 1 0 15.5 9 A6.5 6.5 0 1 0 2.5 9 Z ' +
-  'M3.6 7.6 L14.4 7.6 L14.4 10.4 L3.6 10.4 Z';
-
-/**
- * The same mark where the gutter cannot reach: between two forms on a line.
- *
- * A character, and the reason is the one this file already records two
- * paragraphs down and I did not believe: an inline attachment carrying an
- * image pushes the line box open. `INLINE_BAR`'s geometry keeps a *coloured
- * box* on the line, and putting an image in that box does not inherit the
- * property -- tried, and it shifted every line the mark landed on.
- *
- * A glyph is sized to the line by construction and needs no geometry at all,
- * which is what the mark this replaced always did. It costs nothing here that
- * it cost the arrow: `\u2296` is a disc with a bar through it and so is the
- * gutter icon, so the two agree without being the same drawing. A font that
- * lacks it falls back to another one -- a glyph of the wrong width rather than
- * of the wrong shape, which is the failure worth having.
+ * U+25C4 rather than U+25C0, which is the same triangle with an emoji
+ * presentation available -- and a mark that turns into a coloured emoji on
+ * some fonts is a mark that has stopped taking the theme's colour.
  */
 export const INLINE_TARGET = {
-  contentText: '\u2296',
-  margin: '0 0.08em 0 0.08em',
+  contentText: ' \u25c4',
 };
 
 export const INLINE_BAR = {

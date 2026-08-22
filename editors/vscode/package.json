@@ -216,12 +216,12 @@
       },
       {
         "id": "acl2Session.bar.target",
-        "description": "The held target: where checking stops.",
+        "description": "The held target: the mark after the last form that will be checked.",
         "defaults": {
-          "light": "#e51400e6",
-          "dark": "#f14c4cd9",
-          "highContrast": "#f14c4cd9",
-          "highContrastLight": "#e51400e6"
+          "light": "#1a85ffe6",
+          "dark": "#3794ffd9",
+          "highContrast": "#3794ffd9",
+          "highContrastLight": "#1a85ffe6"
         }
       },
       {

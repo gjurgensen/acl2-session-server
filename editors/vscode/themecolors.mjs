@@ -181,60 +181,38 @@ for (const kind of ['light', 'dark']) {
     check('and is the one that pulses', bar.pulse, true);
   }
 
-  // The held target's mark says what happens at a line rather than where a
-  // boundary lies, which is the fourth answer this question got. A gutter cell
-  // addresses a line, so anything drawn in one reads as being about that line;
-  // and at nineteen pixels a shape's *outline* is not resolved, which is what
-  // sank the octagon before it -- an octagon at this size is a circle. What
-  // survives is a silhouette with a hole in it.
+  // The held target's mark is a character in the text, and that is the answer
+  // after four attempts to put it in the gutter. A gutter cell addresses a
+  // *line*: it cannot say "after this form" on a line holding two, so the mark
+  // needed a second shape for that case, and making the two look alike put an
+  // image inline, which pushed every line it landed on open. A column is what
+  // the position actually is.
   {
-    const { targetSvg, gutterSvg, TARGET_STOP, INLINE_TARGET } = require('./out/bars.js');
-    const stop = targetSvg('#f14c4c');
-    check('the target mark is a shape, not a bar', /<path/.test(stop) && !/<rect/.test(stop), true);
-    check('and a status bar is a bar', /<rect/.test(gutterSvg('#f14c4c')), true);
+    const { INLINE_TARGET, INLINE_BAR } = require('./out/bars.js');
+    check('the target mark is a glyph', typeof INLINE_TARGET.contentText, 'string');
+    check('and points back at what it follows', INLINE_TARGET.contentText.trim(), '\u25c4');
+    // U+25C0 is the same triangle with an emoji presentation available, and a
+    // mark rendered as a colour emoji is a mark no longer taking the theme's.
+    check('and is the presentation-neutral one, not U+25C0',
+      INLINE_TARGET.contentText.includes('\u25c0'), false);
+    check('it is spaced off the form it follows', INLINE_TARGET.contentText, ' \u25c4');
 
-    // The slot is a hole, and `evenodd` is the whole of what makes it one.
-    // Without it the two subpaths merge and the icon is a plain disc -- which
-    // is not a broken drawing, it is the previous drawing, silently back.
-    check('the mark is drawn evenodd', /fill-rule="evenodd"/.test(stop), true);
-    check('and has two subpaths, the disc and the slot',
-      (TARGET_STOP.match(/M/g) || []).length, 2);
+    // No box geometry at all, which is the property that keeps it on the line.
+    // `INLINE_BAR` needs width, height and a negative bottom margin because it
+    // is a drawn box; a glyph is sized to the line by construction, and an
+    // attachment given a box tall enough to be seen pushes the line open --
+    // measured, on the version of this that carried an icon.
+    for (const k of ['width', 'height', 'margin']) {
+      check(`the target mark declares no ${k}`, k in INLINE_TARGET, false);
+      check(`where an inline bar must (${k})`, k in INLINE_BAR, true);
+    }
 
-    const [discSub, slotSub] = TARGET_STOP.split(/(?=M)/);
-    // `M x0 y0  A rx ry rot large sweep x1 y1  A ...`. Read as pairs it comes
-    // out scrambled: an arc carries seven numbers, not two.
-    const [x0, y0, rx, ry, , , , x1, y1] = discSub.match(/[\d.]+/g).map(Number);
-    const slot = [...slotSub.matchAll(/(-?[\d.]+)\s+(-?[\d.]+)/g)].map((m) => [+m[1], +m[2]]);
-    const span = (pts, i) => [Math.min(...pts.map((p) => p[i])), Math.max(...pts.map((p) => p[i]))];
-    const [sx0, sx1] = span(slot, 0);
-    const [sy0, sy1] = span(slot, 1);
-    const dx0 = x0;
-    const dx1 = x1;
-
-    check('the disc is round', rx, ry);
-    check('and centred in the cell', [(x0 + x1) / 2, (y0 + y1) / 2], [9, 9]);
-    check('its two arcs meeting a diameter apart', x1 - x0, 2 * rx);
-    check('the slot is centred on it', (sy0 + sy1) / 2, 9);
-    // Both halves of legibility. A slot that does not cross most of the disc
-    // reads as a speck; one too thin to survive a small gutter closes up, and
-    // then the icon is a disc again -- the same two or three pixels that sank
-    // the rule this feature started with.
-    check('the slot crosses most of the disc', (sx1 - sx0) / (dx1 - dx0) > 0.75, true);
-    check('and is thick enough to survive a small cell', sy1 - sy0 >= 2.5, true);
-
-    check('it does not pulse -- a barrier is not working', /@keyframes/.test(stop), false);
-
-    // Inline it is a glyph, because an image there pushes the line box open --
-    // which this file's neighbour already recorded, and which an inline icon
-    // turned out to do no less than an inline image. The shape survives being
-    // drawn a second way: U+2296 is a disc with a bar through it, and so is
-    // the gutter icon.
-    check('the inline mark is a glyph', typeof INLINE_TARGET.contentText, 'string');
-    check('and is the same sign', INLINE_TARGET.contentText, '\u2296');
-    check('with no box geometry to push the line open',
-      'width' in INLINE_TARGET || 'height' in INLINE_TARGET, false);
-    check('and no negative margin, which only a box needs',
-      /-/.test(INLINE_TARGET.margin), false);
+    // And it draws nothing in the gutter, so nothing there has to make room:
+    // the form it sits beside keeps whatever bar its status earns.
+    const target = BARS.find((b) => b.icon === 'target');
+    check('the target names a colour but no gutter icon', target.inlineOnly, true);
+    check('and is the only entry that does',
+      BARS.filter((b) => b.inlineOnly).length, 1);
   }
 
   // Its hue must be free: it is not a verdict, and it shares the gutter with
@@ -253,19 +231,17 @@ for (const kind of ['light', 'dark']) {
       const mine = hue(target[kind]);
       const red = BARS.find((b) => b.statuses.includes('failed'));
 
-      // It shares red with a failure, and that is the decision rather than an
-      // oversight: a no-entry sign that is not red is not a no-entry sign, and
-      // this is the one mark in the column whose silhouette carries it. The
-      // cost is real -- red no longer means "failed" on its own -- so it is
-      // pinned here, where changing it means saying so.
-      check(`the target is the failure red (${kind})`, mine, hue(red[kind]));
-      check(`and louder than it, being a sign rather than a status (${kind})`,
-        alpha(target[kind]) > alpha(red[kind]), true);
-
-      // Against everything else it still has to stand apart.
-      for (const other of BARS.filter((b) => !['target', red.icon].includes(b.icon))) {
+      // Red was tried here and given up, and the reason is worth keeping: it
+      // was only ever needed because the mark was a no-entry *sign*, and a
+      // no-entry sign that is not red is not one. An arrow carries no such
+      // obligation, so red goes back to meaning a form failed and nothing
+      // else -- the most important thing this column says.
+      check(`the target is not the failure red (${kind})`, mine === hue(red[kind]), false);
+      for (const other of BARS.filter((b) => b.icon !== 'target')) {
         check(`the target hue is not the ${other.icon} hue (${kind})`, hue(other[kind]) === mine, false);
       }
+      check(`and it is louder than a status bar (${kind})`,
+        alpha(target[kind]) > alpha(red[kind]), true);
     }
     check('it is not last in the table, which is the unknown-status fallback',
       BARS[BARS.length - 1].icon === 'target', false);

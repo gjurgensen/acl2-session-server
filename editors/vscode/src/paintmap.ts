@@ -155,28 +155,3 @@ export function paintMap(units: Placed[]): Painted[] {
     };
   });
 }
-
-/**
- * The gutter lines a form keeps once the target's mark has claimed one.
- *
- * A gutter cell holds exactly one icon. The form the target marks is the first
- * one *beyond* the barrier, so in `gutter` mode it also has a queued bar of
- * its own -- both aimed at the same cell, and only one of them can be seen.
- * The first version of the target mark lost that contest silently and was
- * invisible in the one mode it was designed for.
- *
- * The mark wins, and it is not close: a grey bar on that line says nothing the
- * two hundred grey bars below it do not already say, where the mark says where
- * the region begins. A form of more than one line keeps the rest of its cells,
- * so the region still reads as grey -- only its head carries the boundary.
- */
-export function gutterMinus(
-  g: { from: number; to: number } | null,
-  taken: number | null
-): { from: number; to: number } | null {
-  if (g === null || taken === null || taken < g.from || taken > g.to) {
-    return g;
-  }
-  // Only ever the first line: the mark goes at a form's head.
-  return taken === g.from ? (g.from < g.to ? { from: g.from + 1, to: g.to } : null) : g;
-}

@@ -130,28 +130,6 @@ const unit = (index, line_start, col_start, line_end, col_end, status = 'admitte
 
 check('an empty book paints nothing', paintMap([]), []);
 
-// One gutter cell, one icon. The form the target marks is the first one
-// beyond the barrier, so in `gutter` mode it has a queued bar of its own aimed
-// at the very same cell -- and the first version of the target mark lost that
-// contest silently, and was invisible in the one mode it was built for.
-{
-  const { gutterMinus } = require('./out/paintmap.js');
-  check('a multi-line form gives up its head and keeps the rest',
-    gutterMinus({ from: 10, to: 14 }, 10), { from: 11, to: 14 });
-  check('a one-line form gives up its only cell',
-    gutterMinus({ from: 10, to: 10 }, 10), null);
-  check('a mark elsewhere in the form takes nothing -- it only ever lands on a head',
-    gutterMinus({ from: 10, to: 14 }, 12), { from: 10, to: 14 });
-  check('a mark below the form takes nothing',
-    gutterMinus({ from: 10, to: 14 }, 20), { from: 10, to: 14 });
-  check('a mark above it takes nothing',
-    gutterMinus({ from: 10, to: 14 }, 3), { from: 10, to: 14 });
-  check('no mark at all changes nothing',
-    gutterMinus({ from: 10, to: 14 }, null), { from: 10, to: 14 });
-  check('a form with no cell of its own has none to give up',
-    gutterMinus(null, 10), null);
-}
-
 // The same colour now lives in three places, none of which the type system
 // connects: a value in `bars.ts`, a fill in `media/*.svg` for the gutter
 // icon, and a contributed theme-colour default in `package.json`. An earlier
@@ -161,7 +139,7 @@ check('an empty book paints nothing', paintMap([]), []);
 {
   const { BARS } = require('./out/bars.js');
   const { readFileSync } = require('fs');
-  for (const bar of BARS) {
+  for (const bar of BARS.filter((b) => !b.inlineOnly)) {
     for (const theme of ['light', 'dark']) {
       const svg = readFileSync(`media/${bar.icon}-${theme}.svg`, 'utf8');
       const fill = /fill="#([0-9a-fA-F]{6})"/.exec(svg);
@@ -177,21 +155,6 @@ check('an empty book paints nothing', paintMap([]), []);
         bar[theme],
         `rgba(${r}, ${g}, ${b}, ${alpha[1]})`
       );
-    }
-  }
-
-  // The target's mark is a shape as well as a colour, and the shipped icon has
-  // to draw the same one. Nothing else here compares geometry, because nothing
-  // else has any: the status bars are a rectangle the generator and the file
-  // both spell out the same trivial way.
-  {
-    const { TARGET_STOP } = require('./out/bars.js');
-    for (const theme of ['light', 'dark']) {
-      const svg = readFileSync(`media/target-${theme}.svg`, 'utf8');
-      const d = /<path[^>]*d="([^"]+)"/.exec(svg);
-      check(`media/target-${theme}.svg draws the same stop`, d && d[1], TARGET_STOP);
-      check(`media/target-${theme}.svg has one fill to compare`,
-        (svg.match(/fill="/g) || []).length, 1);
     }
   }
 
