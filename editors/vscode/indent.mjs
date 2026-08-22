@@ -228,8 +228,10 @@ plan('Enter after a finished form lands at column zero',
     ['\n  (foo x)', undefined, 'a paste that carries content -- left to the range formatter'],
     ['\n\n', undefined, 'two line breaks at once'],
     ['x', undefined, 'an ordinary character'],
+    [' ', undefined, 'a space -- someone adjusting their own indent by hand'],
+    ['\t', undefined, 'a tab, likewise'],
     ['  ', undefined, 'our own indent edit, so this cannot feed itself'],
-    ['', undefined, 'a deletion'],
+    ['', undefined, 'a deletion, which is what backspace arrives as'],
   ];
   let ok = true;
   for (const [text, want, what] of cases) {

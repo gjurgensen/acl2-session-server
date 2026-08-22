@@ -1,18 +1,24 @@
 // Delivering `indent.ts` to VSCode.
 //
-// The editor offers exactly three ways to indent a language it does not
-// build in, and this uses all three because they cover different moments:
+// Two surfaces, and one rule between them:
 //
-//   on-type       Enter, and a closing paren. The moment that matters.
-//   range         Format Selection, and format-on-paste.
-//   document      Format Document, and format-on-save if it is on.
+//   as you type   a line break creates a line, or a closing delimiter
+//                 finishes one. `watchDocument`.
+//   on request    Format Selection, Format Document, Tab, the command.
 //
-// The fourth way -- `indentationRules` in the language configuration -- is
-// the one VSCode reaches for first and the one we cannot use; see the head
-// of `indent.ts`. Because it is tried first, the language contribution turns
-// it down to `keep` for `acl2`, or every Enter would be indented twice: once
-// wrongly by the built-in rules, once correctly here, with both edits in the
-// undo stack.
+// VSCode's own mechanism for the first is `DocumentOnTypeFormattingEditProvider`,
+// and it is not used here. It is reached only through the editor's built-in
+// `type` command, and an extension may replace that command outright --
+// VSCodeVim does -- after which it is never called and indentation silently
+// stops happening. Watching the document sees every edit whoever made it, so
+// it is what the rule hangs off. One mechanism, not two that must agree.
+//
+// The other way in -- `indentationRules` in the language configuration -- is
+// what VSCode reaches for first and cannot express Lisp indentation; see the
+// head of `indent.ts`. Because it is tried first, the language contribution
+// turns `editor.autoIndent` down to `keep` for `acl2`, so the built-in
+// bracket rules do not put a wrong indent on the line before we put the
+// right one there.
 //
 // Nothing in here decides anything. Every rule lives in `indent.ts` where it
 // can be measured against the books; this is the glue that carries it.
@@ -134,19 +140,6 @@ function indentRangeEdits(doc: vscode.TextDocument, first: number, last: number)
   return edits;
 }
 
-const onType: vscode.OnTypeFormattingEditProvider = {
-  provideOnTypeFormattingEdits(doc, position, ch) {
-    // Enter puts the cursor on a line that so far holds only a copy of the
-    // previous line's whitespace, so this is the one caller that must treat
-    // an empty line as something to indent rather than something to leave
-    // alone. A closing delimiter arrives on a line with content on it, and
-    // only changes which form that content belongs to.
-    const e = indentLineEdit(doc, position.line, { blankLines: 'indent' });
-    log(`on-type ${JSON.stringify(ch)} line=${position.line} -> ${e ? JSON.stringify(e.newText.length) : 'no edit'}`);
-    return e ? [e] : [];
-  },
-};
-
 const range: vscode.DocumentRangeFormattingEditProvider = {
   provideDocumentRangeFormattingEdits(doc, r) {
     return indentRangeEdits(doc, r.start.line, r.end.line);
@@ -239,48 +232,26 @@ function watchDocument(): vscode.Disposable {
       log('  ignored: the change is not in the active editor');
       return;
     }
-    // Which line to re-indent, and why. Two ways in, and the order matters.
+    // The whole rule, and there is no more to it than this: a line is
+    // re-indented when a line break creates it, and when a closing delimiter
+    // finishes it. That is Emacs' `electric-indent-mode`, which is where
+    // every ACL2 author's expectations come from, and it is deliberately not
+    // "re-indent whenever the line looks unfinished".
     //
-    // The change itself is the reliable one. `editor.selection` is *not*
-    // updated yet while this event fires -- the caret still sits where it
-    // was before the edit, and VSCode reports its move separately
-    // afterwards. So asking the caret whether it is in a line's leading
-    // whitespace answers about the previous line, and answers no. That was
-    // this bug: the trace showed `ins="\n           "` -- an Enter, plainly
-    // -- rejected as "neither a fresh line nor a closing delimiter".
-    //
-    //   newline  a line break followed by nothing but whitespace, which is
-    //            Enter however the whitespace got there. Not a paste, which
-    //            carries content and belongs to the range formatter.
-    //   close    a single closing delimiter, which has just decided what the
-    //            line it finishes belongs to.
-    //   fresh    the fallback, for an extension whose edits do not arrive as
-    //            one recognisable change: a caret already sitting in leading
-    //            whitespace on a line that just changed. Stale by one event,
-    //            which is exactly why it cannot be the primary test.
+    // A caret-based test was tried here and was wrong twice over. It cannot
+    // be primary, because `editor.selection` has not moved yet while this
+    // event fires -- it still points at the line you left. And it cannot be
+    // a fallback either, because "the caret is in leading whitespace" is
+    // true of every space and every backspace typed at the front of a line,
+    // so it took the cursor away from anyone adjusting their own indent by
+    // hand.
     const single = e.contentChanges.length === 1 ? e.contentChanges[0] : undefined;
-    const byText = single ? reindentTrigger(single.text) : undefined;
-    const caret = editor.selection.active;
-    let at: number;
-    let kind: string;
-    if (single && byText) {
-      at = e.document.positionAt(single.rangeOffset + single.text.length).line;
-      kind = byText;
-    } else if (
-      editor.selection.isEmpty &&
-      e.document.lineAt(caret.line).text.slice(0, caret.character).trim() === '' &&
-      e.contentChanges.some((c) => {
-        const first = e.document.positionAt(c.rangeOffset).line;
-        const last = e.document.positionAt(c.rangeOffset + c.text.length).line;
-        return caret.line >= first && caret.line <= last;
-      })
-    ) {
-      at = caret.line;
-      kind = 'fresh';
-    } else {
-      log('  ignored: not an Enter, a closing delimiter, or a fresh line');
+    const kind = single && reindentTrigger(single.text);
+    if (!single || !kind) {
+      log('  ignored: not a line break or a closing delimiter');
       return;
     }
+    const at = e.document.positionAt(single.rangeOffset + single.text.length).line;
     const edit = indentLineEdit(editor.document, at, { blankLines: 'indent' });
     log(
       `  ${kind} on line ${at} (${JSON.stringify(e.document.lineAt(at).text)}) -> ` +
@@ -329,10 +300,6 @@ export function registerFormatting(channel?: vscode.OutputChannel): vscode.Dispo
   trace = channel;
   const acl2 = { language: 'acl2' };
   return [
-    // `\n` is the one that matters; the closing delimiters are what make a
-    // clause snap into place as it is finished, which is the behaviour
-    // anyone coming from Emacs will reach for without thinking.
-    vscode.languages.registerOnTypeFormattingEditProvider(acl2, onType, '\n', ')', ']'),
     vscode.languages.registerDocumentRangeFormattingEditProvider(acl2, range),
     vscode.languages.registerDocumentFormattingEditProvider(acl2, whole),
     watchDocument(),
