@@ -135,6 +135,15 @@ nested `#|` block comments.
 ACL2's own functions — `equal`, `car`, `len`, `implies`, `+`, `<` — are
 marked in call position.
 
+The reader's escapes are handled, which matters more than it sounds: a
+grammar carries its state from line to line, so a construct it fails to
+recognise costs the rest of the file rather than one token. A bar-quoted
+symbol may span lines and hold a quote (`'|a"b|`), a fancy string is
+delimited by `#{"""` and `"""}` so every quote inside it is content, and a
+backslash escapes the next character outside a string as well as in.
+`source-grammar.mjs` holds each of those against the file that motivated
+them, `books/kestrel/acl2pl/reader-tests.lisp`.
+
 The form view's terms and runes go through *the same grammar*, so a term in the
 form view and the same term in the buffer are tokenized identically.
 

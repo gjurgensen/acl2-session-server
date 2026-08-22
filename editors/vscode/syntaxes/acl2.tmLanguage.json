@@ -9,6 +9,12 @@
       "include": "#comment-line"
     },
     {
+      "include": "#fancy-string"
+    },
+    {
+      "include": "#symbol-escape"
+    },
+    {
       "include": "#string"
     },
     {
@@ -348,8 +354,14 @@
       }
     },
     "bar-symbol": {
-      "match": "\\|[^|]*\\|",
-      "name": "variable.other.symbol.acl2"
+      "name": "variable.other.symbol.acl2",
+      "begin": "\\|",
+      "end": "\\|",
+      "patterns": [
+        {
+          "match": "\\\\."
+        }
+      ]
     },
     "quote": {
       "match": "#'|['`]|,@?",
@@ -370,6 +382,25 @@
           "name": "support.function.builtin.acl2"
         }
       }
+    },
+    "fancy-string": {
+      "name": "string.quoted.other.fancy.acl2",
+      "begin": "#\\{\"\"\"",
+      "end": "\"\"\"\\}",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.string.begin.acl2"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.string.end.acl2"
+        }
+      }
+    },
+    "symbol-escape": {
+      "match": "\\\\.",
+      "name": "constant.character.escape.acl2"
     }
   }
 }
