@@ -1713,11 +1713,12 @@ fn a_paused_session_stops_admitting_and_nothing_else() {
     d.notify("update", json!({ "book": book, "text": text, "revision": 2 }));
     let events = d.events_until_settled();
     let state = last_state(&events);
-    assert_eq!(statuses(&state), ["admitted", "admitted", "beyond", "beyond"],
+    // `pending`, not `beyond`. A pause is a moment and not a barrier: these
+    // forms will be reached the instant someone presses play, which is what
+    // `pending` says. `beyond` is for what a *target* excludes, and stays
+    // excluded until the target moves.
+    assert_eq!(statuses(&state), ["admitted", "admitted", "pending", "pending"],
                "the target went away and nothing was admitted: {state}");
-    // And they are `beyond` rather than `pending` with no target in sight,
-    // because nothing is coming for them -- which is what stops the client
-    // sending a reader to a frontier that will not move.
     assert_eq!(events.last().expect("settled").1["reason"], "paused");
 
     // Everything else still works. A question about the world -- asked of a
@@ -1738,6 +1739,8 @@ fn a_paused_session_stops_admitting_and_nothing_else() {
     // And a retraction, which takes claims away rather than adding them.
     d.notify("retract", json!({ "book": book, "keep": 1 }));
     let events = d.events_until_settled();
+    // A retraction leaves a target behind it, so these *are* beyond one --
+    // for that reason and not for the pause.
     assert_eq!(statuses(&last_state(&events)), ["admitted", "beyond", "beyond", "beyond"],
                "a paused session still retracts: {:?}", last_state(&events));
     let gone = d.request("describe", json!({ "book": book, "name": "one", "cols": 40 }));
@@ -1747,7 +1750,8 @@ fn a_paused_session_stops_admitting_and_nothing_else() {
     // still paused, so still nothing goes in.
     d.notify("update", json!({ "book": book, "text": text, "revision": 3 }));
     let events = d.events_until_settled();
-    assert_eq!(statuses(&last_state(&events)), ["admitted", "beyond", "beyond", "beyond"]);
+    assert_eq!(statuses(&last_state(&events)), ["admitted", "pending", "pending", "pending"],
+               "and with the target gone they are queued again, still unadmitted");
 
     // Resume, and the work that was refused goes through.
     let _ = d.request("resume", json!({ "book": book }));

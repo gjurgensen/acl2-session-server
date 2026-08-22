@@ -312,10 +312,10 @@ in flight and then carries on at your next keystroke. Interrupt means "stop,
 I'm about to fix that form". Pause means "leave me alone for a while", and
 survives every edit until you press play.
 
-While paused, forms that have not been checked are reported as *beyond* rather
-than *pending*, for the same reason they are past a target: nothing is coming
-for them. So **Go to Next Attention Point** and **Go to Frontier** decline to
-send you to one, instead of pointing at a form the session will never reach.
+Unchecked forms stay *pending* while paused, and are not reported as *beyond*.
+A pause is a moment, not a barrier: those forms will be reached the instant you
+press play, which is what pending says. *Beyond* is for what a **target**
+excludes, which stays excluded until you move the target.
 
 | key | command |
 | --- | --- |

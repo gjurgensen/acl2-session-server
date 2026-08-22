@@ -1637,17 +1637,16 @@ impl Driver {
         // first form" is 0 rather than a missing value: `goal_unit` answers
         // `None` both for that and for having no target at all, and only the
         // first of those makes every form beyond.
-        // While paused, *everything* unchecked is beyond: nothing is coming
-        // for it until someone says so, which is the same thing a target says
-        // about the forms below it and wants the same word. Without this a
-        // paused book reports a frontier the client will send a reader to,
-        // and waiting there does nothing -- the bug `beyond` was introduced
-        // to fix, re-created by a second route.
-        let barrier = if self.paused {
-            Some(admitted)
-        } else {
-            self.target_line.is_some().then(|| self.goal_unit().map_or(0, |g| g + 1))
-        };
+        // Deliberately says nothing about a pause. An unchecked form in a
+        // paused session is `pending`, because it is: the pause is a moment,
+        // not a barrier, and the run will reach that form the instant someone
+        // presses play. `beyond` is for a form the *target* excludes, which
+        // stays excluded until the target itself moves -- a standing
+        // instruction rather than a pause, and the difference is exactly why
+        // "go to the frontier" is right to point at the first pending form
+        // here and wrong to point past a target.
+        let barrier =
+            self.target_line.is_some().then(|| self.goal_unit().map_or(0, |g| g + 1));
         let units = self
             .units
             .iter()
