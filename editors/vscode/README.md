@@ -135,6 +135,14 @@ nested `#|` block comments.
 ACL2's own functions — `equal`, `car`, `len`, `implies`, `+`, `<` — are
 marked in call position.
 
+VSCode's inline colour swatches are turned off for these files. Its built-in
+colour parser runs over any language that has none of its own, and Lisp's
+reader syntax collides with CSS's: `#001#` is a label reference, `#d1e-2` is a
+decimal float, and `#001` and `#d1e` are perfectly good hex colours. Reader
+tests aside, a swatch on a radix prefix is never right. `editor.colorDecorators`
+in your own settings overrides this, since a user setting beats an extension's
+default.
+
 The reader's escapes are handled, which matters more than it sounds: a
 grammar carries its state from line to line, so a construct it fails to
 recognise costs the rest of the file rather than one token. A bar-quoted
