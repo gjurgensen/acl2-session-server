@@ -593,6 +593,11 @@
           "type": "boolean",
           "default": true,
           "description": "Re-indent the current line as you type -- on Enter, and on a closing delimiter. This watches the document rather than relying on editor.formatOnType, because an extension that replaces VSCode's `type` command (VSCodeVim does) stops on-type formatting from ever being called."
+        },
+        "acl2-session.indentTrace": {
+          "type": "boolean",
+          "default": false,
+          "description": "Log what indentation saw and did to the ACL2 output channel. For diagnosing the case where indentation appears to do nothing: it records every document change in an ACL2 file, whether it matched a trigger, what column was computed, and what the line looked like afterwards."
         }
       }
     },

@@ -33,6 +33,23 @@ import { IndentOptions, plannedIndent, reindent, reindentTrigger, topLevelStarts
  */
 const startsCache = new WeakMap<vscode.TextDocument, { version: number; starts: number[] }>();
 
+/**
+ * Where to write a trace of what indentation saw and did.
+ *
+ * Off unless `acl2-session.indentTrace` is on. Indentation runs on the
+ * keystroke path, and the interesting failures are ones where it does
+ * nothing at all -- a change event that never matched, an edit that another
+ * extension immediately overwrote. None of that is visible from the outside,
+ * and reasoning about it from a screenshot of the result has already cost
+ * two wrong diagnoses.
+ */
+let trace: vscode.OutputChannel | undefined;
+function log(what: string): void {
+  if (trace && vscode.workspace.getConfiguration('acl2-session').get<boolean>('indentTrace')) {
+    trace.appendLine(`indent: ${what}`);
+  }
+}
+
 function startsOf(doc: vscode.TextDocument): number[] {
   const hit = startsCache.get(doc);
   if (hit && hit.version === doc.version) {
@@ -124,8 +141,8 @@ const onType: vscode.OnTypeFormattingEditProvider = {
     // an empty line as something to indent rather than something to leave
     // alone. A closing delimiter arrives on a line with content on it, and
     // only changes which form that content belongs to.
-    void ch;
     const e = indentLineEdit(doc, position.line, { blankLines: 'indent' });
+    log(`on-type ${JSON.stringify(ch)} line=${position.line} -> ${e ? JSON.stringify(e.newText.length) : 'no edit'}`);
     return e ? [e] : [];
   },
 };
@@ -190,38 +207,78 @@ export async function indentCommand(): Promise<void> {
  */
 function watchDocument(): vscode.Disposable {
   return vscode.workspace.onDidChangeTextDocument(async (e) => {
-    if (e.document.languageId !== 'acl2' || e.contentChanges.length !== 1) {
+    if (e.document.languageId !== 'acl2') {
       return;
     }
+    log(
+      `change x${e.contentChanges.length} ` +
+        e.contentChanges
+          .map((c) => `[off=${c.rangeOffset} del=${c.rangeLength} ins=${JSON.stringify(c.text)}]`)
+          .join(' ')
+    );
     if (!vscode.workspace.getConfiguration('acl2-session').get<boolean>('indentOnType', true)) {
+      log('  ignored: acl2-session.indentOnType is off');
       return;
     }
     const editor = vscode.window.activeTextEditor;
     if (!editor || editor.document !== e.document) {
+      log('  ignored: the change is not in the active editor');
       return;
     }
-    const change = e.contentChanges[0];
-    const kind = reindentTrigger(change.text);
+    const sel = editor.selection;
+    if (!sel.isEmpty) {
+      log('  ignored: a selection, not a caret');
+      return;
+    }
+    // Which line to re-indent, and why. Two ways in, because the shape of a
+    // change event is not ours to rely on: an extension that edits through
+    // its own machinery -- VSCodeVim with `vim.enableNeovim` does -- may
+    // report one Enter as several changes, or as a line rewritten whole.
+    //
+    //   fresh   the caret sits in a line's leading whitespace and something
+    //           just changed that line. That is what pressing Enter leaves
+    //           behind however it was delivered, and it is what a person
+    //           means by "I am starting a line here".
+    //   close   a single closing delimiter was typed, which has just decided
+    //           what the line it finishes belongs to.
+    const caret = sel.active;
+    const lineText = e.document.lineAt(caret.line).text;
+    const touched = e.contentChanges.some((c) => {
+      const first = e.document.positionAt(c.rangeOffset).line;
+      const last = e.document.positionAt(c.rangeOffset + c.text.length).line;
+      return caret.line >= first && caret.line <= last;
+    });
+    const single = e.contentChanges.length === 1 ? e.contentChanges[0] : undefined;
+    const kind =
+      touched && lineText.slice(0, caret.character).trim() === ''
+        ? 'fresh'
+        : single && reindentTrigger(single.text) === 'close'
+          ? 'close'
+          : undefined;
     if (!kind) {
+      log('  ignored: neither a fresh line nor a closing delimiter');
       return;
     }
-    const at = e.document.positionAt(change.rangeOffset + change.text.length).line;
+    const at = caret.line;
     const edit = indentLineEdit(editor.document, at, { blankLines: 'indent' });
+    log(
+      `  ${kind} on line ${at} (${JSON.stringify(lineText)}) -> ` +
+        (edit ? `indent to ${edit.newText.length}` : 'already right, no edit')
+    );
     if (!edit) {
       return;
     }
-    // No undo stops: this belongs to the keystroke that caused it, and a
-    // reader pressing undo once means "take back what I typed", not "take
-    // back the indentation of what I typed".
-    await editor.edit((b) => b.replace(edit.range, edit.newText), {
+    const applied = await editor.edit((b) => b.replace(edit.range, edit.newText), {
       undoStopBefore: false,
       undoStopAfter: false,
     });
+    log(`  edit applied=${applied}; line is now ${JSON.stringify(e.document.lineAt(at).text)}`);
   });
 }
 
 /** Register the three providers. Returns them for disposal. */
-export function registerFormatting(): vscode.Disposable[] {
+export function registerFormatting(channel?: vscode.OutputChannel): vscode.Disposable[] {
+  trace = channel;
   const acl2 = { language: 'acl2' };
   return [
     // `\n` is the one that matters; the closing delimiters are what make a
