@@ -235,11 +235,11 @@ Three ways in, all the same rules:
   it can only move a pasted form to the right column. Lines inside a string or
   a block comment are never touched, and neither is a line whose `;` comment
   column you chose yourself.
-- **Tab**, as in Emacs, re-indenting the current line or the selected lines.
-  Off by default, behind `acl2-session.tabIndents`, because outside a
-  selection VSCode's Tab inserts and taking that away from someone who did not
-  ask for it is worse than not offering it. **ACL2: Indent Line or Selection**
-  is in the command palette either way.
+- **Tab**, as in Emacs, re-indenting the current line or the selected lines —
+  including an empty one, which is where it is wanted most. On, and
+  `acl2-session.tabIndents` turns it off if you would rather Tab inserted. It
+  is also the repair for a line no formatter is ever asked about; see below.
+  **ACL2: Indent Line or Selection** is in the command palette either way.
 
 ### Opening a line with Vim's `o`
 

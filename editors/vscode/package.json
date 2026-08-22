@@ -588,8 +588,8 @@
         },
         "acl2-session.tabIndents": {
           "type": "boolean",
-          "default": false,
-          "description": "Make Tab re-indent the current line, the way it does in Emacs, when the cursor is in an ACL2 file with nothing selected. Off by default: outside a selection VSCode's Tab inserts, and taking that away from someone who did not ask for it is worse than not offering it. Indenting is always available as \"ACL2: Indent Line or Selection\", and Enter indents either way."
+          "default": true,
+          "description": "Make Tab re-indent the current line, the way it does in Emacs, when the cursor is in an ACL2 file with nothing selected. On by default: it is the reflex every ACL2 author arrives with, and it is the repair for a line no formatter is asked about -- one opened by Vim's `o`, or by any command rather than by typing. What it costs is inserting a literal tab at the cursor, in files whose indentation is computed and written in spaces regardless. Turn it off to get VSCode's Tab back; indenting stays available as \"ACL2: Indent Line or Selection\"."
         },
         "acl2-session.indentTrace": {
           "type": "boolean",
@@ -737,7 +737,7 @@
       {
         "command": "acl2-session.indent",
         "key": "tab",
-        "when": "editorTextFocus && editorLangId == acl2 && config.acl2-session.tabIndents && !editorHasSelection && !suggestWidgetVisible && !inSnippetMode && !editorReadonly"
+        "when": "editorTextFocus && editorLangId == acl2 && config.acl2-session.tabIndents && !editorHasSelection && !suggestWidgetVisible && !inlineSuggestionVisible && !inSnippetMode && !editorReadonly"
       }
     ],
     "taskDefinitions": [
