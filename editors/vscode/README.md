@@ -283,10 +283,15 @@ Four things follow from being a barrier rather than a bookmark:
 - **The step commands take hold of a running book.** With no target held there
   is no barrier to step from, so the first step plants one at the frontier —
   which stops the run where it has actually got to, and moves from there.
-- **Any of them will start the session.** "Check as far as here" is most useful
-  said *before* anything has been checked. A command that starts a session
-  starts it held before the first form, so nothing is admitted and then undone
-  while it waits to be told where to stop.
+- **Any of them will start the session**, which is how you start one that is
+  already held somewhere. **Start Live Checking** itself is unchanged and holds
+  nothing: it checks the whole book, as it always has. But `ctrl+alt+n` on a
+  book with no session starts one held at the cursor's form, and **Target
+  Before First Form** starts one that has checked nothing at all — "check as
+  far as here" being most useful said *before* anything has been checked. Such
+  a session comes up held above the first form and places the real barrier
+  once the book has been split, so nothing is admitted and then undone in
+  between.
 - **Forms past it say so.** They are `beyond`, not queued: nothing will reach
   them until the barrier moves, and **Go to Next Attention Point** and **Go to
   Frontier** both decline to send you to one.

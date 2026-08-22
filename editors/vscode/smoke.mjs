@@ -247,9 +247,10 @@ writeFileSync(twoBook, twoText);
 const two = await c.request('open', { path: twoBook });
 const twoEvents = () => events.filter(([, p]) => p.book === two.book);
 
-// Held at the end of the *first* form on the line. The second must stay
-// pending: a target that took the whole line would admit both, and there
-// would be no way to ask for one.
+// Held at the end of the *first* form on the line. The second must stay out:
+// a target that took the whole line would admit both, and there would be no
+// way to ask for one. `beyond` rather than `pending` -- a form past a target
+// is not queued for anything, and the two say so differently.
 events.length = 0;
 c.notify('update', {
   book: two.book,
@@ -271,7 +272,7 @@ assert(
 );
 assert(held.units[2].col_start === 19, 'and the second starts after the space');
 assert(
-  held.units.map((u) => u.status).join(',') === 'admitted,admitted,pending',
+  held.units.map((u) => u.status).join(',') === 'admitted,admitted,beyond',
   'a target at the first form’s end admits it and stops'
 );
 

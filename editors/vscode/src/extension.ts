@@ -357,7 +357,11 @@ export function activate(context: vscode.ExtensionContext): void {
     // Registered through a holder: see `renewSymbols` on why it has to be
     // replaceable rather than registered once.
     new vscode.Disposable(() => symbolReg?.dispose()),
-    vscode.commands.registerCommand('acl2-session.start', startCommand),
+    // Wrapped, not passed bare. VSCode hands an `editor/title` command the
+    // editor's resource URI as its first argument, so a registered function
+    // that takes a parameter receives one whether or not it wants one -- and
+    // this one's parameter decides where the session starts.
+    vscode.commands.registerCommand('acl2-session.start', () => void startCommand()),
     vscode.commands.registerCommand('acl2-session.evalSelection', () => forBook(evalCommand)),
     vscode.commands.registerCommand('acl2-session.showConsole', () =>
       forBook((s) => consoleFor(s).open())
@@ -1379,6 +1383,11 @@ function ensureClient(): DaemonClient {
 }
 
 async function startCommand(initial?: Held): Promise<void> {
+  // Belt and braces against the above: a barrier has an `anchor`, and nothing
+  // VSCode passes a command does. Starting with a barrier nobody asked for is
+  // the worst way to get this wrong, because it looks like the session simply
+  // did nothing.
+  const held = initial && 'anchor' in initial ? initial : undefined;
   const editor = vscode.window.activeTextEditor;
   if (!editor || editor.document.uri.scheme !== 'file') {
     // By contract: an untitled buffer has no directory, hence no
@@ -1406,7 +1415,7 @@ async function startCommand(initial?: Held): Promise<void> {
       // Placed before the first `update`, which is the point: a barrier
       // arriving a moment later would arrive after the daemon had already
       // begun on a book it was told to check all of.
-      target: initial ?? null,
+      target: held ?? null,
       ready: undefined,
       unitEvents: new Map(),
       rulesByUnit: new Map(),

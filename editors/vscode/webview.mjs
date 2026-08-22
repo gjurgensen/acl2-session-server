@@ -424,6 +424,31 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   check(lockedIndex(at(4, 1), units) === undefined, 'and neither is a line with no form on it');
 }
 
+// ---- no command handler may take an argument it did not ask for ----
+{
+  const { readFileSync } = require('fs');
+  const src = readFileSync(new URL('./src/extension.ts', import.meta.url), 'utf8');
+
+  // VSCode hands an `editor/title` command the editor's resource URI as its
+  // first argument, and a palette invocation hands it nothing. A handler
+  // registered bare therefore receives a parameter it never asked for, and
+  // TypeScript cannot see it: `registerCommand` takes `(...args: any[])`, so
+  // every arity type-checks.
+  //
+  // That is not hypothetical. `acl2-session.start` was registered bare and
+  // then grew an optional "start held at this barrier" parameter. The URI
+  // landed in it, had no `anchor`, and read as the barrier before the first
+  // form -- so the title-bar play button started a session that checked
+  // nothing, while the keybinding for the same command was fine.
+  const bare = [...src.matchAll(/registerCommand\(\s*'([^']+)'\s*,\s*([A-Za-z_$][\w$]*)\s*\)/g)];
+  for (const [, command, handler] of bare) {
+    const decl = new RegExp(`function ${handler}\\s*\\(([^)]*)\\)`).exec(src);
+    check(decl !== null, `${command}'s handler ${handler} is declared in this file`);
+    check(decl !== null && decl[1].trim() === '',
+      `${command} is registered bare, so ${handler} must take no arguments`);
+  }
+}
+
 // ---- tails are pushed, never polled ----
 {
   const { planTail } = require('./out/policy.js');
