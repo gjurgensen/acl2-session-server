@@ -478,6 +478,54 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   check(asked === 0, 'and no tail, in any shape, asks the daemon for more');
 }
 
+// A form view that renders the same form again must not re-post it.
+//
+// `rules` and `induction` have always guarded their posts; `render` did not,
+// and it is the expensive one -- it carries the model, the narrative and the
+// rules records in one message and tokenizes all of them together. `onState`
+// follows the form view on every state event, and a form landing produces a
+// burst of them describing a form that has not changed, so the guard is the
+// difference between one whole-page render and fifteen.
+{
+  const { FormView } = require('./out/formView.js');
+  const fv = new FormView();
+  let posts = 0;
+  // `panel` is private to TypeScript only; at runtime this is the seam that
+  // lets the count be taken without an editor.
+  fv.panel = { webview: { postMessage: () => { posts++; } } };
+
+  const model = () => ({
+    book: 's1', index: 69, total: 77,
+    lineStart: 2775, lineEnd: 7748, colStart: 1, colEnd: 2,
+    status: 'admitted', skipped: false,
+    checkpoints: [{ term: '(implies (natp x) (natp (foo x)))' }],
+    rules: ['(:definition foo)', '(:rewrite bar)'],
+  });
+
+  fv.render(model());
+  check(posts === 1, 'the first render of a form posts it');
+
+  fv.render(model());
+  check(posts === 1, 'an identical model, freshly built, does not post again');
+
+  fv.render(model());
+  fv.render(model());
+  check(posts === 1, 'nor does a burst of them -- this is the state-event case');
+
+  const changed = model();
+  changed.status = 'conditional';
+  fv.render(changed);
+  check(posts === 2, 'a model that differs anywhere does post');
+
+  // The unconditional callers have to stay unconditional: a theme change
+  // re-sends the same model precisely because the page must redraw it.
+  fv.refresh();
+  check(posts === 3, 'refresh re-posts the current model regardless');
+
+  fv.render(changed);
+  check(posts === 3, 'and the guard still holds after it');
+}
+
 if (bad) {
   console.error(`webview: ${bad} failing`);
   process.exit(1);

@@ -231,6 +231,8 @@ export class FormView {
   private panel?: vscode.WebviewPanel;
   private model?: FormModel;
   private lastRules?: { book: string; index: number; entries: FormNameRules[] };
+  /** The serialised model last sent to the page. See `render`. */
+  private postedModel?: string;
 
   onGoal?: (model: FormModel, goal: string, slot: number) => void;
 
@@ -332,7 +334,28 @@ export class FormView {
 
   render(model: FormModel): void {
     this.model = model;
-    this.post(model);
+    // The guard `rules` and `induction` carry, for the same reason and with
+    // more force: this post is the largest of the three. It carries the
+    // model, the induction narrative and the rules records together, and
+    // tokenizes all of them in one pass -- so a render that changes nothing
+    // is the most expensive way the form view can do nothing.
+    //
+    // It is not a rare case. `onState` follows the form view on every state
+    // event, and a form landing produces a burst of them while the form on
+    // screen is identical each time. Measured on the `defines` in
+    // `kestrel/c/syntax/validator.lisp`: fifteen state events in the six
+    // seconds after it landed, hence fifteen identical re-posts and fifteen
+    // whole-page renders.
+    //
+    // `refresh` and the panel's first post call `post` directly, so a theme
+    // change and a newly opened panel still send unconditionally. The page
+    // keeps its state while hidden (`retainContextWhenHidden`), so there is
+    // no reset behind our back to re-post for.
+    const key = JSON.stringify(model);
+    if (key === this.postedModel) {
+      return;
+    }
+    this.post(model, key);
   }
 
   /**
@@ -420,7 +443,11 @@ export class FormView {
    * the page will look up, so anything that changes the text has to happen
    * before the tokenizer sees it.
    */
-  private post(model: FormModel): void {
+  private post(model: FormModel, key = JSON.stringify(model)): void {
+    // What was last actually sent, so `render` can tell a repeat from a
+    // change. Recorded here rather than in `render` so the unconditional
+    // callers -- `refresh`, and the panel's first post -- keep it honest.
+    this.postedModel = key;
     // No re-flow here: terms arrive from the daemon already laid out for
     // the width this pane reported.
     const laid = model;
