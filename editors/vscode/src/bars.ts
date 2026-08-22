@@ -36,6 +36,8 @@
 export interface Bar {
   /** The `media/<icon>-{light,dark}.svg` basename, and the map key. */
   icon: string;
+  /** Whether this bar breathes. See `PULSE`; only a running form does. */
+  pulse?: boolean;
   /**
    * What this status *means* in VSCode's own vocabulary, best candidate
    * first, per theme kind.
@@ -82,6 +84,7 @@ export const BARS: Bar[] = [
   },
   {
     icon: 'running',
+    pulse: true,
     themeIds: {
       light: ['editorInfo.foreground', 'charts.blue', 'terminal.ansiBlue'],
       dark: ['editorInfo.foreground', 'charts.blue', 'terminal.ansiBrightBlue'],
@@ -223,13 +226,37 @@ export function svgCanPaint(color: string): boolean {
  * a user writing `#fb4934` or `rgba(...)` should not have to know that the
  * shipped assets happen to carry their alpha in a separate attribute.
  */
-export function gutterSvg(color: string): string {
+export function gutterSvg(color: string, pulse = false): string {
   return (
     '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18">' +
+    (pulse ? PULSE : '') +
     `<rect x="1" y="0" width="4" height="18" fill="${escapeAttr(color)}"/>` +
     '</svg>'
   );
 }
+
+/**
+ * The running bar breathes, so a form being proved is distinguishable from one
+ * merely queued without reading the colour.
+ *
+ * A *pulse* rather than anything that travels, because a gutter icon is one
+ * 18-pixel tile repeated down every line of the form. Every tile runs the same
+ * animation at the same phase, so anything moving would be a column of
+ * identical sliders keeping step; opacity is the one property whose synchrony
+ * reads as intent -- the whole column breathes at once.
+ *
+ * Declarative, and it has to be: VSCode turns `gutterIconPath` into a CSS
+ * `background` rule, and an SVG used as an image runs its own CSS and SMIL
+ * animation but never its scripts.
+ *
+ * Unverified in the editor itself. It follows from how gutter icons are drawn
+ * rather than from having been seen, and there was no animated one in another
+ * extension to copy. If it turns out static, the fix is deleting this
+ * constant -- nothing else depends on it moving.
+ */
+const PULSE =
+  '<style>@keyframes acl2-pulse{0%,100%{opacity:1}50%{opacity:0.3}}' +
+  'rect{animation:acl2-pulse 1.4s ease-in-out infinite}</style>';
 
 /** A colour string is user input, and it is about to go inside an attribute. */
 function escapeAttr(s: string): string {

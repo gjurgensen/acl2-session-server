@@ -145,7 +145,7 @@ function gutterType(
     return c === undefined || !svgCanPaint(c)
       ? context.asAbsolutePath(`media/${bar.icon}-${theme}.svg`)
       : vscode.Uri.parse(
-          `data:image/svg+xml;base64,${Buffer.from(gutterSvg(c), 'utf8').toString('base64')}`
+          `data:image/svg+xml;base64,${Buffer.from(gutterSvg(c, bar.pulse), 'utf8').toString('base64')}`
         );
   };
   return vscode.window.createTextEditorDecorationType({

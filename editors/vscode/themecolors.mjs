@@ -12,6 +12,7 @@
 import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
+import { readFileSync } from 'fs';
 const { BARS, WASHES, WASH_ALPHA, firstDefined, withAlpha, withThemeHue, svgCanPaint } =
   require('./out/bars.js');
 
@@ -84,6 +85,27 @@ for (const kind of ['light', 'dark']) {
   check(`the shipped ${kind} wash opacity is a fraction`,
     WASH_ALPHA[kind] > 0 && WASH_ALPHA[kind] < 1, true);
 }
+
+// The running bar breathes, and both routes to it have to carry the animation:
+// the SVG generated from a resolved colour, and the shipped icon that stands in
+// when the colour is one an image cannot paint with. Losing it on one route
+// would show up as a bar that pulses until you pick a theme, or after.
+{
+  const { gutterSvg } = require('./out/bars.js');
+  const running = BARS.find((b) => b.statuses.includes('running'));
+  check('the running bar is the one marked to pulse', running.pulse, true);
+  check('and it is the only one', BARS.filter((b) => b.pulse).length, 1);
+
+  const animated = gutterSvg('#3794ff', true);
+  check('a pulsing bar carries a keyframes rule', /@keyframes/.test(animated), true);
+  check('and drives it from CSS, not script',
+    /<script/.test(animated), false);
+  check('a plain bar carries none', /@keyframes/.test(gutterSvg('#3794ff')), false);
+
+  for (const theme of ['dark', 'light']) {
+    const shipped = readFileSync(new URL(`./media/running-${theme}.svg`, import.meta.url), 'utf8');
+    check(`the shipped running-${theme} icon pulses too`, /@keyframes/.test(shipped), true);
+  }}
 
 console.log(failures === 0 ? 'themecolors: all green' : `themecolors: ${failures} failed`);
 process.exit(failures === 0 ? 0 : 1);
