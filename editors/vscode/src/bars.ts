@@ -167,11 +167,11 @@ export const INLINE_BAR = {
  * reads the same on all of them.
  */
 export const WASHES: Record<string, { light: string; dark: string }> = {
-  admitted: { light: 'rgba(56, 138, 52, 0.15)', dark: 'rgba(137, 209, 133, 0.13)' },
-  conditional: { light: 'rgba(191, 136, 3, 0.15)', dark: 'rgba(204, 167, 0, 0.13)' },
-  running: { light: 'rgba(26, 133, 255, 0.15)', dark: 'rgba(55, 148, 255, 0.13)' },
-  skipped: { light: 'rgba(229, 20, 0, 0.15)', dark: 'rgba(241, 76, 76, 0.13)' },
-  failed: { light: 'rgba(229, 20, 0, 0.15)', dark: 'rgba(241, 76, 76, 0.13)' },
+  admitted: { light: 'rgba(56, 138, 52, 0.15)', dark: 'rgba(137, 209, 133, 0.1)' },
+  conditional: { light: 'rgba(191, 136, 3, 0.15)', dark: 'rgba(204, 167, 0, 0.1)' },
+  running: { light: 'rgba(26, 133, 255, 0.15)', dark: 'rgba(55, 148, 255, 0.1)' },
+  skipped: { light: 'rgba(229, 20, 0, 0.15)', dark: 'rgba(241, 76, 76, 0.1)' },
+  failed: { light: 'rgba(229, 20, 0, 0.15)', dark: 'rgba(241, 76, 76, 0.1)' },
 };
 
 /** The contributed theme-colour id for a status's bar, and for its wash. */
@@ -307,7 +307,7 @@ export function firstDefined(
  * contrast one shouts. The hue follows the theme now, so this is what is left
  * to tune. Overridable through `acl2-session.washOpacity`.
  */
-export const WASH_ALPHA = { light: 0.15, dark: 0.13 };
+export const WASH_ALPHA = { light: 0.15, dark: 0.1 };
 
 /**
  * The same colour at a different opacity.

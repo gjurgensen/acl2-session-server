@@ -210,8 +210,8 @@
         "description": "The background wash over a admitted form, in the 'wash' decoration mode.",
         "defaults": {
           "light": "#388a3426",
-          "dark": "#89d18521",
-          "highContrast": "#89d18521",
+          "dark": "#89d1851a",
+          "highContrast": "#89d1851a",
           "highContrastLight": "#388a3426"
         }
       },
@@ -220,8 +220,8 @@
         "description": "The background wash over a conditional form, in the 'wash' decoration mode.",
         "defaults": {
           "light": "#bf880326",
-          "dark": "#cca70021",
-          "highContrast": "#cca70021",
+          "dark": "#cca7001a",
+          "highContrast": "#cca7001a",
           "highContrastLight": "#bf880326"
         }
       },
@@ -230,8 +230,8 @@
         "description": "The background wash over a skipped form, in the 'wash' decoration mode.",
         "defaults": {
           "light": "#e5140026",
-          "dark": "#f14c4c21",
-          "highContrast": "#f14c4c21",
+          "dark": "#f14c4c1a",
+          "highContrast": "#f14c4c1a",
           "highContrastLight": "#e5140026"
         }
       },
@@ -240,8 +240,8 @@
         "description": "The background wash over a failed form, in the 'wash' decoration mode.",
         "defaults": {
           "light": "#e5140026",
-          "dark": "#f14c4c21",
-          "highContrast": "#f14c4c21",
+          "dark": "#f14c4c1a",
+          "highContrast": "#f14c4c1a",
           "highContrastLight": "#e5140026"
         }
       },
@@ -250,8 +250,8 @@
         "description": "The background wash over a running form, in the 'wash' decoration mode.",
         "defaults": {
           "light": "#1a85ff26",
-          "dark": "#3794ff21",
-          "highContrast": "#3794ff21",
+          "dark": "#3794ff1a",
+          "highContrast": "#3794ff1a",
           "highContrastLight": "#1a85ff26"
         }
       }
@@ -468,7 +468,7 @@
         },
         "acl2-session.washOpacity": {
           "default": null,
-          "markdownDescription": "How strong the background wash is, in the `wash` decoration mode — 0 to 1.\n\nThe hue follows your theme, so this is the part left to taste: the same tint reads differently over different backgrounds, and a low-contrast theme can swallow what a high-contrast one shouts. Defaults to 0.15 on light themes and 0.13 on dark ones.\n\nA single number applies to both; an object sets each. This adjusts whatever colour won — the theme's, or one from `workbench.colorCustomizations` — but not a wash written out in full under `acl2-session.colors`, which is taken exactly as given.",
+          "markdownDescription": "How strong the background wash is, in the `wash` decoration mode — 0 to 1.\n\nThe hue follows your theme, so this is the part left to taste: the same tint reads differently over different backgrounds, and a low-contrast theme can swallow what a high-contrast one shouts. Defaults to 0.15 on light themes and 0.1 on dark ones.\n\nA single number applies to both; an object sets each. This adjusts whatever colour won — the theme's, or one from `workbench.colorCustomizations` — but not a wash written out in full under `acl2-session.colors`, which is taken exactly as given.",
           "anyOf": [
             {
               "type": "number",
