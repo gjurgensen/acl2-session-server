@@ -307,12 +307,12 @@
       {
         "command": "acl2-session.lockFormView",
         "title": "ACL2: Hold Form View",
-        "icon": "$(unlock)"
+        "icon": "$(lock)"
       },
       {
         "command": "acl2-session.unlockFormView",
         "title": "ACL2: Release Form View",
-        "icon": "$(lock)"
+        "icon": "$(unlock)"
       },
       {
         "command": "acl2-session.toggleFormViewLock",
@@ -401,7 +401,7 @@
         "acl2-session.colors": {
           "type": "object",
           "default": {},
-          "markdownDescription": "Override the status colours with concrete values, per status.\n\nMost customisation does not need this: the wash, the inline bar and the overview ruler are theme colours, so `workbench.colorCustomizations` on `acl2Session.bar.*` and `acl2Session.wash.*` already restyles them, follows the active theme, and has high-contrast variants.\n\nThe **gutter bar cannot** be a theme colour: it is drawn as an image, and an extension has no way to read a theme colour back as a value. Setting a colour here is what reaches it — the gutter icon is generated from the value — and the same value then drives the inline bar, the wash and the ruler, so the status column cannot end up disagreeing with itself.\n\nStatuses: `pending`, `running`, `admitted`, `conditional`, `skipped`, `failed`. Any CSS colour: `#fb4934`, `#fb493480`, `rgba(251, 73, 52, 0.65)`.",
+          "markdownDescription": "Override the status colours with concrete values, per status.\n\nMost customisation does not need this: the wash, the inline bar and the overview ruler are theme colours, so `workbench.colorCustomizations` on `acl2Session.bar.*` and `acl2Session.wash.*` already restyles them, follows the active theme, and has high-contrast variants.\n\nThe **gutter bar cannot** be a theme colour: it is drawn as an image, and an extension has no way to read a theme colour back as a value. Setting a colour here is what reaches it \u2014 the gutter icon is generated from the value \u2014 and the same value then drives the inline bar, the wash and the ruler, so the status column cannot end up disagreeing with itself.\n\nStatuses: `pending`, `running`, `admitted`, `conditional`, `skipped`, `failed`. Any CSS colour: `#fb4934`, `#fb493480`, `rgba(251, 73, 52, 0.65)`.",
           "additionalProperties": {
             "type": "object",
             "properties": {

@@ -25,12 +25,13 @@ import { MAX_TERM } from './policy';
 /**
  * What the tab says.
  *
- * Named rather than left as a bare "ACL2", to sit with its siblings -- `ACL2
- * Docs`, `ACL2 Output`, `ACL2 Eval`, `ACL2 Console` -- and because "panel"
- * was VSCode's word for the dock at the bottom of the window, which this has
- * never been. This is an editor tab showing one form.
+ * Bare, where its siblings are named -- `ACL2 Docs`, `ACL2 Output`, `ACL2
+ * Eval`, `ACL2 Console`. This is the one you keep open, so it earns the plain
+ * name; and it is the only one whose title carries *state*, since holding it
+ * appends `(locked)`. Tabs truncate, and a longer base name would cut off
+ * exactly the part worth reading.
  */
-const TITLE = 'ACL2 Form View';
+const TITLE = 'ACL2';
 
 export interface FormCheckpoint {
   kind: string;
