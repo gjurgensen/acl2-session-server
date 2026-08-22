@@ -15,7 +15,7 @@
 // reds included, and no diagnostics. One treatment per fact, never two.
 
 import * as vscode from 'vscode';
-import { Anchor, Edit, keepAnchor, lockedIndex, planTail } from './policy';
+import { Anchor, Edit, attentionPoints, keepAnchor, lockedIndex, planTail } from './policy';
 import { readFileSync } from 'fs';
 import {
   DaemonClient,
@@ -1582,15 +1582,15 @@ function gotoAttention(s: BookSession): void {
     void vscode.window.showInformationMessage('acl2-session: nothing to jump to yet');
     return;
   }
-  const points: { at: Target; kind: string }[] = units
-    .filter((u) => u.status === 'skipped' || u.status === 'failed')
-    .map((u) => ({ at: { line: u.line_start, column: u.col_start }, kind: u.status }));
-  const running = units.find((u) => u.status === 'running');
-  points.push(
-    running
-      ? { at: { line: running.line_start, column: running.col_start }, kind: 'running' }
-      : { at: { line: editor.document.lineCount, column: null }, kind: 'eof' }
-  );
+  const points = attentionPoints(units).map((p) => {
+    const u = p.unit === null ? undefined : units.find((x) => x.index === p.unit);
+    return {
+      at: u
+        ? { line: u.line_start, column: u.col_start }
+        : { line: editor.document.lineCount, column: null },
+      kind: p.kind,
+    };
+  });
 
   // By line, not by character: the cursor may sit anywhere along the form's
   // first line and still be standing on it.
@@ -1612,6 +1612,7 @@ function gotoAttention(s: BookSession): void {
       skipped: 'ACL2: proofs skipped here \u2014 fix it to re-check below for real',
       failed: 'ACL2: this form failed',
       running: 'ACL2: the frontier, still working',
+      frontier: 'ACL2: the frontier \u2014 next to be checked',
       eof: 'ACL2: nothing red \u2014 the end of the book',
     }[next.kind] ?? '',
     4000

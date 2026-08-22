@@ -216,3 +216,43 @@ export function planTail(args: {
   }
   return { target: 'form-view-only', requestsMore: false };
 }
+
+/** One place `Go to Next Attention Point` will stop. */
+export interface Attention {
+  /** The unit to go to, or `null` for the end of the book. */
+  unit: number | null;
+  /** `skipped`, `failed`, `running`, `frontier`, or `eof`. */
+  kind: string;
+}
+
+/**
+ * Where a reader is sent, in order: every red form, then the frontier.
+ *
+ * The frontier is the form being proved, and *failing that the first one not
+ * yet checked* -- which is the case this was missing. A form is `running`
+ * only while ACL2 is actually working on it, and the driver reports state far
+ * more often than that: after every step, after a rollback, after settling.
+ * At any of those moments nothing is running while plenty is still pending,
+ * and treating "nothing running" as "nothing left" sent the cursor to the end
+ * of the file in the middle of a run, seemingly at random.
+ *
+ * The end of the book is the last resort and means what it says: nothing red,
+ * nothing running, nothing pending.
+ */
+export function attentionPoints(
+  units: readonly { index: number; status: string }[]
+): Attention[] {
+  const points: Attention[] = units
+    .filter((u) => u.status === 'skipped' || u.status === 'failed')
+    .map((u) => ({ unit: u.index, kind: u.status }));
+  const running = units.find((u) => u.status === 'running');
+  const pending = units.find((u) => u.status === 'pending');
+  if (running) {
+    points.push({ unit: running.index, kind: 'running' });
+  } else if (pending) {
+    points.push({ unit: pending.index, kind: 'frontier' });
+  } else {
+    points.push({ unit: null, kind: 'eof' });
+  }
+  return points;
+}
