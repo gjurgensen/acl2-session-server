@@ -7,11 +7,29 @@
 //   on request    Format Selection, Format Document, Tab, the command.
 //
 // VSCode's own mechanism for the first is `DocumentOnTypeFormattingEditProvider`,
-// and it is not used here. It is reached only through the editor's built-in
-// `type` command, and an extension may replace that command outright --
-// VSCodeVim does -- after which it is never called and indentation silently
-// stops happening. Watching the document sees every edit whoever made it, so
-// it is what the rule hangs off. One mechanism, not two that must agree.
+// and it is not used here, because in this editor it is never called. That
+// was measured rather than assumed, after being assumed wrongly once:
+//
+//   indent: registered. effective for acl2: formatOnType=true autoIndent="keep"
+//   indent: change x1 [off=3198 del=0 ins="\n           "]
+//
+// A provider registered for `\n`, with `editor.formatOnType` confirmed true
+// for the language, and an Enter that plainly happened -- and no call. The
+// cause is almost certainly VSCodeVim, which replaces the `type` command
+// that on-type formatting hangs off (`overrideCommand(context, 'type', ...)`
+// in its `extensionBase.js`); what is certain is the absence of the call.
+//
+// Note that the editor's *own* newline handling is untouched by this: the
+// change above carries the line break and `autoIndent: keep`'s spaces
+// together, which is the core doing its work. Only the provider is
+// unreachable. C indents fine in the same editor for the same reason, one
+// step further along -- `indentationRules` and `onEnterRules` in the
+// built-in cpp language configuration are regexes the core applies during
+// newline handling, no provider involved. That mechanism is closed to Lisp;
+// see the head of `indent.ts`.
+//
+// So the rule hangs off the document instead, which sees every edit whoever
+// made it. One mechanism, not two that must agree.
 //
 // The other way in -- `indentationRules` in the language configuration -- is
 // what VSCode reaches for first and cannot express Lisp indentation; see the
@@ -296,40 +314,10 @@ function watchDocument(): vscode.Disposable {
 }
 
 /** Register the three providers. Returns them for disposal. */
-/**
- * Does VSCode's own on-type formatting reach us here?
- *
- * It is the mechanism the editor documents for computed indentation, and
- * this file does not use it -- `watchDocument` does the work instead. The
- * stated reason was that VSCodeVim replaces the `type` command that on-type
- * formatting hangs off, which is true of its source and was never checked
- * against the running editor. The evidence since is against it: a single
- * change carrying a line break *and* `autoIndent`'s spaces is the editor's
- * own newline handling, so that path plainly runs.
- *
- * So ask. This provider never edits anything; it only says that it was
- * called. If it is, the workaround can go and this can hang off the
- * mechanism VSCode intends -- which gets undo and caret handling for free
- * rather than by hand. If it is not, we will know that too, and why.
- */
-const probe: vscode.OnTypeFormattingEditProvider = {
-  provideOnTypeFormattingEdits(doc, position, ch) {
-    log(`on-type provider WAS called: ch=${JSON.stringify(ch)} line=${position.line}`);
-    void doc;
-    return [];
-  },
-};
-
 export function registerFormatting(channel?: vscode.OutputChannel): vscode.Disposable[] {
   trace = channel;
   const acl2 = { language: 'acl2' };
-  const editorCfg = vscode.workspace.getConfiguration('editor', { languageId: 'acl2' });
-  log(
-    `registered. effective for acl2: formatOnType=${editorCfg.get('formatOnType')} ` +
-      `autoIndent=${JSON.stringify(editorCfg.get('autoIndent'))}`
-  );
   return [
-    vscode.languages.registerOnTypeFormattingEditProvider(acl2, probe, '\n', ')', ']'),
     vscode.languages.registerDocumentRangeFormattingEditProvider(acl2, range),
     vscode.languages.registerDocumentFormattingEditProvider(acl2, whole),
     watchDocument(),
