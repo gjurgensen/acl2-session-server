@@ -48,6 +48,7 @@
         "editor.wordSeparators": "()[]{}'\"`,;|",
         "editor.autoIndent": "keep",
         "editor.insertSpaces": true,
+        "editor.detectIndentation": false,
         "editor.formatOnType": true
       },
       "[acl2-output]": {
