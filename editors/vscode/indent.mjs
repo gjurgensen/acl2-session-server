@@ -78,6 +78,16 @@ ind('a call aligns under its first argument', `
         (bar y))
 `);
 
+ind('cond clauses line up under the first clause', `
+(cond ((consp x) 1)
+((null x) 2)
+(t 3))
+`, `
+(cond ((consp x) 1)
+      ((null x) 2)
+      (t 3))
+`);
+
 ind('a call whose head is alone goes one column in', `
 (must-fail
 (defthm bad nil))

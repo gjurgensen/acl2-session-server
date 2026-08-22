@@ -110,7 +110,11 @@ export const FORMS: Record<string, IndentSpec> = {
   when: 1,
   unless: 1,
   while: 1,
-  cond: 0,
+  // `cond` is deliberately absent. Emacs' *elisp* mode indents its clauses
+  // at the body indent, and copying that costs eight points of corpus
+  // agreement on its own -- more than any other single entry is worth.
+  // Common Lisp, and every book here, aligns the clauses under the first
+  // clause, which is what ordinary call handling already does.
   progn: 0,
   prog1: 1,
   prog2: 2,
@@ -193,18 +197,12 @@ export const FORMS: Record<string, IndentSpec> = {
   'define-skeleton': 3,
   'define-abbrev-table': 1,
 
-  // The testing macros. Not in any of the three tables, because they live in
-  // the books rather than in ACL2 proper -- but a book's test file is mostly
-  // made of them, and their argument is a form to be indented as a body.
-  'must-succeed*': 0,
-  'must-eval-to': 1,
-  'must-eval-to-t': 0,
-  'must-be-redundant': 0,
-  'must-prove': 0,
-  'must-not-prove': 0,
-  'assert!': 0,
-  'assert-equal': 0,
-  'must-not-be-tables': 0,
+  // The testing macros -- `must-fail`, `must-succeed*`, `assert!` and the
+  // rest -- were tried here as body-indenting forms and are deliberately
+  // absent. They looked like they belonged while `cond` was still wrong, and
+  // once that was fixed every one of them cost agreement rather than earning
+  // it: the books write them as ordinary calls. Nothing goes in this table
+  // that the corpus does not pay for.
 };
 
 /** An open delimiter still unclosed at some point in the text. */
