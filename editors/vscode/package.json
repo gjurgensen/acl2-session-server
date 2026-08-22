@@ -317,7 +317,7 @@
       "commandPalette": [
         {
           "command": "acl2-session.lockPanel",
-          "when": "activeWebviewPanelId == 'acl2SessionPanel' && !acl2Session.panelLocked"
+          "when": "!acl2Session.panelLocked"
         },
         {
           "command": "acl2-session.unlockPanel",

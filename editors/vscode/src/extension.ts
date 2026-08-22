@@ -349,9 +349,10 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('acl2-session.showDocs', () => forBook(showDocs)),
     vscode.commands.registerCommand('acl2-session.certify', () => forBook(certifyBook)),
     vscode.tasks.registerTaskProvider('acl2', certifyTaskProvider),
-    vscode.commands.registerCommand('acl2-session.lockPanel', () => forBook(takeLock)),
-    // Not `forBook`: letting go must work even when the editor in front
-    // belongs to another book, which is exactly when a lock is doing its job.
+    // Neither of these goes through `forBook`: both are invoked from the
+    // panel's own title bar, where the focused thing is a webview and there is
+    // no active text editor to find a book from.
+    vscode.commands.registerCommand('acl2-session.lockPanel', () => takeLock()),
     vscode.commands.registerCommand('acl2-session.unlockPanel', () => {
       const was = locked?.book;
       releaseLock();
@@ -1941,17 +1942,32 @@ function panelTarget(s: BookSession): number | undefined {
 }
 
 /**
- * Hold the panel on the form at the cursor.
+ * Hold the panel on the form it is showing.
  *
- * Anchored to the form's own start rather than to the cursor: a cursor can sit
- * on a blank line or in a comment between forms, and an anchor that resolves to
- * nothing is a lock that lets go the moment it is taken.
+ * On what the panel *shows* rather than on where the cursor is, and the reason
+ * is where this gets invoked from: its own title bar. A webview having focus
+ * means there is no active text editor at all, so anything reading the cursor
+ * finds nothing and reports that there is no session -- which was the first
+ * thing this did. Reading the panel instead is both correct there and a better
+ * description of the act: the button says keep showing this.
+ *
+ * It costs nothing anywhere else, since an unheld panel is already showing
+ * whatever the cursor is in.
+ *
+ * Anchored to the form's own start rather than to a position inside it: only a
+ * start can be checked against the daemon's split, which is what every later
+ * decision rests on.
  */
-function takeLock(s: BookSession): void {
-  const u = unitAt(s, cursorTarget());
-  const editor = vscode.window.activeTextEditor;
-  if (!u || !editor || editor.document !== s.doc) {
-    void vscode.window.showInformationMessage('ACL2: put the cursor in a form to hold the panel on it');
+function takeLock(): void {
+  const shown = panel.shown();
+  const s = shown && byId.get(shown.book);
+  const u = shown && s?.lastState?.units[shown.index];
+  // The document, not an editor: there may not be one in front, and a
+  // `TextDocument` can be read either way.
+  if (!s || !u || u.line_start > s.doc.lineCount) {
+    void vscode.window.showInformationMessage(
+      'ACL2: the panel is not showing a form to hold it on'
+    );
     return;
   }
   locked = {
@@ -1959,7 +1975,7 @@ function takeLock(s: BookSession): void {
     anchor: {
       line: u.line_start,
       column: u.col_start,
-      character: charOffset(editor.document.lineAt(u.line_start - 1).text, u.col_start),
+      character: charOffset(s.doc.lineAt(u.line_start - 1).text, u.col_start),
     },
   };
   void vscode.commands.executeCommand('setContext', 'acl2Session.panelLocked', true);
