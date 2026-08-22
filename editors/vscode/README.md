@@ -242,6 +242,20 @@ Three ways in, all the same rules:
   which as-you-type formatting is never asked about — Vim's `o` opens one.
   **ACL2: Indent Line or Selection** is in the command palette either way.
 
+Each of the three switches off on its own, and they are VSCode's own settings
+rather than ones invented here, so they behave the way you already expect a
+per-language setting to behave:
+
+```json
+"[acl2]": {
+  "editor.formatOnType": false,   // stop indenting as you type
+  "editor.formatOnPaste": false   // stop indenting what you paste
+},
+"acl2-session.tabIndents": false  // give Tab back to VSCode
+```
+
+Format Document and Format Selection stay, because you have to ask for those.
+
 ## Highlighting the output log
 
 The log is not a Lisp file. It is prose with Lisp embedded in it, and prose
