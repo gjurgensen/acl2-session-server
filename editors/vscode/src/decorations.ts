@@ -41,6 +41,8 @@ import {
   WASHES,
   barColorId,
   barFor,
+  markFor,
+  spinnerSvg,
   forTheme,
   firstDefined,
   gutterSvg,
@@ -58,8 +60,6 @@ export { DecorationMode };
 
 export interface DecorationOptions {
   mode: DecorationMode;
-  /** Mark admitted forms with the green bar; off, absence means admitted. */
-  gutterAdmitted: boolean;
 }
 
 /**
@@ -163,6 +163,8 @@ export class Decorations {
   private gutterBars = new Map<string, vscode.TextEditorDecorationType>();
   /** The same bar inline, for a form with no gutter cell to claim. */
   private inlineBars = new Map<string, vscode.TextEditorDecorationType>();
+  /** `minimal`'s one mark: a spinner at the head of the running form. */
+  private spinner!: vscode.TextEditorDecorationType;
   private target!: vscode.TextEditorDecorationType;
   private unreadable!: vscode.TextEditorDecorationType;
 
@@ -297,8 +299,9 @@ export class Decorations {
       this.washParts.set(status, vscode.window.createTextEditorDecorationType(paint));
     }
 
-    // The bars: pending neutral gray, running BLUE (true blue, hue 262),
-    // admitted green, conditional YELLOW, red for the reds.
+    // The bars: neutral grey for queued work and, pulsing, for the form
+    // being proved -- admitted green, conditional YELLOW, red for the reds.
+    // Running used to be blue; the pulse says it better than a fifth hue did.
     for (const bar of BARS) {
       // A bar can speak for two statuses (skipped and failed share one), and
       // an override on either recolours it.
@@ -314,6 +317,26 @@ export class Decorations {
         bar.icon,
         inlineBarType(pick(light, barColorId(named)), pick(dark, barColorId(named)))
       );
+    }
+
+    // The spinner, built from the running bar's own resolved colour so the two
+    // modes agree about what "working" looks like, whatever the theme said.
+    {
+      const c = { light: over('running', 'bar', 'light'), dark: over('running', 'bar', 'dark') };
+      const spin = (theme: 'light' | 'dark'): vscode.Uri | string => {
+        const c0 = c[theme];
+        return c0 === undefined || !svgCanPaint(c0)
+          ? this.context.asAbsolutePath(`media/spinner-${theme}.svg`)
+          : vscode.Uri.parse(
+              `data:image/svg+xml;base64,${Buffer.from(spinnerSvg(c0), 'utf8').toString('base64')}`
+            );
+      };
+      this.spinner = vscode.window.createTextEditorDecorationType({
+        overviewRulerLane: vscode.OverviewRulerLane.Left,
+        overviewRulerColor: pick(c.dark, barColorId('running')),
+        light: { gutterIconPath: spin('light'), gutterIconSize: 'contain' },
+        dark: { gutterIconPath: spin('dark'), gutterIconSize: 'contain' },
+      });
     }
 
     // The held-target indicator: a Q.E.D.-style box.
@@ -396,10 +419,8 @@ export class Decorations {
       inline.set(bar.icon, []);
     }
 
-    // Which bar a status wears, and whether it wears one at all: `bars.ts`,
-    // where the three modes differ and can be tested without an editor.
-    const barOf = (status: string): string | undefined =>
-      barFor(opts.mode, status, opts.gutterAdmitted);
+    // Spinners: at the head of the form, one line, never a column.
+    const spins: vscode.Range[] = [];
 
     for (const p of painted) {
       if (opts.mode === 'wash') {
@@ -409,21 +430,31 @@ export class Decorations {
         }
         continue;
       }
-      const bar = barOf(p.status);
-      if (bar === undefined) {
+      // What this status is drawn as in this mode: `bars.ts`, where the three
+      // modes differ and can be tested without an editor.
+      const mark = markFor(opts.mode, p.status);
+      if (mark === undefined) {
+        continue;
+      }
+      if (mark.kind === 'spinner') {
+        // The form's own first line, whether or not it owns that line's gutter
+        // cell -- there is nothing else competing for it in this mode, so the
+        // shared-line question the bars have to answer does not arise.
+        spins.push(new vscode.Range(p.head - 1, 0, p.head - 1, 0));
         continue;
       }
       if (p.gutter) {
-        bars.get(bar)?.push(new vscode.Range(p.gutter.from - 1, 0, p.gutter.to - 1, 0));
+        bars.get(mark.icon)?.push(new vscode.Range(p.gutter.from - 1, 0, p.gutter.to - 1, 0));
       }
       // No gutter cell of its own: the bar goes between the two forms, at
       // the column this one starts in. A form that has both -- it opens on
       // a line it does not own and runs on past it -- gets both, which is
       // right: the mark says where it starts, the cells say how far it runs.
       if (p.inlineAt) {
-        inline.get(bar)?.push(at(p.inlineAt));
+        inline.get(mark.icon)?.push(at(p.inlineAt));
       }
     }
+    editor.setDecorations(this.spinner, spins);
 
     // Every type is always set, so switching modes cleans up after itself.
     for (const [status, t] of this.washes) {

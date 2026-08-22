@@ -1,0 +1,1 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><style>@keyframes acl2-spin{to{transform:rotate(360deg)}}path{transform-origin:8px 8px;animation:acl2-spin 1s linear infinite}</style><path d="M8 2.5a5.5 5.5 0 1 1-5.5 5.5" fill="none" stroke-width="2" stroke-linecap="round" stroke="#616161" stroke-opacity="0.8"/></svg>

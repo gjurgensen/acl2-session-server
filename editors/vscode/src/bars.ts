@@ -51,20 +51,14 @@ export type DecorationMode = 'gutter' | 'wash' | 'minimal';
  *   reached yet is understood from being below the running one. What is wrong
  *   is a diagnostic, which is not a bar and does not belong here.
  *
- * `gutterAdmitted` is the one place a reader can disagree with `gutter`: off,
- * the absence of a bar means admitted, and the column carries only work in
- * progress and trouble.
+ * There used to be a fourth answer -- a `gutterAdmitted` switch that hid the
+ * green and the yellow so absence meant admitted. `minimal` says that better
+ * and says it as a mode, so the switch is gone.
  */
-export function barFor(
-  mode: DecorationMode,
-  status: string,
-  gutterAdmitted: boolean
-): string | undefined {
-  if (mode === 'wash') {
+export function barFor(mode: DecorationMode, status: string): string | undefined {
+  if (mode === 'wash' || mode === 'minimal') {
+    // `minimal`'s one mark is a spinner, not a bar: see `markFor`.
     return undefined;
-  }
-  if (mode === 'minimal') {
-    return status === 'running' ? 'running' : undefined;
   }
   switch (status) {
     case 'pending':
@@ -72,15 +66,59 @@ export function barFor(
     case 'running':
       return 'running';
     case 'admitted':
-      return gutterAdmitted ? 'admitted' : undefined;
+      return 'admitted';
     case 'conditional':
-      return gutterAdmitted ? 'cond' : undefined;
+      return 'cond';
     case 'skipped':
     case 'failed':
       return 'red';
     default:
       return undefined;
   }
+}
+
+/** What a status is drawn as: a bar down the form, or a spinner at its head. */
+export type Mark = { kind: 'bar'; icon: string } | { kind: 'spinner' };
+
+/**
+ * The whole difference between the three modes.
+ *
+ * `gutter` draws a bar beside every line of every form. `wash` draws
+ * backgrounds and no marks. `minimal` draws one thing: a spinner at the head of
+ * the form being proved. Everything else it leaves to inference -- an admitted
+ * form is unremarkable, a conditional one follows from the failure above it,
+ * one not reached yet follows from sitting below the running one -- and what is
+ * *wrong* is a diagnostic, which is not a mark and is on in every mode.
+ */
+export function markFor(mode: DecorationMode, status: string): Mark | undefined {
+  if (mode === 'minimal') {
+    return status === 'running' ? { kind: 'spinner' } : undefined;
+  }
+  const icon = barFor(mode, status);
+  return icon === undefined ? undefined : { kind: 'bar', icon };
+}
+
+/**
+ * The running form's mark in `minimal`: a spinner, on its first line only.
+ *
+ * A rotation, where the bar could only pulse, and the difference is tiling. A
+ * bar is one icon repeated down every line of a form, every copy in step, so
+ * anything that travels reads as a column of sliders marching together. This
+ * is a single icon on a single line, with nothing to keep step with, so it can
+ * turn -- which is what "working" looks like everywhere else in the editor,
+ * including this extension's own status bar.
+ *
+ * An arc rather than a full ring: a gap is what makes the rotation visible.
+ */
+export function spinnerSvg(color: string): string {
+  return (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">' +
+    '<style>@keyframes acl2-spin{to{transform:rotate(360deg)}}' +
+    'path{transform-origin:8px 8px;animation:acl2-spin 1s linear infinite}</style>' +
+    '<path d="M8 2.5a5.5 5.5 0 1 1-5.5 5.5" fill="none" stroke-width="2" ' +
+    `stroke-linecap="round" stroke="${escapeAttr(color)}"/>` +
+    '</svg>'
+  );
 }
 
 /** Whether a status is worth a line in the Problems view, and a squiggle. */
@@ -138,15 +176,21 @@ export const BARS: Bar[] = [
     dark: 'rgba(204, 204, 204, 0.35)',
   },
   {
+    // Grey, like the queued bar it sits at the head of, and pulsing. A running
+    // form is a queued form that has come up, not a fifth kind of thing, and
+    // the column reads better saying that with motion than with a colour --
+    // blue was one more hue in a row already carrying four, and the eye had to
+    // learn it. Only the wash still says running in blue, where nothing moves
+    // and a colour is all there is.
     icon: 'running',
     pulse: true,
     themeIds: {
-      light: ['editorInfo.foreground', 'charts.blue', 'terminal.ansiBlue'],
-      dark: ['editorInfo.foreground', 'charts.blue', 'terminal.ansiBrightBlue'],
+      light: ['disabledForeground', 'descriptionForeground', 'terminal.ansiBrightBlack'],
+      dark: ['disabledForeground', 'descriptionForeground', 'terminal.ansiBrightBlack'],
     },
     statuses: ['running'],
-    light: 'rgba(26, 133, 255, 0.85)',
-    dark: 'rgba(55, 148, 255, 0.85)',
+    light: 'rgba(97, 97, 97, 0.55)',
+    dark: 'rgba(204, 204, 204, 0.5)',
   },
   {
     icon: 'admitted',

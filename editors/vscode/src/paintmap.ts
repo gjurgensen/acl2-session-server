@@ -55,6 +55,16 @@ export type Span = WholeLines | PartOfLine;
 export interface Painted {
   index: number;
   status: string;
+  /**
+   * The form's first line: where a mark that is a single icon goes.
+   *
+   * Carried plainly rather than derived from `gutter`, which is the *lines
+   * this form owns the gutter of* and is `null` for a form written second on
+   * its opening line. A mark at the head of a form wants that head either
+   * way, and there is nothing for it to collide with -- `minimal`, the only
+   * mode that draws one, marks nothing else at all.
+   */
+  head: number;
   /** What to wash for this unit. */
   spans: Span[];
   /**
@@ -138,6 +148,7 @@ export function paintMap(units: Placed[]): Painted[] {
     return {
       index: u.index,
       status: u.status,
+      head: u.line_start,
       spans,
       gutter: cells <= u.line_end ? { from: cells, to: u.line_end } : null,
       inlineAt: owns ? null : { line: u.line_start, col: u.col_start },

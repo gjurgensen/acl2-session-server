@@ -8,15 +8,13 @@ The extension automatically syncs a background ACL2 session with the file. How
 form status is then shown is `acl2-session.decorations`:
 
 - **`gutter`** (the default) — a status column beside every form: grey queued,
-  blue proving, green admitted, yellow conditional, red failed. The text itself
-  is left alone. `acl2-session.gutterAdmitted` turns off the green and the
-  yellow, so absence means admitted and the column carries only work in
-  progress and trouble.
+  grey *pulsing* for the form being proved, green admitted, yellow conditional,
+  red failed. The text itself is left alone.
 - **`wash`** — a background wash over the whole of every form, reds included.
-- **`minimal`** — only what is happening or wrong. A bar beside the form being
-  proved, and nothing else: an admitted form is unremarkable, a conditional one
-  follows from the failure above it, and one not reached yet follows from
-  sitting below the running one.
+- **`minimal`** — only what is happening or wrong. A spinner at the head of the
+  form being proved, and nothing else: an admitted form is unremarkable, a
+  conditional one follows from the failure above it, and one not reached yet
+  follows from sitting below the running one.
 
 Each mode marks each fact once, which is the rule they are built around: never
 a bar *and* a wash, never a wash *and* a squiggle.

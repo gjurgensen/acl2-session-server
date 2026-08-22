@@ -112,40 +112,65 @@ for (const kind of ['light', 'dark']) {
 // bars, `minimal` draws only the form being proved and leaves what is *wrong*
 // to a diagnostic.
 {
-  const { barFor, isProblem } = require('./out/bars.js');
+  const { barFor, isProblem, markFor, spinnerSvg } = require('./out/bars.js');
   const ALL = ['pending', 'running', 'admitted', 'conditional', 'skipped', 'failed'];
 
   const expect = {
     gutter:  { pending: 'pending', running: 'running', admitted: 'admitted',
                conditional: 'cond', skipped: 'red', failed: 'red' },
-    minimal: { pending: undefined, running: 'running', admitted: undefined,
+    minimal: { pending: undefined, running: undefined, admitted: undefined,
                conditional: undefined, skipped: undefined, failed: undefined },
     wash:    { pending: undefined, running: undefined, admitted: undefined,
                conditional: undefined, skipped: undefined, failed: undefined },
   };
   for (const mode of Object.keys(expect)) {
     for (const st of ALL) {
-      check(`${mode}: ${st}`, barFor(mode, st, true), expect[mode][st]);
+      check(`${mode}: ${st}`, barFor(mode, st), expect[mode][st]);
     }
   }
 
-  // The one place a reader can disagree with `gutter`: with admitted bars off,
-  // absence means admitted and the column carries only work and trouble.
-  check('gutter, admitted bars off: admitted', barFor('gutter', 'admitted', false), undefined);
-  check('gutter, admitted bars off: conditional', barFor('gutter', 'conditional', false), undefined);
-  check('gutter, admitted bars off: failed still marked', barFor('gutter', 'failed', false), 'red');
-  // That setting is about the gutter, and minimal has no admitted bar to hide.
-  check('minimal is unmoved by it', barFor('minimal', 'running', false), 'running');
 
   // Every bar the table can name has to exist, or a status silently loses its
   // mark at the point of drawing.
   for (const mode of Object.keys(expect)) {
     for (const st of ALL) {
-      const icon = barFor(mode, st, true);
+      const icon = barFor(mode, st);
       if (icon !== undefined) {
         check(`${mode}/${st} names a real bar`, BARS.some((b) => b.icon === icon), true);
       }
     }
+  }
+
+  // What each mode *draws*: a bar down the form, a spinner at its head, or
+  // nothing. `minimal` draws one thing and it is not a bar.
+  check('minimal marks the running form with a spinner',
+    markFor('minimal', 'running').kind, 'spinner');
+  for (const st of ['pending', 'admitted', 'conditional', 'skipped', 'failed']) {
+    check(`minimal draws nothing for ${st}`, markFor('minimal', st), undefined);
+  }
+  check('gutter marks it with a bar', markFor('gutter', 'running').kind, 'bar');
+  check('and that bar is the running one', markFor('gutter', 'running').icon, 'running');
+  check('wash draws no marks at all', markFor('wash', 'running'), undefined);
+
+  // The spinner turns, where the bar can only pulse -- a bar is tiled down
+  // every line of the form and would march in step; this is one icon.
+  const spun = spinnerSvg('#cccccc');
+  check('the spinner rotates', /@keyframes acl2-spin/.test(spun), true);
+  check('and does it without script', /<script/.test(spun), false);
+  check('an arc, not a ring -- the gap is what makes turning visible',
+    /<path[^>]*fill="none"/.test(spun), true);
+
+  // The running bar is grey now, like the queued one: the pulse says running,
+  // not a fifth hue. Only the wash still says it in blue.
+  {
+    const bar = BARS.find((b) => b.statuses.includes('running'));
+    const queued = BARS.find((b) => b.statuses.includes('pending'));
+    for (const kind of ['light', 'dark']) {
+      const [br, bg, bb] = bar[kind].match(/\d+/g).slice(0, 3);
+      const [qr, qg, qb] = queued[kind].match(/\d+/g).slice(0, 3);
+      check(`the running bar shares the queued hue (${kind})`, `${br},${bg},${bb}`, `${qr},${qg},${qb}`);
+    }
+    check('and is the one that pulses', bar.pulse, true);
   }
 
   // What goes to the Problems view, in every mode.

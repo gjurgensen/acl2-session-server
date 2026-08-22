@@ -192,10 +192,6 @@ function mode(): DecorationMode {
   return vscode.workspace.getConfiguration('acl2-session').get<DecorationMode>('decorations', 'gutter');
 }
 
-function gutterAdmitted(): boolean {
-  return vscode.workspace.getConfiguration('acl2-session').get<boolean>('gutterAdmitted', true);
-}
-
 /**
  * How wide a hover's terms are laid out.
  *
@@ -1850,7 +1846,7 @@ function paint(s: BookSession): void {
   // Not inside the editor loop below: a diagnostic belongs to the document,
   // and is worth publishing whether or not the file is on screen.
   updateProblems(s);
-  const opts = { mode: mode(), gutterAdmitted: gutterAdmitted() };
+  const opts = { mode: mode() };
   for (const editor of vscode.window.visibleTextEditors) {
     if (editor.document === s.doc) {
       decorations.apply(editor, s.lastState.units, opts);
