@@ -19,18 +19,22 @@ form status is then shown is `acl2-session.decorations`:
 Each mode marks each fact once, which is the rule they are built around: never
 a bar *and* a wash, never a wash *and* a squiggle.
 
-A held target is drawn in every mode, and identically in all three: a blue stop
-sign in the gutter beside the first form the run will **not** reach. A sign and
-not a bar, because every bar in that column is a verdict about the form beside
-it and the target is not a verdict at all. It says what happens at that line
-rather than where the boundary lies — a gutter cell addresses a line, so an
+A held target is drawn in every mode, and identically in all three: a red
+no-entry sign in the gutter beside the first form the run will **not** reach. A
+sign and not a bar, because every bar in that column is a verdict about the form
+beside it and the target is not a verdict at all. It says what happens at that
+line rather than where the boundary lies — a gutter cell addresses a line, so an
 icon in one is always read as being about that line, and a mark that tried to
 sit *between* two either could not be seen or read as a status of the form
-beside it. At a font size worth reading the octagon is a stop sign; at a small
-one it is a dot in the gutter, which is what every editor uses for "execution
-stops here". Where two forms share a line and the barrier falls between them,
-the gutter has no cell to use, so the mark goes in the text at the column the
-second form begins.
+beside it. Where two forms share a line and the barrier falls between them, the
+gutter has no cell to use, so the mark goes in the text at the column the second
+form begins.
+
+It is the same red as a failure, which is a trade rather than an oversight: a
+no-entry sign that is not red is not a no-entry sign, and this is the one mark
+in that column whose *shape* carries its meaning, so it can afford to share a
+hue. What it costs is red's uniqueness — with a target held, red no longer means
+"a form failed" on its own, and a red disc has to be told from a red bar.
 
 It marks the first form *beyond* rather than the last form included, because
 that is the side with room. Beside an included form the gutter already says

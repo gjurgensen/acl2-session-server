@@ -266,11 +266,16 @@ export const BARS: Bar[] = [
   // and shipped as a fallback -- and nothing about that machinery cares
   // whether the thing being coloured is a verdict.
   //
-  // Blue, which the gutter freed when running stopped needing a hue of its
-  // own. `editorInfo.foreground` is the right word for it: the target is
-  // information the reader supplied, not a judgement the prover reached.
-  // Stronger than the status bars on purpose -- the mark is a rule three
-  // eighteenths of a cell tall, where they are the full height.
+  // Red, and deliberately the *same* red as a failure rather than a near one.
+  // A no-entry sign that is not red is not a no-entry sign, and this is the
+  // one place in the column where a hue is not doing the work: the silhouette
+  // says what the mark means, so sharing red costs nothing a second glance
+  // does not recover. What it does cost is red's uniqueness -- a reader
+  // scanning for failures gets a hit on a held target -- and that is the
+  // trade, made knowingly.
+  //
+  // Stronger than the status bars on purpose: a sign wants to be read, where
+  // a status bar wants to be noticed and then ignored.
   //
   // Deliberately not the last entry: `barOfStatus` falls back to the final
   // one for a status it does not know, and red is the right thing to be
@@ -278,12 +283,12 @@ export const BARS: Bar[] = [
   {
     icon: 'target',
     themeIds: {
-      light: ['editorInfo.foreground', 'charts.blue', 'terminal.ansiBlue'],
-      dark: ['editorInfo.foreground', 'charts.blue', 'terminal.ansiBrightBlue'],
+      light: ['editorError.foreground', 'charts.red', 'terminal.ansiRed'],
+      dark: ['editorError.foreground', 'charts.red', 'terminal.ansiBrightRed'],
     },
     statuses: ['target'],
-    light: 'rgba(26, 133, 255, 0.9)',
-    dark: 'rgba(55, 148, 255, 0.85)',
+    light: 'rgba(229, 20, 0, 0.9)',
+    dark: 'rgba(241, 76, 76, 0.85)',
   },
   {
     icon: 'red',
@@ -340,31 +345,40 @@ const DROP = '0.25em';
  *
  * So stop fighting it. The mark is about a line -- the head of the first form
  * that will not be checked -- and the icon says what happens there rather than
- * where the boundary lies. An octagon at a font size worth reading is a stop
- * sign; at a small one it is a dot in the gutter, which is what every editor
- * uses for "execution stops here". Both readings are the one meant.
+ * where the boundary lies.
+ *
+ * A no-entry sign and not the octagon that came before it, because at this
+ * size an octagon *is* a circle: its meaning lives in an outline that a
+ * nineteen-pixel cell does not resolve. What survives at this size is a
+ * silhouette with a hole in it. The slot is the message, and it is legible
+ * for the same reason the outline was not.
  *
  * Shape simple enough to survive being drawn twice, which the arrow was not.
  * The inline twin is a character, and a font decides a shaft-and-head arrow's
- * proportions for itself; it has no opinion about a dot.
+ * proportions for itself; a disc with a bar through it it can manage.
  */
 export function targetSvg(color: string): string {
   return (
     '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18">' +
-    `<path d="${TARGET_STOP}" fill="${escapeAttr(color)}"/>` +
+    `<path d="${TARGET_STOP}" fill-rule="evenodd" fill="${escapeAttr(color)}"/>` +
     '</svg>'
   );
 }
 
 /**
- * A regular octagon centred in the cell: a square from 2.5 to 15.5 with its
- * corners cut at `s / (2 + sqrt 2)`. Kept as a constant because
- * `media/target-*.svg` has to draw the same shape and is otherwise a
- * hand-copied pair.
+ * A disc with a slot through it: the no-entry sign, centred in the cell.
+ *
+ * Two subpaths -- the disc, then the bar -- and the bar is a *hole*, which is
+ * what `fill-rule="evenodd"` is doing and why it is not decoration. Without it
+ * the two subpaths merge and the icon is a plain disc, which is the thing this
+ * shape exists to stop being.
+ *
+ * Kept as a constant because `media/target-*.svg` has to draw the same shape
+ * and is otherwise a hand-copied pair.
  */
 export const TARGET_STOP =
-  'M6.31 2.5 L11.69 2.5 L15.5 6.31 L15.5 11.69 L11.69 15.5 ' +
-  'L6.31 15.5 L2.5 11.69 L2.5 6.31 Z';
+  'M2.5 9 A6.5 6.5 0 1 0 15.5 9 A6.5 6.5 0 1 0 2.5 9 Z ' +
+  'M3.6 7.6 L14.4 7.6 L14.4 10.4 L3.6 10.4 Z';
 
 /**
  * The same mark where the gutter cannot reach: between two forms on a line.
@@ -377,11 +391,13 @@ export const TARGET_STOP =
  *
  * A glyph is sized to the line by construction and needs no geometry at all,
  * which is what the mark this replaced always did. It costs nothing here that
- * it cost the arrow: at this size an octagon and a filled circle are the same
- * dot, so the two marks agree without being the same drawing.
+ * it cost the arrow: `\u2296` is a disc with a bar through it and so is the
+ * gutter icon, so the two agree without being the same drawing. A font that
+ * lacks it falls back to another one -- a glyph of the wrong width rather than
+ * of the wrong shape, which is the failure worth having.
  */
 export const INLINE_TARGET = {
-  contentText: '\u25cf',
+  contentText: '\u2296',
   margin: '0 0.08em 0 0.08em',
 };
 

@@ -182,43 +182,55 @@ for (const kind of ['light', 'dark']) {
   }
 
   // The held target's mark says what happens at a line rather than where a
-  // boundary lies, which is the third answer this question got. A gutter cell
+  // boundary lies, which is the fourth answer this question got. A gutter cell
   // addresses a line, so anything drawn in one reads as being about that line;
-  // a rule along the top edge could not be seen, and a mark that could be seen
-  // read as a status of the form beside it. An octagon says "stops here" and
-  // does not need the geometry to say anything.
+  // and at nineteen pixels a shape's *outline* is not resolved, which is what
+  // sank the octagon before it -- an octagon at this size is a circle. What
+  // survives is a silhouette with a hole in it.
   {
-    const { targetSvg, gutterSvg, INLINE_TARGET } = require('./out/bars.js');
-    const stop = targetSvg('#3794ff');
+    const { targetSvg, gutterSvg, TARGET_STOP, INLINE_TARGET } = require('./out/bars.js');
+    const stop = targetSvg('#f14c4c');
     check('the target mark is a shape, not a bar', /<path/.test(stop) && !/<rect/.test(stop), true);
-    check('and a status bar is a bar', /<rect/.test(gutterSvg('#3794ff')), true);
+    check('and a status bar is a bar', /<rect/.test(gutterSvg('#f14c4c')), true);
 
-    const pts = [...(/<path[^>]*d="([^"]+)"/.exec(stop)[1])
-      .matchAll(/(-?[\d.]+)\s+(-?[\d.]+)/g)].map((m) => [+m[1], +m[2]]);
-    const xs = pts.map((p) => p[0]);
-    const ys = pts.map((p) => p[1]);
-    check('it is an octagon', pts.length, 8);
-    // Regular, and centred: a stop sign leaning or sitting off to one side
-    // reads as a mistake rather than as a sign.
-    check('centred horizontally', (Math.min(...xs) + Math.max(...xs)) / 2, 9);
-    check('centred vertically', (Math.min(...ys) + Math.max(...ys)) / 2, 9);
-    check('and as wide as it is tall',
-      Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
+    // The slot is a hole, and `evenodd` is the whole of what makes it one.
+    // Without it the two subpaths merge and the icon is a plain disc -- which
+    // is not a broken drawing, it is the previous drawing, silently back.
+    check('the mark is drawn evenodd', /fill-rule="evenodd"/.test(stop), true);
+    check('and has two subpaths, the disc and the slot',
+      (TARGET_STOP.match(/M/g) || []).length, 2);
 
-    // Visibility is the thing the first two attempts lost, so it is asserted:
-    // the mark fills most of the cell, where a status bar is four eighteenths
-    // of it across.
-    check('it fills most of the cell', Math.max(...xs) - Math.min(...xs) >= 12, true);
-    check('and it does not pulse -- a barrier is not working',
-      /@keyframes/.test(stop), false);
+    const [discSub, slotSub] = TARGET_STOP.split(/(?=M)/);
+    // `M x0 y0  A rx ry rot large sweep x1 y1  A ...`. Read as pairs it comes
+    // out scrambled: an arc carries seven numbers, not two.
+    const [x0, y0, rx, ry, , , , x1, y1] = discSub.match(/[\d.]+/g).map(Number);
+    const slot = [...slotSub.matchAll(/(-?[\d.]+)\s+(-?[\d.]+)/g)].map((m) => [+m[1], +m[2]]);
+    const span = (pts, i) => [Math.min(...pts.map((p) => p[i])), Math.max(...pts.map((p) => p[i]))];
+    const [sx0, sx1] = span(slot, 0);
+    const [sy0, sy1] = span(slot, 1);
+    const dx0 = x0;
+    const dx1 = x1;
+
+    check('the disc is round', rx, ry);
+    check('and centred in the cell', [(x0 + x1) / 2, (y0 + y1) / 2], [9, 9]);
+    check('its two arcs meeting a diameter apart', x1 - x0, 2 * rx);
+    check('the slot is centred on it', (sy0 + sy1) / 2, 9);
+    // Both halves of legibility. A slot that does not cross most of the disc
+    // reads as a speck; one too thin to survive a small gutter closes up, and
+    // then the icon is a disc again -- the same two or three pixels that sank
+    // the rule this feature started with.
+    check('the slot crosses most of the disc', (sx1 - sx0) / (dx1 - dx0) > 0.75, true);
+    check('and is thick enough to survive a small cell', sy1 - sy0 >= 2.5, true);
+
+    check('it does not pulse -- a barrier is not working', /@keyframes/.test(stop), false);
 
     // Inline it is a glyph, because an image there pushes the line box open --
     // which this file's neighbour already recorded, and which an inline icon
-    // turned out to do no less than an inline image. A shape this simple loses
-    // nothing to being drawn a second way: at this size an octagon and a
-    // filled circle are the same dot.
+    // turned out to do no less than an inline image. The shape survives being
+    // drawn a second way: U+2296 is a disc with a bar through it, and so is
+    // the gutter icon.
     check('the inline mark is a glyph', typeof INLINE_TARGET.contentText, 'string');
-    check('and a round one, to match', INLINE_TARGET.contentText, '\u25cf');
+    check('and is the same sign', INLINE_TARGET.contentText, '\u2296');
     check('with no box geometry to push the line open',
       'width' in INLINE_TARGET || 'height' in INLINE_TARGET, false);
     check('and no negative margin, which only a box needs',
@@ -236,14 +248,24 @@ for (const kind of ['light', 'dark']) {
         .some((st) => target.statuses.includes(st)), false);
     check('it is never returned as a bar', barFor('gutter', 'beyond'), 'pending');
     for (const kind of ['light', 'dark']) {
-      const hue = (c) => c.match(/\d+/g).slice(0, 3).join(',');
+      const hue = (c) => c.match(/[\d.]+/g).slice(0, 3).join(',');
+      const alpha = (c) => +c.match(/[\d.]+/g)[3];
       const mine = hue(target[kind]);
-      for (const other of BARS.filter((b) => b.icon !== 'target')) {
+      const red = BARS.find((b) => b.statuses.includes('failed'));
+
+      // It shares red with a failure, and that is the decision rather than an
+      // oversight: a no-entry sign that is not red is not a no-entry sign, and
+      // this is the one mark in the column whose silhouette carries it. The
+      // cost is real -- red no longer means "failed" on its own -- so it is
+      // pinned here, where changing it means saying so.
+      check(`the target is the failure red (${kind})`, mine, hue(red[kind]));
+      check(`and louder than it, being a sign rather than a status (${kind})`,
+        alpha(target[kind]) > alpha(red[kind]), true);
+
+      // Against everything else it still has to stand apart.
+      for (const other of BARS.filter((b) => !['target', red.icon].includes(b.icon))) {
         check(`the target hue is not the ${other.icon} hue (${kind})`, hue(other[kind]) === mine, false);
       }
-      // Blue is the one thing wash still says running in, and the target is
-      // never a wash -- the two live on different surfaces and never meet.
-      check(`the target is blue (${kind})`, hue(WASHES.running[kind]), mine);
     }
     check('it is not last in the table, which is the unknown-status fallback',
       BARS[BARS.length - 1].icon === 'target', false);
