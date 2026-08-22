@@ -155,11 +155,13 @@ pub struct Driver {
     /// decides anything when two forms share that line.
     target_column: Option<usize>,
     revision: u64,
-    /// Set by an interrupt, a terminal failure, or a split error; cleared by
-    /// the next update. A parked driver reconciles nothing and proves
-    /// nothing -- without this, a terminal failure would re-prove itself in a
-    /// tight loop forever.
-    parked: bool,
+    /// Stopped by something that happened, and waiting for the input to
+    /// change: an interrupt, a terminal failure, a buffer that will not lex.
+    /// Cleared by the next update, which is the whole distinction from a
+    /// *pause* -- a stall is a circumstance and clears when circumstances do,
+    /// where a pause is a decision and only a person undoes it. Without it a
+    /// terminal failure would re-prove itself in a tight loop forever.
+    stalled: bool,
     have_snapshot: bool,
     /// Unit of the last terminal failure, painted `failed` until an update.
     failed_unit: Option<usize>,
@@ -296,7 +298,7 @@ impl Driver {
             target_line: None,
             target_column: None,
             revision: 0,
-            parked: true,
+            stalled: true,
             stale_seen: Vec::new(),
             have_snapshot: false,
             failed_unit: None,
@@ -384,10 +386,10 @@ impl Driver {
             return Flow::Continue; // seen once; act when it settles
         }
         // A dependency change is news the same way an edit is, so it also
-        // unparks: the terminal failure this driver parked on may be exactly
-        // what the neighbour's edit fixes.
+        // clears the stall: the terminal failure this driver stopped on may be
+        // exactly what the neighbour's edit fixes.
         self.stale_seen.clear();
-        self.parked = false;
+        self.stalled = false;
         self.reconciled = false;
         self.drive()
     }
@@ -414,7 +416,7 @@ impl Driver {
                 self.settled_at = None;
                 self.target_line = target_line;
                 self.target_column = target_column;
-                self.parked = false;
+                self.stalled = false;
                 self.failed_unit = None;
                 self.reconciled = false;
                 match split(&bytes) {
@@ -427,7 +429,7 @@ impl Driver {
                         // The old snapshot no longer describes the buffer and
                         // the new one does not lex: hold still and say why.
                         self.have_snapshot = false;
-                        self.parked = true;
+                        self.stalled = true;
                         self.settle_split_error(&e);
                     }
                 }
@@ -438,7 +440,7 @@ impl Driver {
                     return Flow::Continue;
                 }
                 self.failed_unit = None;
-                self.parked = false;
+                self.stalled = false;
                 self.reconciled = false;
                 self.settled_at = None;
                 // Hold the target where the retraction puts the world, so the
@@ -454,7 +456,7 @@ impl Driver {
                     book.retract_to(&self.bytes, keep, RETRACT_DEADLINE)
                 };
                 if let Err(e) = r {
-                    self.parked = true;
+                    self.stalled = true;
                     self.settle("error", Some(e.to_string()));
                 }
                 self.emit_state(None);
@@ -509,13 +511,13 @@ impl Driver {
                 // The protocol loop already sent request_abort, so a blocked
                 // call has yielded; the escalation itself runs here, where
                 // the book is ours. Pinging an idle session is harmless.
-                self.parked = true;
+                self.stalled = true;
                 let _ = self.book.lock().expect("book lock").interrupt();
                 // An interrupt is aimed at whatever is in flight, and that may
                 // be an eval. Its caller is holding an unanswered request, so
                 // say so rather than leaving the promise open forever. Evals
                 // merely *queued* are untouched: the pump runs even on a
-                // parked driver, and a query is worth more, not less, once
+                // stalled driver, and a query is worth more, not less, once
                 // the proof it was waiting behind has been called off.
                 self.abandon_in_flight("interrupted");
                 // `interrupt` kills the build as well as the proof.
@@ -1297,12 +1299,12 @@ impl Driver {
             // Between units, which is the whole busy policy: the session is
             // idle here and the world is a prefix, so a queued query goes as
             // soon as the form in flight is done rather than after the file
-            // is. Ahead of the parked check on purpose -- a driver parked on
+            // is. Ahead of the stall check on purpose -- a driver stopped on
             // a red form is exactly when a query is worth asking.
             if let Flow::Exit = self.pump_evals() {
                 return Flow::Exit;
             }
-            if self.parked || !self.have_snapshot {
+            if self.stalled || !self.have_snapshot {
                 return Flow::Continue;
             }
 
@@ -1344,7 +1346,7 @@ impl Driver {
                                 book.retract_to(&self.bytes, keep, RETRACT_DEADLINE)
                             };
                             if let Err(e) = r {
-                                self.parked = true;
+                                self.stalled = true;
                                 self.settle("error", Some(e.to_string()));
                                 return Flow::Continue;
                             }
@@ -1385,7 +1387,7 @@ impl Driver {
                     continue;
                 }
                 Err(e) => {
-                    self.parked = true;
+                    self.stalled = true;
                     self.settle("error", Some(e.to_string()));
                     return Flow::Continue;
                 }
@@ -1422,7 +1424,7 @@ impl Driver {
                 self.failed_unit = Some(f.index);
                 self.out.notify("unit", &wire::unit_failure(&self.id, self.revision, f, "failed"));
                 self.emit_state(None);
-                self.parked = true;
+                self.stalled = true;
                 self.settle("failed", f.error_line.clone());
                 return Flow::Continue;
             }
@@ -1443,7 +1445,7 @@ impl Driver {
             if let Flow::Exit = self.drain() {
                 return Flow::Exit;
             }
-            if self.parked {
+            if self.stalled {
                 // A Pause already interrupted and settled.
                 return Flow::Continue;
             }
@@ -1507,7 +1509,7 @@ impl Driver {
                     self.failed_unit = Some(f.index);
                     self.out.notify("unit", &wire::unit_failure(&self.id, self.revision, &f, "failed"));
                     self.emit_state(None);
-                    self.parked = true;
+                    self.stalled = true;
                     self.settle("failed", f.error_line.clone());
                     return Flow::Continue;
                 }
@@ -1522,7 +1524,7 @@ impl Driver {
                     return Flow::Continue;
                 }
                 Err(e) => {
-                    self.parked = true;
+                    self.stalled = true;
                     self.abandon_in_flight(&e.to_string());
                     self.settle("error", Some(e.to_string()));
                     return Flow::Continue;
