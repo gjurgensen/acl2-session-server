@@ -37,6 +37,7 @@ import * as vscode from 'vscode';
 import { UnitState } from './protocol';
 import { charOffset } from './positions';
 import { paintMap, Span } from './paintmap';
+import { Bar, BARS, INLINE_BAR } from './bars';
 
 export type DecorationMode = 'minimal' | 'wash';
 
@@ -57,33 +58,37 @@ const WASH_COLORS: Record<string, { light: string; dark: string }> = {
 /**
  * The gutter bar, drawn between two forms that share a line.
  *
- * The *same asset* the gutter draws, not a CSS imitation of it. An earlier
- * version was a 3px left border in a hand-copied colour, which was the right
- * shape and the right colour and still visibly not the same mark: the SVG
- * scales with the line and a border in pixels does not, so the two agreed
- * only at one font size. Sharing the file removes the question -- and with
- * it the colour table that had to be kept in step with `media/*.svg` by
- * hand.
+ * A coloured rectangle rather than the gutter's own SVG, and the reason is
+ * geometry rather than taste. That SVG is square, with the bar four units of
+ * eighteen across, so `contain` ties the bar's *thickness* to its *height*:
+ * to be as thick as the gutter's it has to be as tall as the line. An inline
+ * attachment sits on the text's baseline and grows upward, so a line-height
+ * one reaches above the line box and pushes it open -- the whole line
+ * visibly shifts. Drawing it with the real asset was tried and did that.
  *
- * It costs the width of the icon, which pushes the second form right by
- * about a character. That is the trade: an inline attachment is content, and
- * content takes room. It reads as a separator between the two forms, which
- * is what it is.
+ * A rectangle takes its width and height independently, so it can have the
+ * gutter's thickness without its height. Both are in `em`, which is what the
+ * first attempt got wrong: it was a border measured in pixels, matching the
+ * SVG at one font size and drifting at every other.
+ *
+ * The colour has to live here as a value, since this is not an image.
+ * `bars.ts` holds it once and `paintmap.mjs` asserts it still matches
+ * `media/`.
  */
-function inlineBarType(
-  context: vscode.ExtensionContext,
-  icon: string
-): vscode.TextEditorDecorationType {
-  const bar = (theme: string) => ({
+function inlineBarType(bar: Bar): vscode.TextEditorDecorationType {
+  const mark = (color: string) => ({
     before: {
-      contentIconPath: context.asAbsolutePath(`media/${icon}-${theme}.svg`),
-      // As tall as the line, so it matches the gutter cell's `contain`.
-      height: '100%',
+      // A space, not an empty string: an empty attachment has no box for a
+      // background to fill. `width` overrides what the space would take.
+      contentText: ' ',
+      backgroundColor: color,
+      ...INLINE_BAR,
+      margin: '0 0.15em 0 0.1em',
     },
   });
   return vscode.window.createTextEditorDecorationType({
-    light: bar('light'),
-    dark: bar('dark'),
+    light: mark(bar.light),
+    dark: mark(bar.dark),
   });
 }
 
@@ -106,21 +111,6 @@ function gutterType(
     },
   });
 }
-
-/**
- * The five bars, their gutter ruler colours, and nothing else.
- *
- * One list, because each of these is drawn *twice* -- as a gutter cell, and
- * as an inline mark for a form with no cell to claim -- and the two are only
- * reliably the same mark if one list names them both.
- */
-const BARS: [icon: string, ruler: string][] = [
-  ['pending', 'rgba(136, 136, 136, 0.35)'],
-  ['running', 'rgba(90, 140, 210, 0.6)'],
-  ['admitted', 'rgba(80, 160, 90, 0.35)'],
-  ['cond', 'rgba(212, 172, 13, 0.5)'],
-  ['red', 'rgba(220, 60, 60, 0.6)'],
-];
 
 export class Decorations {
   private washes = new Map<string, vscode.TextEditorDecorationType>();
@@ -163,9 +153,9 @@ export class Decorations {
     }
     // The bars: pending neutral gray, running BLUE (true blue, hue 262),
     // admitted green, conditional YELLOW, red for the reds.
-    for (const [icon, ruler] of BARS) {
-      this.gutterBars.set(icon, gutterType(context, icon, ruler));
-      this.inlineBars.set(icon, inlineBarType(context, icon));
+    for (const bar of BARS) {
+      this.gutterBars.set(bar.icon, gutterType(context, bar.icon, bar.ruler));
+      this.inlineBars.set(bar.icon, inlineBarType(bar));
     }
     // The held-target indicator: a Q.E.D.-style box.
     this.target = vscode.window.createTextEditorDecorationType({
@@ -242,9 +232,9 @@ export class Decorations {
     }
     const bars = new Map<string, vscode.Range[]>();
     const inline = new Map<string, vscode.Range[]>();
-    for (const [icon] of BARS) {
-      bars.set(icon, []);
-      inline.set(icon, []);
+    for (const bar of BARS) {
+      bars.set(bar.icon, []);
+      inline.set(bar.icon, []);
     }
 
     // Which bar a status wears, and whether it wears one at all.
