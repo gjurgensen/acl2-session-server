@@ -225,44 +225,51 @@ function watchDocument(): vscode.Disposable {
       log('  ignored: the change is not in the active editor');
       return;
     }
-    const sel = editor.selection;
-    if (!sel.isEmpty) {
-      log('  ignored: a selection, not a caret');
-      return;
-    }
-    // Which line to re-indent, and why. Two ways in, because the shape of a
-    // change event is not ours to rely on: an extension that edits through
-    // its own machinery -- VSCodeVim with `vim.enableNeovim` does -- may
-    // report one Enter as several changes, or as a line rewritten whole.
+    // Which line to re-indent, and why. Two ways in, and the order matters.
     //
-    //   fresh   the caret sits in a line's leading whitespace and something
-    //           just changed that line. That is what pressing Enter leaves
-    //           behind however it was delivered, and it is what a person
-    //           means by "I am starting a line here".
-    //   close   a single closing delimiter was typed, which has just decided
-    //           what the line it finishes belongs to.
-    const caret = sel.active;
-    const lineText = e.document.lineAt(caret.line).text;
-    const touched = e.contentChanges.some((c) => {
-      const first = e.document.positionAt(c.rangeOffset).line;
-      const last = e.document.positionAt(c.rangeOffset + c.text.length).line;
-      return caret.line >= first && caret.line <= last;
-    });
+    // The change itself is the reliable one. `editor.selection` is *not*
+    // updated yet while this event fires -- the caret still sits where it
+    // was before the edit, and VSCode reports its move separately
+    // afterwards. So asking the caret whether it is in a line's leading
+    // whitespace answers about the previous line, and answers no. That was
+    // this bug: the trace showed `ins="\n           "` -- an Enter, plainly
+    // -- rejected as "neither a fresh line nor a closing delimiter".
+    //
+    //   newline  a line break followed by nothing but whitespace, which is
+    //            Enter however the whitespace got there. Not a paste, which
+    //            carries content and belongs to the range formatter.
+    //   close    a single closing delimiter, which has just decided what the
+    //            line it finishes belongs to.
+    //   fresh    the fallback, for an extension whose edits do not arrive as
+    //            one recognisable change: a caret already sitting in leading
+    //            whitespace on a line that just changed. Stale by one event,
+    //            which is exactly why it cannot be the primary test.
     const single = e.contentChanges.length === 1 ? e.contentChanges[0] : undefined;
-    const kind =
-      touched && lineText.slice(0, caret.character).trim() === ''
-        ? 'fresh'
-        : single && reindentTrigger(single.text) === 'close'
-          ? 'close'
-          : undefined;
-    if (!kind) {
-      log('  ignored: neither a fresh line nor a closing delimiter');
+    const byText = single ? reindentTrigger(single.text) : undefined;
+    const caret = editor.selection.active;
+    let at: number;
+    let kind: string;
+    if (single && byText) {
+      at = e.document.positionAt(single.rangeOffset + single.text.length).line;
+      kind = byText;
+    } else if (
+      editor.selection.isEmpty &&
+      e.document.lineAt(caret.line).text.slice(0, caret.character).trim() === '' &&
+      e.contentChanges.some((c) => {
+        const first = e.document.positionAt(c.rangeOffset).line;
+        const last = e.document.positionAt(c.rangeOffset + c.text.length).line;
+        return caret.line >= first && caret.line <= last;
+      })
+    ) {
+      at = caret.line;
+      kind = 'fresh';
+    } else {
+      log('  ignored: not an Enter, a closing delimiter, or a fresh line');
       return;
     }
-    const at = caret.line;
     const edit = indentLineEdit(editor.document, at, { blankLines: 'indent' });
     log(
-      `  ${kind} on line ${at} (${JSON.stringify(lineText)}) -> ` +
+      `  ${kind} on line ${at} (${JSON.stringify(e.document.lineAt(at).text)}) -> ` +
         (edit ? `indent to ${edit.newText.length}` : 'already right, no edit')
     );
     if (!edit) {
