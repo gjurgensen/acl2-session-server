@@ -483,6 +483,16 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
     check(byId.has(m.command), `${m.command} is a contributed command`);
     check(!!byId.get(m.command)?.icon, `${m.command} has an icon to draw`);
   }
+
+  // One category, declared as one. VSCode composes "ACL2: Title" from the
+  // `category` field itself and groups the palette by it; spelling the prefix
+  // into every title produces the same line and none of the grouping, which
+  // is what these used to do.
+  for (const c of pkg.contributes.commands) {
+    check(c.category === 'ACL2', `${c.command} is in the ACL2 category`);
+    check(!/^ACL2\s*:/.test(c.title),
+      `${c.command}'s title does not repeat the category`);
+  }
 }
 
 // ---- no command handler may take an argument it did not ask for ----

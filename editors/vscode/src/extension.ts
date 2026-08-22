@@ -307,7 +307,12 @@ export function activate(context: vscode.ExtensionContext): void {
   };
   formView = new FormView();
   formView.iconPath = windowIcon;
-  status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 10);
+  // Right, because this is a *contextual* item and VSCode's guidance puts
+  // those there: it appears and disappears with the active editor and reports
+  // that file's session, which makes it a sibling of the language-mode
+  // indicator rather than of the global ones on the left. Priority 100 sits it
+  // near the built-in editor status, since higher is further left on this side.
+  status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   // The progress readout is also the way back to the form view, for when it has
   // been closed and the gutter says something needs looking at.
   status.command = 'acl2-session.showFormView';

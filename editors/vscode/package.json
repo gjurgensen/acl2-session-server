@@ -281,102 +281,125 @@
     "commands": [
       {
         "command": "acl2-session.start",
-        "title": "ACL2: Start Live Checking",
+        "category": "ACL2",
+        "title": "Start Live Checking",
         "icon": "$(play)"
       },
       {
         "command": "acl2-session.stop",
-        "title": "ACL2: Stop Live Checking",
+        "category": "ACL2",
+        "title": "Stop Live Checking",
         "icon": "$(debug-stop)"
       },
       {
         "command": "acl2-session.pause",
-        "title": "ACL2: Pause",
+        "category": "ACL2",
+        "title": "Pause",
         "icon": "$(debug-pause)"
       },
       {
         "command": "acl2-session.resume",
-        "title": "ACL2: Resume",
+        "category": "ACL2",
+        "title": "Resume",
         "icon": "$(play)"
       },
       {
         "command": "acl2-session.interrupt",
-        "title": "ACL2: Interrupt"
+        "category": "ACL2",
+        "title": "Interrupt"
       },
       {
         "command": "acl2-session.evalSelection",
-        "title": "ACL2: Evaluate Selection"
+        "category": "ACL2",
+        "title": "Evaluate Selection"
       },
       {
         "command": "acl2-session.showConsole",
-        "title": "ACL2: Show Console"
+        "category": "ACL2",
+        "title": "Show Console"
       },
       {
         "command": "acl2-session.retractToCursor",
-        "title": "ACL2: Retract to Cursor"
+        "category": "ACL2",
+        "title": "Retract to Cursor"
       },
       {
         "command": "acl2-session.targetAtCursor",
-        "title": "ACL2: Target at Cursor"
+        "category": "ACL2",
+        "title": "Target at Cursor"
       },
       {
         "command": "acl2-session.targetForward",
-        "title": "ACL2: Target Forward One Form"
+        "category": "ACL2",
+        "title": "Target Forward One Form"
       },
       {
         "command": "acl2-session.targetBackward",
-        "title": "ACL2: Target Back One Form"
+        "category": "ACL2",
+        "title": "Target Back One Form"
       },
       {
         "command": "acl2-session.targetTop",
-        "title": "ACL2: Target Before First Form"
+        "category": "ACL2",
+        "title": "Target Before First Form"
       },
       {
         "command": "acl2-session.clearTarget",
-        "title": "ACL2: Clear Target"
+        "category": "ACL2",
+        "title": "Clear Target"
       },
       {
         "command": "acl2-session.showOutput",
-        "title": "ACL2: Show Output for Form at Cursor"
+        "category": "ACL2",
+        "title": "Show Output for Form at Cursor"
       },
       {
         "command": "acl2-session.certify",
-        "title": "ACL2: Certify Book",
+        "category": "ACL2",
+        "title": "Certify Book",
         "icon": "$(verified)"
       },
       {
         "command": "acl2-session.showDocs",
-        "title": "ACL2: Show Documentation for Name at Cursor"
+        "category": "ACL2",
+        "title": "Show Documentation for Name at Cursor"
       },
       {
         "command": "acl2-session.lockFormView",
-        "title": "ACL2: Hold Form View",
+        "category": "ACL2",
+        "title": "Hold Form View",
         "icon": "$(lock)"
       },
       {
         "command": "acl2-session.unlockFormView",
-        "title": "ACL2: Release Form View",
+        "category": "ACL2",
+        "title": "Release Form View",
         "icon": "$(unlock)"
       },
       {
         "command": "acl2-session.toggleFormViewLock",
-        "title": "ACL2: Toggle Form View Hold"
+        "category": "ACL2",
+        "title": "Toggle Form View Hold"
       },
       {
         "command": "acl2-session.showFormView",
-        "title": "ACL2: Show Form View"
+        "category": "ACL2",
+        "title": "Show Form View"
       },
       {
         "command": "acl2-session.gotoFrontier",
-        "title": "ACL2: Go to Frontier"
+        "category": "ACL2",
+        "title": "Go to Frontier"
       },
       {
         "command": "acl2-session.gotoAttention",
-        "title": "ACL2: Go to Next Attention Point"
+        "category": "ACL2",
+        "title": "Go to Next Attention Point"
       },
       {
         "command": "acl2-session.indent",
-        "title": "ACL2: Indent Line or Selection"
+        "category": "ACL2",
+        "title": "Indent Line or Selection"
       }
     ],
     "configuration": {
