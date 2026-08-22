@@ -27,9 +27,10 @@ forms — a fact about neither; and along the top edge because that edge is the
 boundary, where a mark centred in the cell would sit on a line rather than
 between two. Where two forms share a line and the barrier falls between them,
 the gutter has no cell to use, so the mark is drawn in the text at the column
-the second form begins, and points down instead of right. Both point at what
-they mark: from the gutter the only thing to point at is the line, to the
-right; inline it is already in the text and can point at the column, below.
+the second form begins — the same arrow with its axes exchanged, pointing down
+instead of right. Both point at what they mark: from the gutter the only thing
+to point at is the line, to the right; inline it is already in the text and can
+point at the column, below.
 
 It marks the first form *beyond* rather than the last form included, because
 that is the side with room. Beside an included form the gutter already says

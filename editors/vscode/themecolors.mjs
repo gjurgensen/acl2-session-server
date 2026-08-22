@@ -187,7 +187,7 @@ for (const kind of ['light', 'dark']) {
   // form with an odd status, and would be leaning on hue alone to say
   // otherwise.
   {
-    const { targetSvg, gutterSvg, INLINE_TARGET } = require('./out/bars.js');
+    const { targetSvg, targetDownSvg, gutterSvg, INLINE_TARGET } = require('./out/bars.js');
     const arrow = targetSvg('#3794ff');
     check('the target mark is a shape, not a bar', /<path/.test(arrow) && !/<rect/.test(arrow), true);
     check('and a status bar is a bar', /<rect/.test(gutterSvg('#3794ff')), true);
@@ -221,10 +221,28 @@ for (const kind of ['light', 'dark']) {
 
     // Where the gutter cannot reach, the mark points down instead: from the
     // gutter the only thing to point at is the line, to the right; inline it
-    // is already in the text and can point at the column, below.
-    check('the inline mark points down', INLINE_TARGET.contentText, '\u2193');
-    check('and is a glyph, so it needs no geometry to sit on the line',
-      typeof INLINE_TARGET.contentText === 'string' && !('width' in INLINE_TARGET), true);
+    // is already in the text and can point at the column, below. The *same*
+    // arrow, transposed, because two hand-drawn ones drifted -- a polygon and
+    // a font glyph, differing in weight and proportion, with nothing but the
+    // colour to say they meant the same thing.
+    const dpts = [...(/<path[^>]*d="([^"]+)"/.exec(targetDownSvg('#3794ff'))[1])
+      .matchAll(/(-?[\d.]+)\s+(-?[\d.]+)/g)].map((m) => [+m[1], +m[2]]);
+    check('the inline mark is the same arrow with x and y exchanged',
+      dpts.map(([x, y]) => [y, x]), pts);
+    // Which makes "points down" the transpose of "points right", so the same
+    // reading applies turned ninety degrees.
+    const dtip = dpts.filter((p) => p[1] === Math.max(...dpts.map((q) => q[1])));
+    check('one vertex at the bottom edge -- it points down', dtip.length, 1);
+
+    // And it is an image in a box, not a glyph. What pushes a line box open is
+    // how far an attachment rises above the baseline: height minus drop, which
+    // `bars.ts` records must stay at or under about 0.9em.
+    check('the inline box rises no further than the safe height',
+      parseFloat(INLINE_TARGET.height) - parseFloat(/-([\d.]+)em/.exec(INLINE_TARGET.margin)[1])
+        <= 0.9 + 1e-9, true);
+    check('and is shaped to the arrow it holds',
+      Math.abs(parseFloat(INLINE_TARGET.width) / parseFloat(INLINE_TARGET.height) - 5 / 18) < 0.02,
+      true);
   }
 
   // Its hue must be free: it is not a verdict, and it shares the gutter with

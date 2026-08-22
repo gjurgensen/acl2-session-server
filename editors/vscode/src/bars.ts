@@ -340,6 +340,23 @@ export function targetSvg(color: string): string {
 }
 
 /**
+ * The inline twin: the same arrow, turned down, in a box shaped to it.
+ *
+ * A tall narrow viewBox rather than the gutter's square one, and that is the
+ * difference between the two uses rather than between the two marks. In the
+ * gutter the arrow has to sit at the top *of a line*, so it occupies the top
+ * five eighteenths of a full-height cell. Inline the arrow *is* the mark, so
+ * the box is the arrow's own shape and it fills it.
+ */
+export function targetDownSvg(color: string): string {
+  return (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="5" height="18" viewBox="0 0 5 18">' +
+    `<path d="${transposePath(TARGET_ARROW)}" fill="${escapeAttr(color)}"/>` +
+    '</svg>'
+  );
+}
+
+/**
  * Shaft along the top edge, head at the right: `M0 1.75` to `L0 3.25` reads
  * anticlockwise from the shaft's top-left, out to the tip at `16.5 2.5` and
  * back. Kept as a constant because `media/target-*.svg` must draw the same
@@ -349,6 +366,20 @@ export const TARGET_ARROW =
   'M0 1.75 L9.5 1.75 L9.5 0 L16.5 2.5 L9.5 5 L9.5 3.25 L0 3.25 Z';
 
 /**
+ * The same path with x and y exchanged: rightward-along-the-top becomes
+ * downward-along-the-left.
+ *
+ * Derived rather than drawn, because the two marks are one mark seen from two
+ * places and a second hand-authored path would drift from the first. Drawn
+ * separately once, they did: a custom polygon in the gutter and a font glyph
+ * inline, differing in weight, stroke and proportion, with nothing but the
+ * colour to say they meant the same thing.
+ */
+export function transposePath(d: string): string {
+  return d.replace(/(-?[\d.]+)\s+(-?[\d.]+)/g, (_, x: string, y: string) => `${y} ${x}`);
+}
+
+/**
  * The same mark where the gutter cannot reach: between two forms on a line.
  *
  * Pointing down rather than right, and that is not an inconsistency. Both
@@ -356,19 +387,22 @@ export const TARGET_ARROW =
  * line, which is to the right. Inline the mark is already in the text and can
  * point at the column itself, which is below.
  *
- * A character rather than an image, unlike its gutter twin. An inline
- * attachment sits on the text baseline and an image at line height reaches
- * above the line box and pushes it open -- the geometry `INLINE_BAR` exists to
- * work around. A glyph is sized to the line by construction, and needs no
- * geometry at all.
+ * An image, and the *same* image transposed, rather than the arrow character
+ * this used first. A glyph is whatever the reader's font makes of it, and no
+ * font's arrow matches a polygon drawn here -- they differed in stroke weight
+ * and in proportion, which is exactly the sort of difference that reads as two
+ * marks meaning two things.
+ *
+ * The geometry is `INLINE_BAR`'s, and safe for the reason recorded there: what
+ * pushes a line box open is how far an attachment rises above the baseline,
+ * `height - drop`, and at 0.9em it cannot. That an image sits in the box
+ * rather than a background colour does not change the box.
  */
 export const INLINE_TARGET = {
-  // A shaft and a head, like its gutter twin, rather than the bare triangle
-  // this first used: the two are the same mark seen from two places, and a
-  // reader should not have to be told that.
-  contentText: '\u2193',
-  margin: '0 0.05em 0 0.05em',
-  fontWeight: 'bold',
+  // 5 by 18 in its own viewBox, so the width is the height at that ratio.
+  width: '0.32em',
+  height: '1.15em',
+  margin: `0 0.12em -${DROP} 0.08em`,
 };
 
 export const INLINE_BAR = {

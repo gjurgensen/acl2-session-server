@@ -185,13 +185,25 @@ check('an empty book paints nothing', paintMap([]), []);
   // else has any: the status bars are a rectangle the generator and the file
   // both spell out the same trivial way.
   {
-    const { TARGET_ARROW } = require('./out/bars.js');
+    const { TARGET_ARROW, transposePath } = require('./out/bars.js');
+    const want = { '': TARGET_ARROW, 'down-': transposePath(TARGET_ARROW) };
+    for (const dir of ['', 'down-']) {
+      for (const theme of ['light', 'dark']) {
+        const svg = readFileSync(`media/target-${dir}${theme}.svg`, 'utf8');
+        const d = /<path[^>]*d="([^"]+)"/.exec(svg);
+        check(`media/target-${dir}${theme}.svg draws the same arrow`, d && d[1], want[dir]);
+        check(`media/target-${dir}${theme}.svg has one fill to compare`,
+          (svg.match(/fill="/g) || []).length, 1);
+      }
+    }
+    // The two shipped pairs must also agree on colour, which the loop above
+    // only checks for the gutter one -- `BARS` names one file per icon.
     for (const theme of ['light', 'dark']) {
-      const svg = readFileSync(`media/target-${theme}.svg`, 'utf8');
-      const d = /<path[^>]*d="([^"]+)"/.exec(svg);
-      check(`media/target-${theme}.svg draws the same arrow`, d && d[1], TARGET_ARROW);
-      check(`media/target-${theme}.svg has one fill to compare`,
-        (svg.match(/fill="/g) || []).length, 1);
+      const one = /fill="(#[0-9a-f]{6})"[^>]*fill-opacity="([\d.]+)"/.exec(
+        readFileSync(`media/target-${theme}.svg`, 'utf8'));
+      const two = /fill="(#[0-9a-f]{6})"[^>]*fill-opacity="([\d.]+)"/.exec(
+        readFileSync(`media/target-down-${theme}.svg`, 'utf8'));
+      check(`the two target icons share a colour (${theme})`, one.slice(1), two.slice(1));
     }
   }
 
