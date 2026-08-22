@@ -180,6 +180,21 @@ check('an empty book paints nothing', paintMap([]), []);
     }
   }
 
+  // The target's mark is a shape as well as a colour, and the shipped icon has
+  // to draw the same one. Nothing else here compares geometry, because nothing
+  // else has any: the status bars are a rectangle the generator and the file
+  // both spell out the same trivial way.
+  {
+    const { TARGET_ARROW } = require('./out/bars.js');
+    for (const theme of ['light', 'dark']) {
+      const svg = readFileSync(`media/target-${theme}.svg`, 'utf8');
+      const d = /<path[^>]*d="([^"]+)"/.exec(svg);
+      check(`media/target-${theme}.svg draws the same arrow`, d && d[1], TARGET_ARROW);
+      check(`media/target-${theme}.svg has one fill to compare`,
+        (svg.match(/fill="/g) || []).length, 1);
+    }
+  }
+
   // And the contributed defaults, which are the same colours as #rrggbbaa.
   // Compared channel by channel with a tolerance of one, because the alpha
   // makes a round trip through a byte and 0.5 has no exact eighth-bit form.

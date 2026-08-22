@@ -194,26 +194,35 @@ for (const kind of ['light', 'dark']) {
 
     const pts = [...(/<path[^>]*d="([^"]+)"/.exec(arrow)[1])
       .matchAll(/(-?[\d.]+)\s+(-?[\d.]+)/g)].map((m) => [+m[1], +m[2]]);
-    check('the mark is a triangle', pts.length, 3);
+    const xs = pts.map((p) => p[0]);
+    const ys = pts.map((p) => p[1]);
+    const spanX = Math.max(...xs) - Math.min(...xs);
+    const spanY = Math.max(...ys) - Math.min(...ys);
+
     // Which way it points is the whole of its meaning: at the first form the
     // run will not reach, which from the gutter is to the right.
-    const maxX = Math.max(...pts.map((p) => p[0]));
-    const tip = pts.filter((p) => p[0] === maxX);
-    check('with one vertex at its right edge -- it points right', tip.length, 1);
-    check('and that vertex is level with the middle of the cell', tip[0][1], 9);
+    const tip = pts.filter((p) => p[0] === Math.max(...xs));
+    check('one vertex at the right edge -- it points right', tip.length, 1);
 
-    // Visibility, which is why this is an arrow and not the rule it started
-    // as: three units of eighteen is two pixels at an ordinary font size.
-    const spanX = maxX - Math.min(...pts.map((p) => p[0]));
-    const spanY = Math.max(...pts.map((p) => p[1])) - Math.min(...pts.map((p) => p[1]));
-    check('it spans most of the cell in both directions', spanX >= 9 && spanY >= 9, true);
+    // A shaft with a head, not a solid triangle. A triangle is three points
+    // and as tall as it is wide; this is neither, and both halves matter --
+    // the head is what can be seen, the shaft is what lies along the boundary.
+    check('it is a shaft and a head, not three points', pts.length > 3, true);
+    check('it runs across the cell rather than filling it', spanX > spanY * 3, true);
+
+    // And it lies on the cell's *top* edge, because that edge is the boundary:
+    // above is checked, below is not. A mark centred in the cell sits on a
+    // line rather than between two, which is not where a barrier is.
+    check('it starts at the top edge', Math.min(...ys), 0);
+    check('and stays in the top third', Math.max(...ys) <= 6, true);
+    check('while spanning the cell across', spanX >= 15, true);
     check('and it does not pulse -- a barrier is not working',
       /@keyframes/.test(arrow), false);
 
     // Where the gutter cannot reach, the mark points down instead: from the
     // gutter the only thing to point at is the line, to the right; inline it
     // is already in the text and can point at the column, below.
-    check('the inline mark points down', INLINE_TARGET.contentText, '\u25be');
+    check('the inline mark points down', INLINE_TARGET.contentText, '\u2193');
     check('and is a glyph, so it needs no geometry to sit on the line',
       typeof INLINE_TARGET.contentText === 'string' && !('width' in INLINE_TARGET), true);
   }

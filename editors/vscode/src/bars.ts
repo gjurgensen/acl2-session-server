@@ -317,19 +317,36 @@ const DROP = '0.25em';
  * would read as "this form has an odd status", and would be relying on hue
  * alone to say otherwise.
  *
- * An arrow rather than the rule this was first drawn as. The rule was right
- * about meaning -- a line across the boundary -- and wrong about physics: three
- * units of eighteen is two or three pixels at an ordinary font size, which is
- * faint even with the cell to itself. An arrow fills the cell, and points at
- * the thing it is about: the first form the run will not reach.
+ * A shaft with a head, and drawn along the cell's top edge, which is what the
+ * two earlier attempts each had half of. A bare rule there was right about
+ * meaning -- a line lying across the boundary, at the boundary -- and wrong
+ * about physics: three units of eighteen is two or three pixels at an ordinary
+ * font size. A solid triangle filling the cell was visible and said the wrong
+ * thing: it sat *on* a line rather than between two, which is not where a
+ * barrier is. The shaft is the rule and the head is the direction, and
+ * together they are five units tall instead of twelve.
+ *
+ * One polygon rather than a rect and a triangle. Two elements would each carry
+ * their own fill, and the shipped icons are checked against `bars.ts` by
+ * reading the first fill they contain -- so a second one could drift without
+ * anything noticing.
  */
 export function targetSvg(color: string): string {
   return (
     '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18">' +
-    `<path d="M4 3 L14 9 L4 15 Z" fill="${escapeAttr(color)}"/>` +
+    `<path d="${TARGET_ARROW}" fill="${escapeAttr(color)}"/>` +
     '</svg>'
   );
 }
+
+/**
+ * Shaft along the top edge, head at the right: `M0 1.75` to `L0 3.25` reads
+ * anticlockwise from the shaft's top-left, out to the tip at `16.5 2.5` and
+ * back. Kept as a constant because `media/target-*.svg` must draw the same
+ * shape, and the two are otherwise a hand-copied pair.
+ */
+export const TARGET_ARROW =
+  'M0 1.75 L9.5 1.75 L9.5 0 L16.5 2.5 L9.5 5 L9.5 3.25 L0 3.25 Z';
 
 /**
  * The same mark where the gutter cannot reach: between two forms on a line.
@@ -346,7 +363,10 @@ export function targetSvg(color: string): string {
  * geometry at all.
  */
 export const INLINE_TARGET = {
-  contentText: '\u25be',
+  // A shaft and a head, like its gutter twin, rather than the bare triangle
+  // this first used: the two are the same mark seen from two places, and a
+  // reader should not have to be told that.
+  contentText: '\u2193',
   margin: '0 0.05em 0 0.05em',
   fontWeight: 'bold',
 };
