@@ -329,9 +329,24 @@ impl Daemon {
                 let p: wire::BookParams = args(params)?;
                 self.handle_of(&p.book, |h| {
                     // Wake any blocked call first, so the driver reaches the
-                    // Pause promptly; the escalation runs in the driver.
+                    // command promptly; the escalation runs in the driver.
                     h.control.request_abort();
-                    let _ = h.tx.send(Cmd::Pause);
+                    let _ = h.tx.send(Cmd::Interrupt);
+                })
+                .map_err(fail)?;
+                Ok(Answer::Now(json!({})))
+            }
+            // Stop admitting forms, or start again. Pausing wakes a blocked
+            // call the same way an interrupt does, since a pause with a proof
+            // in flight has to stop the proof; resuming has nothing to wake.
+            "pause" | "resume" => {
+                let p: wire::BookParams = args(params)?;
+                let on = method == "pause";
+                self.handle_of(&p.book, |h| {
+                    if on {
+                        h.control.request_abort();
+                    }
+                    let _ = h.tx.send(Cmd::SetPaused(on));
                 })
                 .map_err(fail)?;
                 Ok(Answer::Now(json!({})))

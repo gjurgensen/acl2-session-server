@@ -32,6 +32,9 @@ struct SettleMark {
     skipped: Vec<usize>,
     target_line: Option<usize>,
     target_column: Option<usize>,
+    /// Carried because pausing and resuming move nothing else: without it a
+    /// book that was already settled would go quiet on both.
+    paused: bool,
 }
 
 /// One instruction from the protocol loop.
@@ -67,7 +70,13 @@ pub enum Cmd {
     Doc { id: Value, name: String },
     /// Certify the book on disk. See [`Driver::certify`].
     Certify { id: Value, jobs: Option<usize> },
-    Pause,
+    /// Abort whatever is in flight and stall. The next update carries on --
+    /// which is the difference from `SetPaused`, and the reason both exist:
+    /// interrupting a runaway proof means "stop, I am about to fix that
+    /// form", where pausing means "leave me alone for a while".
+    Interrupt,
+    /// Stop admitting forms until told otherwise, or start again.
+    SetPaused(bool),
     Close,
 }
 
@@ -162,6 +171,19 @@ pub struct Driver {
     /// where a pause is a decision and only a person undoes it. Without it a
     /// terminal failure would re-prove itself in a tight loop forever.
     stalled: bool,
+    /// Stopped because someone asked, and waiting for someone to ask again.
+    ///
+    /// Where a stall clears on the next update, this does not: that is the
+    /// whole of it, and the reason it cannot just be a stall that lasts
+    /// longer. A reader who pauses is about to edit, and every edit clearing
+    /// the pause would mean the pause never survived being useful.
+    ///
+    /// It forbids exactly one operation: admitting a form. Reconciling still
+    /// happens, because that is the half of sync that *withdraws* claims and
+    /// a paused session that let its green gutter go stale would be lying
+    /// rather than resting. Retracting, evaluating, and every question the
+    /// language features ask are untouched.
+    paused: bool,
     have_snapshot: bool,
     /// Unit of the last terminal failure, painted `failed` until an update.
     failed_unit: Option<usize>,
@@ -299,6 +321,7 @@ impl Driver {
             target_column: None,
             revision: 0,
             stalled: true,
+            paused: false,
             stale_seen: Vec::new(),
             have_snapshot: false,
             failed_unit: None,
@@ -507,7 +530,7 @@ impl Driver {
                 self.certify(&id, jobs);
                 Flow::Continue
             }
-            Cmd::Pause => {
+            Cmd::Interrupt => {
                 // The protocol loop already sent request_abort, so a blocked
                 // call has yielded; the escalation itself runs here, where
                 // the book is ours. Pinging an idle session is harmless.
@@ -524,6 +547,26 @@ impl Driver {
                 self.abandon_certify("interrupted");
                 self.emit_state(None);
                 self.settle("interrupted", None);
+                Flow::Continue
+            }
+            Cmd::SetPaused(on) => {
+                self.paused = on;
+                if on {
+                    // Pausing with a proof in flight has to stop the proof,
+                    // or the pause would begin whenever that form happened to
+                    // finish. Everything an interrupt does, plus the part
+                    // that makes it stick.
+                    let _ = self.book.lock().expect("book lock").interrupt();
+                    self.abandon_in_flight("interrupted");
+                    self.abandon_certify("interrupted");
+                } else {
+                    // Resuming clears the stall as an update would, and for
+                    // the same reason: the reader has said carry on, and
+                    // carrying on from a failure means trying it again.
+                    self.stalled = false;
+                    self.reconciled = false;
+                }
+                self.emit_state(None);
                 Flow::Continue
             }
             Cmd::Close => {
@@ -1307,7 +1350,6 @@ impl Driver {
             if self.stalled || !self.have_snapshot {
                 return Flow::Continue;
             }
-
             // The first sync after a new snapshot reconciles without
             // admitting anything: rollback is driven by the text, never the
             // target, and the frontier can only be read honestly after the
@@ -1326,7 +1368,15 @@ impl Driver {
             } else {
                 let frontier = self.frontier();
                 match goal {
-                    Some(g) if frontier <= g => {
+                    // A pause forbids exactly this: taking the next form.
+                    // Everything else in this loop still runs -- the
+                    // reconcile above, which is the half of sync that
+                    // *withdraws* claims and whose absence would leave a
+                    // green gutter beside a form since rewritten; the
+                    // retraction below, which is a request to undo; and the
+                    // queries and evals ahead of the stall check. Resting is
+                    // one thing and lying is another.
+                    Some(g) if frontier <= g && !self.paused => {
                         let u = &self.units[frontier];
                         Some((u.line_end, Some(u.col_end)))
                     }
@@ -1362,7 +1412,8 @@ impl Driver {
                         }
                         self.settled_at = Some(now);
                         self.emit_state(None);
-                        self.settle("reached_target", None);
+                        // Stopping short of the target is not reaching it.
+                        self.settle(if self.paused { "paused" } else { "reached_target" }, None);
                         return Flow::Continue;
                     }
                 }
@@ -1586,8 +1637,17 @@ impl Driver {
         // first form" is 0 rather than a missing value: `goal_unit` answers
         // `None` both for that and for having no target at all, and only the
         // first of those makes every form beyond.
-        let barrier =
-            self.target_line.is_some().then(|| self.goal_unit().map_or(0, |g| g + 1));
+        // While paused, *everything* unchecked is beyond: nothing is coming
+        // for it until someone says so, which is the same thing a target says
+        // about the forms below it and wants the same word. Without this a
+        // paused book reports a frontier the client will send a reader to,
+        // and waiting there does nothing -- the bug `beyond` was introduced
+        // to fix, re-created by a second route.
+        let barrier = if self.paused {
+            Some(admitted)
+        } else {
+            self.target_line.is_some().then(|| self.goal_unit().map_or(0, |g| g + 1))
+        };
         let units = self
             .units
             .iter()
@@ -1646,6 +1706,7 @@ impl Driver {
             skipped,
             target_line: self.target_line,
             target_column: self.target_column,
+            paused: self.paused,
         }
     }
 

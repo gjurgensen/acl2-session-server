@@ -1666,3 +1666,93 @@ fn a_query_on_a_settled_book_says_nothing() {
     let _ = d.request("rules", json!({ "book": book, "names": ["f0"] }));
     assert!(d.pending.is_empty(), "settled twice for one retraction: {:?}", d.pending);
 }
+
+/// A paused session forbids exactly one operation: admitting a form.
+///
+/// Stated as a prohibition rather than a list, because that is what makes it
+/// checkable. Reconciling still happens -- it is the half of sync that
+/// withdraws claims, and a paused session whose green gutter went stale would
+/// be lying rather than resting. Retracting, evaluating and every question the
+/// language features ask are untouched, which is most of what a session is for
+/// while its reader is editing.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_paused_session_stops_admitting_and_nothing_else() {
+    let Some(acl2) = acl2() else {
+        eprintln!("ACL2 not set; skipping");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("acl2-editord-pause-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let book_path: PathBuf = dir.join("pause.lisp");
+    let text = "(in-package \"ACL2\")\n\
+                (defun one (x) x)\n\
+                (defun two (x) x)\n\
+                (defun three (x) x)\n";
+    std::fs::write(&book_path, text).expect("write book");
+
+    let mut d = Daemon::start(&acl2);
+    let opened = d.request("open", json!({ "path": book_path.to_str().unwrap() }));
+    let book = opened["book"].as_str().expect("book id").to_string();
+
+    // Held at `one`, so there is work visibly left to do.
+    d.notify("update", json!({
+        "book": book, "text": text, "target_line": 2, "target_column": 1, "revision": 1,
+    }));
+    let events = d.events_until_settled();
+    assert_eq!(statuses(&last_state(&events)), ["admitted", "admitted", "beyond", "beyond"]);
+
+    // Pause, and then ask for the work: clearing the target would admit the
+    // last two forms on any other day.
+    let _ = d.request("pause", json!({ "book": book }));
+    let events = d.events_until_settled();
+    assert_eq!(events.last().expect("settled").1["reason"], "paused",
+               "stopping short of the target is not reaching it");
+
+    d.notify("update", json!({ "book": book, "text": text, "revision": 2 }));
+    let events = d.events_until_settled();
+    let state = last_state(&events);
+    assert_eq!(statuses(&state), ["admitted", "admitted", "beyond", "beyond"],
+               "the target went away and nothing was admitted: {state}");
+    // And they are `beyond` rather than `pending` with no target in sight,
+    // because nothing is coming for them -- which is what stops the client
+    // sending a reader to a frontier that will not move.
+    assert_eq!(events.last().expect("settled").1["reason"], "paused");
+
+    // Everything else still works. A question about the world -- asked of a
+    // form that is *in* it, since one that is not would answer "no" for a
+    // reason that has nothing to do with pausing:
+    let q = d.request("describe", json!({ "book": book, "name": "one", "cols": 40 }));
+    assert_eq!(q["found"], true, "a paused session still answers: {q}");
+    // A form evaluated against it:
+    let e = d.request("eval", json!({ "book": book, "form": "(one 3)" }));
+    assert_eq!(e["outcome"], "ok", "a paused session still evaluates: {e}");
+    // An eval touches the world and puts it back, so it clears the settle
+    // mark and settles on the way out. Read that here, or the next wait for a
+    // settle reads this one and reports the world as it was before.
+    let after = d.events_until_settled();
+    assert_eq!(after.last().expect("settled").1["reason"], "paused",
+               "and is still paused afterwards");
+
+    // And a retraction, which takes claims away rather than adding them.
+    d.notify("retract", json!({ "book": book, "keep": 1 }));
+    let events = d.events_until_settled();
+    assert_eq!(statuses(&last_state(&events)), ["admitted", "beyond", "beyond", "beyond"],
+               "a paused session still retracts: {:?}", last_state(&events));
+    let gone = d.request("describe", json!({ "book": book, "name": "one", "cols": 40 }));
+    assert_eq!(gone["found"], false, "and it really happened: {gone}");
+
+    // A retraction leaves a target where it stopped, so clear it again --
+    // still paused, so still nothing goes in.
+    d.notify("update", json!({ "book": book, "text": text, "revision": 3 }));
+    let events = d.events_until_settled();
+    assert_eq!(statuses(&last_state(&events)), ["admitted", "beyond", "beyond", "beyond"]);
+
+    // Resume, and the work that was refused goes through.
+    let _ = d.request("resume", json!({ "book": book }));
+    let events = d.events_until_settled();
+    assert_eq!(statuses(&last_state(&events)), ["admitted"; 4],
+               "resuming admits what pausing withheld: {:?}", last_state(&events));
+    assert_eq!(events.last().expect("settled").1["reason"], "reached_target");
+}
