@@ -10,16 +10,27 @@ default, form status is then indicated in the editor gutter (configurable by
 
 ### Colours
 
-The status colours are theme colours — `acl2Session.bar.<status>` for the
-status column and `acl2Session.wash.<status>` for the washes — so a theme can
-restyle them and `workbench.colorCustomizations` can override them, with
-high-contrast variants.
+The status colours follow the active theme. Each status has a meaning in
+VSCode's own vocabulary — `editorError.foreground` for a failure,
+`editorWarning.foreground` for a conditional one, `editorInfo.foreground` for
+the form being proved — and the extension reads those out of the theme,
+keeping its own per-status opacity so the column stays quiet. The shipped
+values are VSCode's defaults, so on the default light and dark themes nothing
+moves; on any other theme the column follows it.
+
+A theme that cannot be read falls back to those shipped values. That is a
+normal outcome rather than a failure: most themes define a fraction of the
+colour list and let VSCode's built-in defaults carry the rest, and those live
+in no file for an extension to read. The contributed theme colours —
+`acl2Session.bar.<status>` and `acl2Session.wash.<status>` — are what
+`workbench.colorCustomizations` overrides, and they cover the wash, the
+inline bar and the overview ruler.
 
 The gutter bar is the exception, and it is a platform one: it is drawn as an
-image, and an extension cannot read a theme colour back as a value to draw
-with. `acl2-session.colors` is what reaches it — the gutter icon is generated
-from the value you give — and the same value drives the inline bar, the wash
-and the overview ruler, so the status column cannot disagree with itself.
+image, and an image cannot resolve a theme colour or a CSS variable. That is
+why the theme is read into a concrete value rather than referenced — a value
+can be baked into the generated icon, and then all four surfaces agree.
+`acl2-session.colors` overrides that value directly.
 
 ```jsonc
 "acl2-session.colors": {

@@ -131,6 +131,8 @@ function activeThemeFile(): string | undefined {
 interface ThemeJson {
   include?: string;
   tokenColors?: unknown;
+  /** The workbench colours: `editorError.foreground` and friends. */
+  colors?: Record<string, string>;
 }
 
 /** Read a theme and everything it includes, base rules first so later ones win. */
@@ -152,7 +154,11 @@ function readTheme(file: string, depth = 0): ThemeJson | undefined {
     ...(Array.isArray(base.tokenColors) ? base.tokenColors : []),
     ...(Array.isArray(obj.tokenColors) ? obj.tokenColors : []),
   ];
-  return { ...base, ...obj, tokenColors: rules };
+  // `colors` merges key by key, like the rules concatenate: a theme that
+  // includes another and restates two colours means the other's rest still
+  // apply. A plain spread would drop them.
+  const colors = { ...(base.colors ?? {}), ...(obj.colors ?? {}) };
+  return { ...base, ...obj, tokenColors: rules, colors };
 }
 
 /** The shape vscode-textmate wants; its own interface is not exported. */
@@ -290,4 +296,23 @@ function push(toks: Tok[], text: string, color: string, style: number): void {
     return;
   }
   toks.push(italic ? { t: text, c: color, i: italic } : { t: text, c: color });
+}
+
+/**
+ * The active theme's workbench colours, when the theme can be read at all.
+ *
+ * The same best-effort read the token colours get, and it fails the same
+ * ways: a theme whose label does not match a contributed one, a `.tmTheme`
+ * plist rather than JSON, or a theme that simply does not mention the colour
+ * being asked for -- most define a fraction of them and let VSCode's built-in
+ * defaults fill the rest, and those defaults live in no file. `undefined`
+ * therefore means "could not read", not "the theme has no colours", and the
+ * caller is expected to have something to fall back on.
+ */
+export function themeColors(): Record<string, string> | undefined {
+  const file = activeThemeFile();
+  if (!file) {
+    return undefined;
+  }
+  return readTheme(file)?.colors;
 }

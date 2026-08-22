@@ -45,10 +45,13 @@ import {
   WASHES,
   barColorId,
   forTheme,
+  firstDefined,
   gutterSvg,
   svgCanPaint,
   washColorId,
+  withThemeHue,
 } from './bars';
+import { themeColors } from './highlight';
 
 export type DecorationMode = 'minimal' | 'wash';
 
@@ -59,16 +62,17 @@ export interface DecorationOptions {
 }
 
 /**
- * A colour for one surface of one status, from the first source that has one.
+ * The last step of choosing a colour: a concrete one if we have it, and
+ * otherwise the contributed `ThemeColor`.
  *
- * An override from the setting wins, because it is the only thing a user
- * wrote by hand; otherwise the contributed theme colour, which is what makes
- * a theme and `workbench.colorCustomizations` work. There is no third case
- * here -- the shipped literals reach only the gutter icon, which is an image
- * and takes no colour at all. See `gutterType`.
+ * `resolved` is whatever `build` worked out -- what the user wrote, or the
+ * theme's own word for this status with our alpha kept. Falling through to
+ * the `ThemeColor` is the case where the theme could not be read at all, and
+ * it still gets `workbench.colorCustomizations` and the shipped default; the
+ * gutter, which cannot take a `ThemeColor`, falls back to its SVG instead.
  */
-function pick(override: string | undefined, id: string): string | vscode.ThemeColor {
-  return override !== undefined ? override : new vscode.ThemeColor(id);
+function pick(resolved: string | undefined, id: string): string | vscode.ThemeColor {
+  return resolved !== undefined ? resolved : new vscode.ThemeColor(id);
 }
 
 /**
@@ -88,8 +92,8 @@ function pick(override: string | undefined, id: string): string | vscode.ThemeCo
  * SVG at one font size and drifting at every other.
  *
  * The colour has to live here as a value, since this is not an image.
- * `bars.ts` holds it once and `paintmap.mjs` asserts it still matches
- * `media/`.
+ * `bars.ts` holds the shipped one once and `paintmap.mjs` asserts it still
+ * matches `media/`.
  */
 function inlineBarType(
   light: string | vscode.ThemeColor,
@@ -113,21 +117,26 @@ function inlineBarType(
 }
 
 /**
- * The gutter cell: the shipped SVG, or one generated for an overridden colour.
+ * The gutter cell: an icon generated for a known colour, or the shipped one.
  *
- * The generated one travels as a `data:` URI rather than a written file --
- * there is nothing to clean up afterwards, and the icon changes whenever the
- * setting does. It is the *only* path in this module that a `ThemeColor`
- * cannot serve, which is the whole reason the setting exists.
+ * `colour` is concrete or absent, never a `ThemeColor`, because this is the
+ * surface that cannot resolve one -- an image is its own document, with no
+ * sight of the workbench's CSS variables. Everything else in this module can
+ * take a `ThemeColor` and this cannot, which is why `build` works out one
+ * concrete value for all four surfaces whenever it can: it is the only way
+ * the status column and the rest of the paint ever agree.
+ *
+ * The generated icon travels as a `data:` URI rather than a written file --
+ * nothing to clean up, and it changes whenever the theme or the setting does.
  */
 function gutterType(
   context: vscode.ExtensionContext,
   bar: Bar,
-  override: { light?: string; dark?: string },
+  colour: { light?: string; dark?: string },
   ruler: string | vscode.ThemeColor
 ): vscode.TextEditorDecorationType {
   const icon = (theme: 'light' | 'dark'): vscode.Uri | string => {
-    const c = override[theme];
+    const c = colour[theme];
     // A colour an image cannot paint with -- a CSS variable, a `color-mix`
     // -- leaves the shipped icon in place rather than producing an SVG that
     // renders as nothing. The other three surfaces take it happily.
@@ -181,8 +190,39 @@ export class Decorations {
   private build(): void {
     const set =
       vscode.workspace.getConfiguration('acl2-session').get<ColorSetting>('colors') ?? {};
-    const over = (status: string, surface: 'bar' | 'wash', theme: 'light' | 'dark') =>
-      forTheme(set[status]?.[surface], theme);
+    // What the active theme calls each of these, when it can be read. Read
+    // once per build rather than per colour: it is a file parse.
+    const theme = themeColors();
+    // The colour to use, from the first source that has one: what the user
+    // wrote, then the theme's own word for this status with our alpha kept,
+    // and otherwise nothing -- which leaves the contributed theme colour to
+    // the CSS surfaces and the shipped icon to the gutter.
+    //
+    // Deliberately one answer for all four surfaces. The gutter is an image
+    // and cannot resolve a `ThemeColor` or a CSS variable, so the only way it
+    // ever agrees with the other three is for the value to be concrete before
+    // any of them see it.
+    const resolve = (
+      status: string,
+      surface: 'bar' | 'wash',
+      kind: 'light' | 'dark',
+      shipped: string,
+      ids: string[]
+    ): string | undefined => {
+      const written = forTheme(set[status]?.[surface], kind);
+      if (written !== undefined) {
+        return written;
+      }
+      const hue = firstDefined(theme, ids);
+      return hue === undefined ? undefined : withThemeHue(shipped, hue);
+    };
+    const barOfStatus = (status: string) =>
+      BARS.find((b) => b.statuses.includes(status)) ?? BARS[BARS.length - 1];
+    const over = (status: string, surface: 'bar' | 'wash', kind: 'light' | 'dark') => {
+      const bar = barOfStatus(status);
+      const shipped = surface === 'wash' ? WASHES[status]?.[kind] : bar[kind];
+      return resolve(status, surface, kind, shipped ?? bar[kind], bar.themeIds[kind]);
+    };
     // The ruler follows the *bar*, whatever the surface: it is the same
     // status seen from the scrollbar, and an override that recoloured the
     // column while leaving the ruler behind would be half a change.
@@ -220,6 +260,7 @@ export class Decorations {
       // A bar can speak for two statuses (skipped and failed share one), and
       // an override on either recolours it.
       const named = bar.statuses.find((st) => set[st]?.bar !== undefined) ?? bar.statuses[0];
+      // One bar, possibly two statuses: an override on either names it.
       const light = over(named, 'bar', 'light');
       const dark = over(named, 'bar', 'dark');
       this.gutterBars.set(

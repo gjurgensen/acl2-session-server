@@ -11,11 +11,24 @@
 // is baked in. That is why the same colour exists here as a literal too, and
 // why `paintmap.mjs` asserts the two still agree.
 //
-// The third source closes that gap: a concrete colour in the
-// `acl2-session.colors` setting. Given one, the gutter icon is *generated*
-// from it, so an override reaches the one surface a theme colour cannot --
-// and reaches the other three as well, since a status column whose two
-// renderings disagree is the bug this module was written to prevent.
+// Two more sources close that gap, and both work by producing a *concrete*
+// colour before any surface sees it -- which is the only arrangement in which
+// the gutter can ever agree with the rest.
+//
+// A colour in the `acl2-session.colors` setting is one. The other is the
+// active theme, read as a file: `themeIds` says what each status means in
+// VSCode's vocabulary, `withThemeHue` takes the hue the theme gives and keeps
+// the alpha from the literal below, and the gutter icon is generated from the
+// result. The alpha has to come from here because a theme colour has none and
+// cannot be given one -- and it is doing real work, since these differ per
+// status on purpose.
+//
+// Reading the theme can fail, and ordinarily does in part: most themes define
+// a fraction of the colour list and let VSCode's built-in defaults carry the
+// rest, and those live in no file. Failing means falling back to the literals
+// below, which are themselves VSCode's default-theme values -- so on the
+// default themes resolution reproduces exactly what is shipped, and it is
+// only elsewhere that it changes anything.
 //
 // Kept free of `vscode`, like `positions.ts` and `paintmap.ts`, so all of it
 // is testable without an editor.
@@ -23,6 +36,17 @@
 export interface Bar {
   /** The `media/<icon>-{light,dark}.svg` basename, and the map key. */
   icon: string;
+  /**
+   * What this status *means* in VSCode's own vocabulary, best candidate
+   * first, per theme kind.
+   *
+   * Tried in order against the active theme's colours, so a theme that says
+   * what its error red is gets used, and one that only sets the ANSI palette
+   * still contributes something sensible. Nothing matching is the ordinary
+   * case, not a failure: most themes define a fraction of the colour list and
+   * let VSCode's built-in defaults carry the rest, and those live in no file.
+   */
+  themeIds: { light: string[]; dark: string[] };
   /**
    * The statuses this bar speaks for, which is what a *user* names it by.
    * `skipped` and `failed` share one bar, as they share a colour.
@@ -48,30 +72,50 @@ export interface Bar {
 export const BARS: Bar[] = [
   {
     icon: 'pending',
+    themeIds: {
+      light: ['disabledForeground', 'descriptionForeground', 'terminal.ansiBrightBlack'],
+      dark: ['disabledForeground', 'descriptionForeground', 'terminal.ansiBrightBlack'],
+    },
     statuses: ['pending'],
     light: 'rgba(97, 97, 97, 0.4)',
     dark: 'rgba(204, 204, 204, 0.35)',
   },
   {
     icon: 'running',
+    themeIds: {
+      light: ['editorInfo.foreground', 'charts.blue', 'terminal.ansiBlue'],
+      dark: ['editorInfo.foreground', 'charts.blue', 'terminal.ansiBrightBlue'],
+    },
     statuses: ['running'],
     light: 'rgba(26, 133, 255, 0.85)',
     dark: 'rgba(55, 148, 255, 0.85)',
   },
   {
     icon: 'admitted',
+    themeIds: {
+      light: ['charts.green', 'testing.iconPassed', 'terminal.ansiGreen'],
+      dark: ['charts.green', 'testing.iconPassed', 'terminal.ansiBrightGreen'],
+    },
     statuses: ['admitted'],
     light: 'rgba(56, 138, 52, 0.55)',
     dark: 'rgba(137, 209, 133, 0.5)',
   },
   {
     icon: 'cond',
+    themeIds: {
+      light: ['editorWarning.foreground', 'charts.yellow', 'terminal.ansiYellow'],
+      dark: ['editorWarning.foreground', 'charts.yellow', 'terminal.ansiBrightYellow'],
+    },
     statuses: ['conditional'],
     light: 'rgba(191, 136, 3, 0.75)',
     dark: 'rgba(204, 167, 0, 0.7)',
   },
   {
     icon: 'red',
+    themeIds: {
+      light: ['editorError.foreground', 'charts.red', 'terminal.ansiRed'],
+      dark: ['editorError.foreground', 'charts.red', 'terminal.ansiBrightRed'],
+    },
     statuses: ['skipped', 'failed'],
     light: 'rgba(229, 20, 0, 0.7)',
     dark: 'rgba(241, 76, 76, 0.65)',
@@ -190,4 +234,66 @@ export function gutterSvg(color: string): string {
 /** A colour string is user input, and it is about to go inside an attribute. */
 function escapeAttr(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+}
+
+/**
+ * Take a colour's hue from the theme, keep the alpha from ours.
+ *
+ * The division of labour that makes reading the theme worth doing: the theme
+ * says what red *is*, and the shipped literal says how loudly this status
+ * should speak -- 0.85 for a running form, 0.5 for an admitted one. A theme
+ * colour on its own carries no alpha and cannot be given one, so taking both
+ * from the theme would mean a status column at full strength, and taking
+ * neither is where this started.
+ *
+ * `SHIPPED` is one of our own `rgba(...)` literals, and is where the alpha
+ * comes from; `hex` is whatever the theme had. Returns `undefined` if either
+ * is not in the form expected, so a caller falls back rather than guesses.
+ */
+export function withThemeHue(shipped: string, hex: string): string | undefined {
+  const alpha = /rgba?\([\d\s,]+?,\s*([0-9.]+)\)\s*$/.exec(shipped);
+  const rgb = parseHex(hex);
+  if (!alpha || !rgb) {
+    return undefined;
+  }
+  // A theme colour may carry its own alpha (`#rrggbbaa`). Ours wins: it is
+  // the part that is about this extension rather than about the theme.
+  return `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${alpha[1]})`;
+}
+
+/** `#rgb`, `#rrggbb` or `#rrggbbaa` as its three channels. */
+function parseHex(hex: string): [number, number, number] | undefined {
+  const m = /^#([0-9a-f]{3,8})$/i.exec(hex.trim());
+  if (!m) {
+    return undefined;
+  }
+  const h = m[1];
+  const wide = h.length >= 6;
+  if (!wide && h.length !== 3) {
+    return undefined;
+  }
+  const at = (i: number) =>
+    wide ? parseInt(h.slice(i * 2, i * 2 + 2), 16) : parseInt(h[i] + h[i], 16);
+  const [r, g, b] = [at(0), at(1), at(2)];
+  return [r, g, b].some(isNaN) ? undefined : [r, g, b];
+}
+
+/**
+ * The first of `ids` the theme actually defines.
+ *
+ * Order is preference: what the status means, then a chart colour, then the
+ * ANSI palette, which the most themes set and the `acl2Session.token.*`
+ * fallbacks already lean on.
+ */
+export function firstDefined(
+  colors: Record<string, string> | undefined,
+  ids: string[]
+): string | undefined {
+  for (const id of ids) {
+    const c = colors?.[id];
+    if (typeof c === 'string' && parseHex(c)) {
+      return c;
+    }
+  }
+  return undefined;
 }

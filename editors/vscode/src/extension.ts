@@ -259,7 +259,14 @@ export function activate(context: vscode.ExtensionContext): void {
   // before they arrive; refresh once they have, and again whenever the
   // colors the editor paints with change under us.
   highlighter = new Highlighter(context.extensionPath);
-  const reload = () =>
+  const reload = () => {
+    // The status colours are read from the theme too, and a decoration type
+    // fixes its colours when it is created -- so a new theme means new types,
+    // and a repaint, since disposing a type erases what it drew.
+    decorations.reload();
+    for (const s of books.values()) {
+      paint(s);
+    }
     void highlighter.load().then(() => {
       const tokenizer = highlighter.ready ? (t: string) => highlighter.tokenize(t) : undefined;
       formView.tokenizer = tokenizer;
@@ -272,6 +279,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       paintDocs();
     });
+  };
   reload();
   renewSymbols();
   context.subscriptions.push(
