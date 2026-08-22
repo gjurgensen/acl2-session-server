@@ -46,6 +46,7 @@ import {
   barColorId,
   forTheme,
   gutterSvg,
+  svgCanPaint,
   washColorId,
 } from './bars';
 
@@ -127,7 +128,10 @@ function gutterType(
 ): vscode.TextEditorDecorationType {
   const icon = (theme: 'light' | 'dark'): vscode.Uri | string => {
     const c = override[theme];
-    return c === undefined
+    // A colour an image cannot paint with -- a CSS variable, a `color-mix`
+    // -- leaves the shipped icon in place rather than producing an SVG that
+    // renders as nothing. The other three surfaces take it happily.
+    return c === undefined || !svgCanPaint(c)
       ? context.asAbsolutePath(`media/${bar.icon}-${theme}.svg`)
       : vscode.Uri.parse(
           `data:image/svg+xml;base64,${Buffer.from(gutterSvg(c), 'utf8').toString('base64')}`

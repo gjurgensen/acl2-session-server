@@ -152,6 +152,24 @@ export function forTheme(c: ColorOverride | undefined, theme: 'light' | 'dark'):
 }
 
 /**
+ * Whether a colour is one an SVG can actually paint with.
+ *
+ * The gutter icon is an image, and an image is a separate document: it
+ * cannot see the workbench's CSS variables, call `color-mix`, or resolve
+ * anything but a literal colour. Those all work in the other three surfaces,
+ * which are ordinary CSS -- so a value like
+ * `color-mix(in srgb, var(--vscode-editorError-foreground) 65%, transparent)`
+ * is a perfectly good override that this one surface has to decline.
+ *
+ * Declining means keeping the shipped icon, which is the honest outcome: a
+ * status column that is a colour behind rather than a blank cell.
+ */
+export function svgCanPaint(color: string): boolean {
+  return /^#[0-9a-f]{3,8}$/i.test(color) || /^rgba?\([\d\s.,%]+\)$/i.test(color) ||
+    /^[a-z]+$/i.test(color);
+}
+
+/**
  * The gutter icon's SVG, generated for a colour the setting supplied.
  *
  * Deliberately the same geometry as the shipped files -- an 18-unit cell with

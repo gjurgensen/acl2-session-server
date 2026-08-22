@@ -28,6 +28,25 @@ and the overview ruler, so the status column cannot disagree with itself.
 }
 ```
 
+Decoration colours are CSS, so a value here can be more than a literal — a
+theme colour, adjusted:
+
+```jsonc
+"acl2-session.colors": {
+  "failed": {
+    "bar":  "color-mix(in srgb, var(--vscode-editorError-foreground) 65%, transparent)",
+    "wash": "color-mix(in srgb, var(--vscode-editorError-foreground) 15%, transparent)"
+  }
+}
+```
+
+That follows whatever red the active theme uses, at an opacity of your
+choosing — which a plain theme colour cannot express, since a colour
+reference carries no alpha. The gutter bar is the exception again and for the
+same reason: it is an image, and an image cannot see the workbench's CSS
+variables, so it keeps the shipped icon and the other three surfaces take the
+value. Only a literal colour reaches all four.
+
 ## The form view
 
 The editor title bar shows a "play" icon in the upper right, which starts the
