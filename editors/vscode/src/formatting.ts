@@ -206,8 +206,22 @@ export async function indentCommand(): Promise<void> {
  * that is already right, so the second is a no-op rather than a second edit.
  */
 function watchDocument(): vscode.Disposable {
+  /**
+   * True while our own indent edit is being applied.
+   *
+   * Applying it fires this very handler again, from inside the `await`. The
+   * re-entry is harmless on its own -- the line is by then correctly
+   * indented, so it finds nothing to do -- but it is work on the keystroke
+   * path, and a rule that reacted to its own output is one edit away from a
+   * loop.
+   */
+  let applying = false;
   return vscode.workspace.onDidChangeTextDocument(async (e) => {
     if (e.document.languageId !== 'acl2') {
+      return;
+    }
+    if (applying) {
+      log('  ignored: our own indent edit');
       return;
     }
     log(
@@ -275,11 +289,38 @@ function watchDocument(): vscode.Disposable {
     if (!edit) {
       return;
     }
-    const applied = await editor.edit((b) => b.replace(edit.range, edit.newText), {
-      undoStopBefore: false,
-      undoStopAfter: false,
-    });
-    log(`  edit applied=${applied}; line is now ${JSON.stringify(e.document.lineAt(at).text)}`);
+    applying = true;
+    let applied: boolean;
+    try {
+      applied = await editor.edit((b) => b.replace(edit.range, edit.newText), {
+        undoStopBefore: false,
+        undoStopAfter: false,
+      });
+    } finally {
+      applying = false;
+    }
+    // Say where the caret goes, rather than hoping.
+    //
+    // After Enter the caret sits at the end of the whitespace we just
+    // replaced -- at the *end* of the replaced range, which is the one
+    // position an edit does not carry along in any dependable way. And an
+    // extension that manages the cursor itself will put it back where it had
+    // it. Either way the text was right and the caret was not, which is the
+    // whole of what a person notices.
+    //
+    // Only for a line that is nothing but indentation: if the line has code
+    // on it -- a closing delimiter re-indenting what it finished -- the
+    // caret is somewhere in that code and the editor's own mapping is the
+    // right answer.
+    const line = editor.document.lineAt(at);
+    if (applied && !line.text.trim()) {
+      const end = new vscode.Position(at, line.text.length);
+      editor.selection = new vscode.Selection(end, end);
+    }
+    log(
+      `  edit applied=${applied}; line is now ${JSON.stringify(line.text)}; ` +
+        `caret at ${editor.selection.active.line}:${editor.selection.active.character}`
+    );
   });
 }
 
