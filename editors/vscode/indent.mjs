@@ -23,7 +23,7 @@ import { join } from 'path';
 import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
-const { reindent, topLevelStarts, insideOpaque, plannedIndent, enclosingStart, reindentTrigger } =
+const { reindent, topLevelStarts, insideOpaque, plannedIndent, enclosingStart } =
   require('./out/indent.js');
 
 const BOOKS = '/path/to/acl2/books';
@@ -214,33 +214,6 @@ plan('and the same line is left alone by a whole-buffer pass',
      AFTER_ENTER, 2, undefined);
 plan('Enter after a finished form lands at column zero',
      `(defun f (x) 1)\n`, 1, 0, { blankLines: 'indent' });
-
-// Which document changes we act on. Narrow on purpose: this runs for every
-// keystroke of every extension's edits, and acting on a paste would fight
-// the range formatter rather than help it.
-{
-  const cases = [
-    ['\n', 'newline', 'a bare Enter'],
-    ['\n    ', 'newline', 'Enter with autoIndent keep having copied an indent'],
-    ['\r\n  ', 'newline', 'the same on CRLF'],
-    [')', 'close', 'a closing paren'],
-    [']', 'close', 'a closing bracket'],
-    ['\n  (foo x)', undefined, 'a paste that carries content -- left to the range formatter'],
-    ['\n\n', undefined, 'two line breaks at once'],
-    ['x', undefined, 'an ordinary character'],
-    [' ', undefined, 'a space -- someone adjusting their own indent by hand'],
-    ['\t', undefined, 'a tab, likewise'],
-    ['  ', undefined, 'our own indent edit, so this cannot feed itself'],
-    ['', undefined, 'a deletion, which is what backspace arrives as'],
-  ];
-  let ok = true;
-  for (const [text, want, what] of cases) {
-    const got = reindentTrigger(text);
-    if (got !== want) { ok = false; console.log(`  mismatch on ${what}: got ${got}, want ${want}`); }
-  }
-  if (!ok) unitBad++;
-  console.log(`${ok ? 'ok' : 'FAIL'}: only Enter and a closing delimiter trigger a re-indent`);
-}
 
 {
   const starts = [0, 100, 250];

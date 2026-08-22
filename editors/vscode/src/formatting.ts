@@ -3,78 +3,81 @@
 // Two surfaces, and one rule between them:
 //
 //   as you type   a line break creates a line, or a closing delimiter
-//                 finishes one. `watchDocument`.
+//                 finishes one. `onType`.
 //   on request    Format Selection, Format Document, Tab, the command.
 //
-// VSCode's own mechanism for the first is
-// `DocumentOnTypeFormattingEditProvider`. It had been ruled out here, and
-// this is a controlled re-test of that, because the run it was ruled out on
-// could not have shown anything else. Its trace:
+// The first is `DocumentOnTypeFormattingEditProvider`, the mechanism VSCode
+// documents for exactly this. It had been ruled out here once, wrongly, and
+// the record is worth keeping because the shape of the mistake is an easy
+// one to repeat.
 //
-//   indent: registered. effective for acl2: formatOnType=true autoIndent="keep"
-//   indent: change x1 [off=3198 del=0 ins="\n           "]
-//   indent:   newline on line 94 ("           ") -> indent to 18
-//   indent:   edit applied=true; ... caret at 94:18
-//
-// The probe was a provider that only reported being called, and it never
-// reported. But `watchDocument` was live beside it and wrote to line 94 --
-// the line the trigger sat on -- and the editor cancels an in-flight on-type
-// format the moment any change lands at or above the trigger's line:
+// The run it rested on could not have shown anything else. A probe provider
+// was registered and a document watcher was left running beside it, and that
+// watcher's edit lands on the trigger line every time. The editor cancels an
+// in-flight on-type format the moment any change touches a line at or above
+// the trigger:
 //
 //   let n = this._editor.onDidChangeModelContent(r => {
 //     for (let a = 0; a < r.changes.length; a++)
 //       if (r.changes[a].range.endLineNumber <= t.lineNumber) {
 //         i.cancel(); n.dispose(); return } });
 //
-// So the workaround cancelled the mechanism it was measuring, on every
-// Enter, by construction. Whatever that run showed, it was not a measurement
-// of an unencumbered provider.
+// So the workaround cancelled the mechanism it was being measured against. A
+// probe that returns no edits is not thereby a control: what had to be inert
+// was the thing beside it.
 //
-// The reason given for the null result does not survive either. It was that
-// VSCodeVim replaces the `type` command on-type formatting hangs off. It
-// does replace it -- and then hands single characters straight back to the
-// editor (`out/extension.js`):
+// The cause offered for the null result was VSCodeVim replacing the `type`
+// command that on-type formatting hangs off. It does replace it -- and then
+// hands single characters straight back (`out/extension.js`):
 //
 //   static async insert(e,t,r,n){ n ??= (1===t.length);
 //     n ? await commands.executeCommand("default:type",{text:t})
 //       : await e.edit(...) }
 //
-// `"\n"` is one character; insert-mode Enter arrives there as an
-// `insertTextVSCode` transformation, and VSCodeVim contributes no `enter`
-// keybinding of its own, so there is no other route it could take. On the
-// editor's side `default:type` triggers with source `"keyboard"` --
+// `"\n"` is one character, insert-mode Enter arrives there as an
+// `insertTextVSCode` transformation, and VSCodeVim binds no `enter` of its
+// own, so Enter has no other route. `default:type` triggers with source
+// `"keyboard"`, and `"keyboard"` is precisely the condition under which the
+// type path fires the event format-on-type listens to:
 //
 //   runCommand(o,e){ let t=o.get(ri).getFocusedCodeEditor();
 //     t && t.trigger("keyboard", this._handlerId, e) }
-//
-// -- and `"keyboard"` is exactly the condition under which the type path
-// fires the event format-on-type listens to:
-//
 //   _type(e,t){ ... e==="keyboard" && this._onDidType.fire(t) }
 //
-// Every link holds. So the provider does the real work here, and
-// `watchDocument` stands down unless `acl2-session.indentOnType` is turned
-// back on: one mechanism at a time, which is what the earlier run lacked.
+// Measured with the watcher inert, same editor, same vim:
 //
-// C is not evidence either way, and it is worth keeping the note.
-// `indentationRules` and `onEnterRules` in the built-in cpp language
-// configuration are regexes the core applies during newline handling, no
-// provider involved -- which is why C survives whatever an extension does to
-// `type`, and is a mechanism Lisp cannot use at all; see the head of
-// `indent.ts`.
+//   indent: on-type CALLED ch="\n" at 94:11 line="           "
+//   indent:   -> indent to 18
+//   indent: change x1 [off=3210 del=0 ins="       "]
+//
+// It fires. The eleven spaces it was handed are `autoIndent: keep` copying
+// the line above; the seven that came back are our replace-eleven-with-
+// eighteen after `computeMoreMinimalEdits` narrowed it. Minimal edits for
+// free, on top of the caret handling described at `onType`.
+//
+// One thing the watcher did better, and it is not free to give up: it
+// suppressed both undo stops, where the editor pushes one either side of a
+// format edit (`t && o.pushUndoStop()`, and format-on-type passes true).
+// Whether that reads as two Ctrl+Z after an Enter was not measured. It is
+// not adjustable from a provider, so keeping it would have meant keeping the
+// whole watcher -- a re-entrancy guard, a hand-placed caret, and a re-indent
+// fired by any redo that reinserts a paren. Not worth that.
 //
 // The other way in -- `indentationRules` in the language configuration -- is
 // what VSCode reaches for first and cannot express Lisp indentation; see the
 // head of `indent.ts`. Because it is tried first, the language contribution
 // turns `editor.autoIndent` down to `keep` for `acl2`, so the built-in
 // bracket rules do not put a wrong indent on the line before we put the
-// right one there.
+// right one there. C indents by that route and is no evidence about this
+// one: those are regexes the core applies during newline handling, no
+// provider involved, which is why C survives whatever an extension does to
+// `type`.
 //
 // Nothing in here decides anything. Every rule lives in `indent.ts` where it
 // can be measured against the books; this is the glue that carries it.
 
 import * as vscode from 'vscode';
-import { IndentOptions, plannedIndent, reindent, reindentTrigger, topLevelStarts } from './indent';
+import { IndentOptions, plannedIndent, reindent, topLevelStarts } from './indent';
 
 /**
  * Where each top-level form starts, remembered per document version.
@@ -236,115 +239,6 @@ export async function indentCommand(): Promise<void> {
 }
 
 /**
- * Re-indent from the document rather than from the keystroke.
- *
- * The fallback, and off unless `acl2-session.indentOnType` is turned on.
- * It watches the text rather than the keystroke, so it runs no matter who
- * inserted the character -- which is worth having if the on-type provider
- * turns out to be unreachable after all, and worth having switched off
- * while that is being decided, since its edit lands on the trigger line and
- * cancels the provider it would be measured against. See the head of this
- * file.
- */
-function watchDocument(): vscode.Disposable {
-  /**
-   * True while our own indent edit is being applied.
-   *
-   * Applying it fires this very handler again, from inside the `await`. The
-   * re-entry is harmless on its own -- the line is by then correctly
-   * indented, so it finds nothing to do -- but it is work on the keystroke
-   * path, and a rule that reacted to its own output is one edit away from a
-   * loop.
-   */
-  let applying = false;
-  return vscode.workspace.onDidChangeTextDocument(async (e) => {
-    if (e.document.languageId !== 'acl2') {
-      return;
-    }
-    if (applying) {
-      log('  ignored: our own indent edit');
-      return;
-    }
-    logEffective(e.document);
-    log(
-      `change x${e.contentChanges.length} ` +
-        e.contentChanges
-          .map((c) => `[off=${c.rangeOffset} del=${c.rangeLength} ins=${JSON.stringify(c.text)}]`)
-          .join(' ')
-    );
-    if (!vscode.workspace.getConfiguration('acl2-session').get<boolean>('indentOnType', false)) {
-      log('  ignored: acl2-session.indentOnType is off');
-      return;
-    }
-    const editor = vscode.window.activeTextEditor;
-    if (!editor || editor.document !== e.document) {
-      log('  ignored: the change is not in the active editor');
-      return;
-    }
-    // The whole rule, and there is no more to it than this: a line is
-    // re-indented when a line break creates it, and when a closing delimiter
-    // finishes it. That is Emacs' `electric-indent-mode`, which is where
-    // every ACL2 author's expectations come from, and it is deliberately not
-    // "re-indent whenever the line looks unfinished".
-    //
-    // A caret-based test was tried here and was wrong twice over. It cannot
-    // be primary, because `editor.selection` has not moved yet while this
-    // event fires -- it still points at the line you left. And it cannot be
-    // a fallback either, because "the caret is in leading whitespace" is
-    // true of every space and every backspace typed at the front of a line,
-    // so it took the cursor away from anyone adjusting their own indent by
-    // hand.
-    const single = e.contentChanges.length === 1 ? e.contentChanges[0] : undefined;
-    const kind = single && reindentTrigger(single.text);
-    if (!single || !kind) {
-      log('  ignored: not a line break or a closing delimiter');
-      return;
-    }
-    const at = e.document.positionAt(single.rangeOffset + single.text.length).line;
-    const edit = indentLineEdit(editor.document, at, { blankLines: 'indent' });
-    log(
-      `  ${kind} on line ${at} (${JSON.stringify(e.document.lineAt(at).text)}) -> ` +
-        (edit ? `indent to ${edit.newText.length}` : 'already right, no edit')
-    );
-    if (!edit) {
-      return;
-    }
-    applying = true;
-    let applied: boolean;
-    try {
-      applied = await editor.edit((b) => b.replace(edit.range, edit.newText), {
-        undoStopBefore: false,
-        undoStopAfter: false,
-      });
-    } finally {
-      applying = false;
-    }
-    // Say where the caret goes, rather than hoping.
-    //
-    // After Enter the caret sits at the end of the whitespace we just
-    // replaced -- at the *end* of the replaced range, which is the one
-    // position an edit does not carry along in any dependable way. And an
-    // extension that manages the cursor itself will put it back where it had
-    // it. Either way the text was right and the caret was not, which is the
-    // whole of what a person notices.
-    //
-    // Only for a line that is nothing but indentation: if the line has code
-    // on it -- a closing delimiter re-indenting what it finished -- the
-    // caret is somewhere in that code and the editor's own mapping is the
-    // right answer.
-    const line = editor.document.lineAt(at);
-    if (applied && !line.text.trim()) {
-      const end = new vscode.Position(at, line.text.length);
-      editor.selection = new vscode.Selection(end, end);
-    }
-    log(
-      `  edit applied=${applied}; line is now ${JSON.stringify(line.text)}; ` +
-        `caret at ${editor.selection.active.line}:${editor.selection.active.character}`
-    );
-  });
-}
-
-/**
  * Re-indent as you type, through the mechanism VSCode documents for it.
  *
  * The editor calls this after it has inserted the character and applied its
@@ -359,8 +253,9 @@ function watchDocument(): vscode.Disposable {
  * Nothing here touches the caret. The editor applies these edits with
  * `EditOperation.replaceMove`, which carries a marker sitting at the end of
  * a replaced range to the end of the new text -- which is the caret, at the
- * end of the indentation, which is where it belongs. That is the one piece
- * `watchDocument` has to do by hand and cannot do reliably.
+ * end of the indentation, which is where it belongs. Watching the document
+ * instead means placing it by hand, and the end of a replaced range is the
+ * one position an edit does not carry along in any dependable way.
  */
 const onType: vscode.OnTypeFormattingEditProvider = {
   provideOnTypeFormattingEdits(doc, position, ch) {
@@ -401,7 +296,6 @@ function logEffective(doc: vscode.TextDocument): void {
   loggedFor = doc.uri.toString();
   const scope = { uri: doc.uri, languageId: doc.languageId };
   const cfg = vscode.workspace.getConfiguration('editor', scope);
-  const ours = vscode.workspace.getConfiguration('acl2-session', scope);
   // Alongside each language-scoped value, the value with the `[acl2]` block
   // taken away. When indentation is not running, the interesting question
   // is almost always whether the language defaults reached this document at
@@ -416,8 +310,7 @@ function logEffective(doc: vscode.TextDocument): void {
     `effective for ${doc.uri.fsPath} [${doc.languageId}]: ` +
       `formatOnType=${both('formatOnType')} autoIndent=${both('autoIndent')} ` +
       `insertSpaces=${both('insertSpaces')} tabSize=${both('tabSize')} ` +
-      `detectIndentation=${both('detectIndentation')}; ` +
-      `indentOnType(watcher)=${ours.get('indentOnType')}`
+      `detectIndentation=${both('detectIndentation')}`
   );
 }
 
@@ -425,11 +318,20 @@ function logEffective(doc: vscode.TextDocument): void {
 export function registerFormatting(channel?: vscode.OutputChannel): vscode.Disposable[] {
   trace = channel;
   const acl2 = { language: 'acl2' };
-  log('registered: on-type provider for "\\n" ) ] }, range, document, watcher');
+  log('registered: on-type provider for "\\n" ) ] }, range, document');
+  // The settings line wants an occasion of its own. `onType` logs it, but
+  // only once it has been called, and the one run where it matters is the
+  // run where it never is.
+  const seeActive = (editor?: vscode.TextEditor): void => {
+    if (editor && editor.document.languageId === 'acl2') {
+      logEffective(editor.document);
+    }
+  };
+  seeActive(vscode.window.activeTextEditor);
   return [
     vscode.languages.registerOnTypeFormattingEditProvider(acl2, onType, '\n', ')', ']', '}'),
     vscode.languages.registerDocumentRangeFormattingEditProvider(acl2, range),
     vscode.languages.registerDocumentFormattingEditProvider(acl2, whole),
-    watchDocument(),
+    vscode.window.onDidChangeActiveTextEditor(seeActive),
   ];
 }

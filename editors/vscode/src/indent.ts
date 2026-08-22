@@ -815,35 +815,3 @@ export function plannedIndent(
   }
   return indentFor(text, lineStart, from, from, opts);
 }
-
-/**
- * Whether a document change is one we should re-indent a line for.
- *
- * VSCode's on-type formatting is triggered inside the editor's own `type`
- * command, and an extension may replace that command outright --
- * VSCodeVim does, with `overrideCommand(context, 'type', ...)`. When it
- * does, `provideOnTypeFormattingEdits` is never called, and indentation
- * silently stops happening for everyone using that extension. Watching the
- * document instead works no matter who inserted the text.
- *
- * The filter has to be narrow, because document changes arrive for every
- * keystroke and for every edit any extension makes:
- *
- *   `newline`  a line break followed by nothing but whitespace. That is
- *              Enter -- and specifically not a paste, which arrives as one
- *              change carrying many lines and must be left to the range
- *              formatter.
- *   `close`    a single closing delimiter, which has just decided what the
- *              line it finishes belongs to.
- *
- * Our own indent edit matches neither, so this cannot feed itself.
- */
-export function reindentTrigger(inserted: string): 'newline' | 'close' | undefined {
-  if (/^\r?\n[ \t]*$/.test(inserted)) {
-    return 'newline';
-  }
-  if (inserted === ')' || inserted === ']' || inserted === '}') {
-    return 'close';
-  }
-  return undefined;
-}
