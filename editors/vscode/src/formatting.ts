@@ -96,43 +96,61 @@ import * as vscode from 'vscode';
 import { IndentOptions, plannedIndent, reindent, topLevelStarts } from './indent';
 
 /**
- * Where each top-level form starts, remembered per document version.
+ * The document as the rules need to see it, remembered per version.
  *
- * Indentation only ever needs the enclosing top-level form, and finding it
- * means a scan. Doing that scan on every keystroke of an 800 KB book is the
- * kind of cost that is invisible until the file is
- * `kestrel/c/syntax/validator.lisp` and one form is five thousand lines
- * long. A document's version changes on every edit, so this is a cache that
- * cannot go stale -- and a `WeakMap` so a closed document takes its entry
- * with it.
+ * Two things, for the same reason. Indentation only ever needs the enclosing
+ * top-level form, and finding it means a scan -- the kind of cost that is
+ * invisible until the file is `kestrel/c/syntax/validator.lisp` and one form
+ * is five thousand lines long. And the rules read the text by offset, so
+ * every line asked about used to call `getText`, which is
+ * `this._lines.join(this._eol)`: a fresh copy of the whole book, per line.
+ * Format Selection over five hundred lines of validator.lisp meant five
+ * hundred copies of 387 KB -- 198 MB of churn and 119 ms, measured -- for a
+ * string that had not changed. Once per version it is 0.24 ms.
+ *
+ * A document's version changes on every edit, so this cannot go stale, and a
+ * `WeakMap` means a closed document takes its entry with it.
  */
-const startsCache = new WeakMap<vscode.TextDocument, { version: number; starts: number[] }>();
+interface Snapshot {
+  version: number;
+  text: string;
+  starts: number[];
+}
+const snapshots = new WeakMap<vscode.TextDocument, Snapshot>();
 
 /**
  * Where to write a trace of what indentation saw and did.
  *
- * Off unless `acl2-session.indentTrace` is on. Indentation runs on the
- * keystroke path, and the interesting failures are ones where it does
- * nothing at all -- a change event that never matched, an edit that another
- * extension immediately overwrote. None of that is visible from the outside,
- * and reasoning about it from a screenshot of the result has already cost
- * two wrong diagnoses.
+ * Off unless `acl2-session.indentTrace` is on. The interesting failures are
+ * the ones where indentation does nothing at all -- a trigger that never
+ * fired, an edit another extension overwrote, a setting that was not what it
+ * was believed to be. None of that is visible from the outside, and reasoning
+ * about it from a screenshot of the result has already cost two wrong
+ * diagnoses.
+ *
+ * The message is a thunk and the setting is read once, because both of the
+ * callers are on the keystroke path: this runs on every Enter and every
+ * closing delimiter, and building a message that describes a whole line --
+ * then asking the configuration service whether anyone wanted it -- is work
+ * to do while someone is typing.
  */
 let trace: vscode.OutputChannel | undefined;
-function log(what: string): void {
-  if (trace && vscode.workspace.getConfiguration('acl2-session').get<boolean>('indentTrace')) {
-    trace.appendLine(`indent: ${what}`);
+let tracing = false;
+function log(what: () => string): void {
+  if (trace && tracing) {
+    trace.appendLine(`indent: ${what()}`);
   }
 }
 
-function startsOf(doc: vscode.TextDocument): number[] {
-  const hit = startsCache.get(doc);
+function snapshotOf(doc: vscode.TextDocument): Snapshot {
+  const hit = snapshots.get(doc);
   if (hit && hit.version === doc.version) {
-    return hit.starts;
+    return hit;
   }
-  const starts = topLevelStarts(doc.getText());
-  startsCache.set(doc, { version: doc.version, starts });
-  return starts;
+  const text = doc.getText();
+  const fresh: Snapshot = { version: doc.version, text, starts: topLevelStarts(text) };
+  snapshots.set(doc, fresh);
+  return fresh;
 }
 
 /**
@@ -151,7 +169,8 @@ function indentLineEdit(
   opts: IndentOptions = {}
 ): vscode.TextEdit | undefined {
   const line = doc.lineAt(lineNo);
-  const want = plannedIndent(doc.getText(), doc.offsetAt(line.range.start), startsOf(doc), opts);
+  const { text, starts } = snapshotOf(doc);
+  const want = plannedIndent(text, doc.offsetAt(line.range.start), starts, opts);
   if (want === undefined) {
     return undefined;
   }
@@ -176,19 +195,19 @@ function indentRangeEdits(doc: vscode.TextDocument, first: number, last: number)
   // formatting, and `reindent` does it in one linear pass -- far cheaper
   // than asking line by line, each of which re-derives the paren stack.
   if (first === 0 && last === doc.lineCount - 1) {
-    const text = doc.getText();
+    const { text } = snapshotOf(doc);
     const out = reindent(text);
     if (out === text) {
       return [];
     }
     const a = text.split('\n');
     const b = out.split('\n');
+    const lead = (l: string): number => l.length - l.trimStart().length;
     const edits: vscode.TextEdit[] = [];
     for (let i = 0; i < a.length; i++) {
       if (a[i] === b[i]) {
         continue;
       }
-      const lead = (s: string): number => s.length - s.trimStart().length;
       const line = doc.lineAt(i);
       edits.push(
         vscode.TextEdit.replace(
@@ -307,11 +326,12 @@ const onType: vscode.OnTypeFormattingEditProvider = {
   provideOnTypeFormattingEdits(doc, position, ch) {
     logEffective(doc);
     log(
-      `on-type CALLED ch=${JSON.stringify(ch)} at ${position.line}:${position.character} ` +
+      () =>
+        `on-type CALLED ch=${JSON.stringify(ch)} at ${position.line}:${position.character} ` +
         `line=${JSON.stringify(doc.lineAt(position.line).text)}`
     );
     const edit = indentLineEdit(doc, position.line, { blankLines: 'indent' });
-    log(`  -> ${edit ? `indent to ${edit.newText.length}` : 'already right, no edit'}`);
+    log(() => `  -> ${edit ? `indent to ${edit.newText.length}` : 'already right, no edit'}`);
     return edit ? [edit] : [];
   },
 };
@@ -353,7 +373,8 @@ function logEffective(doc: vscode.TextDocument): void {
     return lang === plain ? lang : `${lang} (without [acl2]: ${plain})`;
   };
   log(
-    `effective for ${doc.uri.fsPath} [${doc.languageId}]: ` +
+    () =>
+      `effective for ${doc.uri.fsPath} [${doc.languageId}]: ` +
       `formatOnType=${both('formatOnType')} autoIndent=${both('autoIndent')} ` +
       `insertSpaces=${both('insertSpaces')} tabSize=${both('tabSize')} ` +
       `detectIndentation=${both('detectIndentation')}`
@@ -363,8 +384,12 @@ function logEffective(doc: vscode.TextDocument): void {
 /** Register the formatting providers. Returns them for disposal. */
 export function registerFormatting(channel?: vscode.OutputChannel): vscode.Disposable[] {
   trace = channel;
+  const readTracing = (): void => {
+    tracing = vscode.workspace.getConfiguration('acl2-session').get<boolean>('indentTrace', false);
+  };
+  readTracing();
   const acl2 = { language: 'acl2' };
-  log('registered: on-type provider for "\\n" "\\r" ) ] }, range, document');
+  log(() => 'registered: on-type provider for "\\n" "\\r" ) ] }, range, document');
   // The settings line wants an occasion of its own. `onType` logs it, but
   // only once it has been called, and the one run where it matters is the
   // run where it never is.
@@ -379,5 +404,10 @@ export function registerFormatting(channel?: vscode.OutputChannel): vscode.Dispo
     vscode.languages.registerDocumentRangeFormattingEditProvider(acl2, range),
     vscode.languages.registerDocumentFormattingEditProvider(acl2, whole),
     vscode.window.onDidChangeActiveTextEditor(seeActive),
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration('acl2-session.indentTrace')) {
+        readTracing();
+      }
+    }),
   ];
 }
