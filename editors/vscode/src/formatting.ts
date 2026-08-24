@@ -118,30 +118,6 @@ interface Snapshot {
 }
 const snapshots = new WeakMap<vscode.TextDocument, Snapshot>();
 
-/**
- * Where to write a trace of what indentation saw and did.
- *
- * Off unless `acl2-session.indentTrace` is on. The interesting failures are
- * the ones where indentation does nothing at all -- a trigger that never
- * fired, an edit another extension overwrote, a setting that was not what it
- * was believed to be. None of that is visible from the outside, and reasoning
- * about it from a screenshot of the result has already cost two wrong
- * diagnoses.
- *
- * The message is a thunk and the setting is read once, because both of the
- * callers are on the keystroke path: this runs on every Enter and every
- * closing delimiter, and building a message that describes a whole line --
- * then asking the configuration service whether anyone wanted it -- is work
- * to do while someone is typing.
- */
-let trace: vscode.OutputChannel | undefined;
-let tracing = false;
-function log(what: () => string): void {
-  if (trace && tracing) {
-    trace.appendLine(`indent: ${what()}`);
-  }
-}
-
 function snapshotOf(doc: vscode.TextDocument): Snapshot {
   const hit = snapshots.get(doc);
   if (hit && hit.version === doc.version) {
@@ -323,91 +299,18 @@ export async function indentCommand(): Promise<void> {
  * one position an edit does not carry along in any dependable way.
  */
 const onType: vscode.OnTypeFormattingEditProvider = {
-  provideOnTypeFormattingEdits(doc, position, ch) {
-    logEffective(doc);
-    log(
-      () =>
-        `on-type CALLED ch=${JSON.stringify(ch)} at ${position.line}:${position.character} ` +
-        `line=${JSON.stringify(doc.lineAt(position.line).text)}`
-    );
+  provideOnTypeFormattingEdits(doc, position) {
     const edit = indentLineEdit(doc, position.line, { blankLines: 'indent' });
-    log(() => `  -> ${edit ? `indent to ${edit.newText.length}` : 'already right, no edit'}`);
     return edit ? [edit] : [];
   },
 };
 
-/**
- * The editor settings that decide whether any of this runs, logged once.
- *
- * Both halves of the scope, and it has to be both. A `ConfigurationScope`
- * of a bare `Uri` resolves the resource but drops the language override; a
- * bare `{ languageId }` applies the override but at workspace level. Either
- * one alone reports a value the editor is not using.
- *
- * That is not a hypothetical. This function first shipped with the `Uri`
- * form and reported `formatOnType=false autoIndent="full"` on the very run
- * where the on-type provider fired and `autoIndent: keep` had visibly
- * copied the previous line's eleven spaces -- both readings flatly contrary
- * to the behaviour in the same trace, because both were the values with the
- * `[acl2]` block stripped off. A line of instrumentation that disagrees
- * with the run it is instrumenting is worse than none; the earlier
- * `{ languageId }` probe was wrong the other way and no one noticed,
- * because that time it happened to agree.
- */
-let loggedFor: string | undefined;
-function logEffective(doc: vscode.TextDocument): void {
-  if (loggedFor === doc.uri.toString()) {
-    return;
-  }
-  loggedFor = doc.uri.toString();
-  const scope = { uri: doc.uri, languageId: doc.languageId };
-  const cfg = vscode.workspace.getConfiguration('editor', scope);
-  // Alongside each language-scoped value, the value with the `[acl2]` block
-  // taken away. When indentation is not running, the interesting question
-  // is almost always whether the language defaults reached this document at
-  // all, and one reading cannot answer it.
-  const bare = vscode.workspace.getConfiguration('editor', doc.uri);
-  const both = (k: string): string => {
-    const lang = JSON.stringify(cfg.get(k));
-    const plain = JSON.stringify(bare.get(k));
-    return lang === plain ? lang : `${lang} (without [acl2]: ${plain})`;
-  };
-  log(
-    () =>
-      `effective for ${doc.uri.fsPath} [${doc.languageId}]: ` +
-      `formatOnType=${both('formatOnType')} autoIndent=${both('autoIndent')} ` +
-      `insertSpaces=${both('insertSpaces')} tabSize=${both('tabSize')} ` +
-      `detectIndentation=${both('detectIndentation')}`
-  );
-}
-
 /** Register the formatting providers. Returns them for disposal. */
-export function registerFormatting(channel?: vscode.OutputChannel): vscode.Disposable[] {
-  trace = channel;
-  const readTracing = (): void => {
-    tracing = vscode.workspace.getConfiguration('acl2-session').get<boolean>('indentTrace', false);
-  };
-  readTracing();
+export function registerFormatting(): vscode.Disposable[] {
   const acl2 = { language: 'acl2' };
-  log(() => 'registered: on-type provider for "\\n" "\\r" ) ] }, range, document');
-  // The settings line wants an occasion of its own. `onType` logs it, but
-  // only once it has been called, and the one run where it matters is the
-  // run where it never is.
-  const seeActive = (editor?: vscode.TextEditor): void => {
-    if (editor && editor.document.languageId === 'acl2') {
-      logEffective(editor.document);
-    }
-  };
-  seeActive(vscode.window.activeTextEditor);
   return [
     vscode.languages.registerOnTypeFormattingEditProvider(acl2, onType, '\n', '\r', ')', ']', '}'),
     vscode.languages.registerDocumentRangeFormattingEditProvider(acl2, range),
     vscode.languages.registerDocumentFormattingEditProvider(acl2, whole),
-    vscode.window.onDidChangeActiveTextEditor(seeActive),
-    vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration('acl2-session.indentTrace')) {
-        readTracing();
-      }
-    }),
   ];
 }

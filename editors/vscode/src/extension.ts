@@ -376,7 +376,7 @@ export function activate(context: vscode.ExtensionContext): void {
     // Indentation. Three providers, none of which needs a session: see
     // `formatting.ts`, and `indent.ts` for why the language configuration
     // cannot carry this.
-    ...registerFormatting(channel),
+    ...registerFormatting(),
     // Wrapped rather than passed bare, for the reason `webview.mjs` checks:
     // a bare registration receives whatever VSCode hands the command, and an
     // arrow that declares no parameters cannot quietly grow one.
