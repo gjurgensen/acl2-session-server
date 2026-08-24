@@ -24,6 +24,7 @@ import {
   lockedIndex,
   planTail,
   stepBarrier,
+  warningKinds,
 } from './policy';
 import { readFileSync } from 'fs';
 import {
@@ -2153,6 +2154,13 @@ function warnConditional(): boolean {
     .get<boolean>('conditionalWarnings', false);
 }
 
+/** Whether ACL2's own warnings are reported. See the setting's description. */
+function warnAcl2(): boolean {
+  return vscode.workspace
+    .getConfiguration('acl2-session')
+    .get<boolean>('formWarnings', true);
+}
+
 /**
  * Publish this book's failures, or take them down.
  *
@@ -2203,9 +2211,13 @@ function updateProblems(s: BookSession): void {
       ? undefined
       : s.lastState?.units.find((u) => u.index === skippedAt)?.line_start;
   const withConditional = warnConditional();
+  const withWarnings = warnAcl2();
   for (const u of s.lastState?.units ?? []) {
     const kind = problemFor(u.status, withConditional);
-    if (kind === undefined || u.line_start > doc.lineCount) {
+    // The range is wanted whether or not the status is a problem: a form that
+    // went in cleanly is exactly the one that carries ACL2's warnings.
+    const kinds = withWarnings ? warningKinds(s.unitEvents.get(u.index)?.warnings) : [];
+    if ((kind === undefined && kinds.length === 0) || u.line_start > doc.lineCount) {
       continue;
     }
     const line = u.line_start - 1;
@@ -2217,6 +2229,23 @@ function updateProblems(s: BookSession): void {
     // one that is fine for the one that is not.
     const to =
       u.line_end === u.line_start ? charOffset(text, u.col_end) : text.length;
+    const span = new vscode.Range(line, from, line, Math.max(from + 1, to));
+    // ACL2's own warnings, one entry per kind. Said in ACL2's own format --
+    // `ACL2 Warning [Double-rewrite]` -- so the word here is the word to
+    // search the log for, which matters because the kind is all we have: what
+    // the warning actually *says* lives only in the printed output.
+    for (const k of kinds) {
+      const w = new vscode.Diagnostic(
+        span,
+        `ACL2 Warning [${k}] \u2014 see this form's output for what it says.`,
+        vscode.DiagnosticSeverity.Warning
+      );
+      w.source = 'ACL2';
+      out.push(w);
+    }
+    if (kind === undefined) {
+      continue;
+    }
     const e = s.unitEvents.get(u.index);
     const why =
       e?.error_line?.trim() ||
@@ -2231,7 +2260,7 @@ function updateProblems(s: BookSession): void {
           ? `ACL2 skipped this form's proofs \u2014 ${why}`
           : `ACL2: ${why}`;
     const d = new vscode.Diagnostic(
-      new vscode.Range(line, from, line, Math.max(from + 1, to)),
+      span,
       message,
       kind === 'warning' ? vscode.DiagnosticSeverity.Warning : vscode.DiagnosticSeverity.Error
     );

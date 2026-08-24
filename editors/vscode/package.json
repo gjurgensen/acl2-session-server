@@ -455,6 +455,11 @@
           "default": false,
           "markdownDescription": "Report **conditional** forms as warnings in the Problems view.\n\nA conditional form was proved, and proved correctly — on top of a claim that was not, because a form above it went in with its proofs skipped. Nothing is wrong with it in isolation, and every form below the first skip is one, so this can be a great many warnings at once. Off by default for that reason; the status column and the wash say the same thing more quietly.\n\nRequires `#acl2-session.problems#`, which reports failed and skipped forms as errors."
         },
+        "acl2-session.formWarnings": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Report ACL2's own warnings \u2014 `Double-rewrite`, `Use`, `Subsume` \u2014 in the Problems view.\n\nThe kind is all there is: ACL2 records the *set* a form emitted, so five double-rewrite warnings look like one, and what the warning actually says lives only in that form's output. How many forms carry one varies enormously by book \u2014 measured at 1% of forms in `arithmetic-light/mod.lisp` and 40% in `std/lists/sets.lisp` \u2014 and VSCode gives no way to have the Problems entry without the squiggle, so turn this off if your book is one of the latter."
+        },
         "acl2-session.highlightOutput": {
           "type": "boolean",
           "default": true,

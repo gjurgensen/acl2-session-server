@@ -113,5 +113,27 @@ for (const [line, column] of [[1, 0], [3, 4], [5, 1], [5, 8], [7, 1], [9, 10], [
   check(`the mark for (${line},${column}) is inside the barrier`, marked(at(line, column)) <= i, true);
 }
 
+// ---- the kinds a form's warnings come apart into ----
+{
+  const { warningKinds } = require('./out/policy.js');
+  // The wire joins them for the form view, which draws one line; a diagnostic
+  // wants one entry each, so they come apart again.
+  check('a single kind', warningKinds('Double-rewrite'), ['Double-rewrite']);
+  check('several', warningKinds('Double-rewrite, Use'), ['Double-rewrite', 'Use']);
+  check('no warnings at all', warningKinds(undefined), []);
+  check('and an empty line is the same as none', warningKinds(''), []);
+
+  // Tolerant about the separator, because the joining happens on the other
+  // side of a wire and this is the only place that undoes it.
+  check('spacing does not matter', warningKinds('Double-rewrite,Use'),
+    ['Double-rewrite', 'Use']);
+  check('nor does a trailing separator', warningKinds('Use, '), ['Use']);
+
+  // ACL2 records a set, so a repeat is a wire artefact rather than a second
+  // warning -- and two identical entries in the Problems view would read as
+  // two things to fix.
+  check('a repeated kind is one entry', warningKinds('Use, Use'), ['Use']);
+}
+
 console.log(failures === 0 ? 'barrier: all green' : `barrier: ${failures} failed`);
 process.exit(failures === 0 ? 0 : 1);

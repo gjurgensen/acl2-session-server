@@ -34,6 +34,15 @@ it a "look around here" aid rather than a statement about which of them.
 With the target held above everything the arrow leads the file, since there is
 no included form for it to follow.
 
+ACL2's own warnings — `Double-rewrite`, `Use`, `Subsume` — are reported in the
+**Problems** view too, one entry per kind, on the form that emitted them.
+`acl2-session.formWarnings` turns them off. Two things worth knowing before
+leaving them on: the kind is all there is, because ACL2 records the *set* a
+form emitted rather than the individual warnings, so five double-rewrite
+warnings look like one and what any of them actually says is in that form's
+output (`ctrl+alt+o`); and how many forms carry one varies enormously by book —
+1% of forms in `arithmetic-light/mod.lisp`, 40% in `std/lists/sets.lisp`.
+
 Failed and skipped forms are reported in the **Problems** view in every mode,
 which is also where the squiggle comes from — VSCode gives no way to have the
 entry without the mark. `acl2-session.problems` turns both off. In `minimal`

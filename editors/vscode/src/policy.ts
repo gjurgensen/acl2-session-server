@@ -312,3 +312,33 @@ export function barrierIndex(anchor: Anchor | null, units: readonly Head[]): num
 export function stepBarrier(from: number, delta: number, count: number): number {
   return Math.max(-1, Math.min(count - 1, from + delta));
 }
+
+// ---- what ACL2 said about a form, besides whether it went in ---------------
+
+/**
+ * The warning kinds one form emitted, from the line the wire sends.
+ *
+ * The wire joins them into `"Double-rewrite, Use"` for the form view, which
+ * renders them as one line; a diagnostic wants one entry each, so they come
+ * apart again here. The join is worth undoing rather than working around: a
+ * reader fixing warnings wants to see the list shrink, and a single entry
+ * carrying two kinds only shrinks when both are gone.
+ *
+ * Kinds, never counts. `get-event-data` records the *set* a form emitted, so
+ * five double-rewrite warnings and one are the same string -- which is why
+ * this cannot promise the list shrinks per fix, only per kind, and why the
+ * message points at the form's output for the rest.
+ */
+export function warningKinds(joined: string | undefined): string[] {
+  if (!joined) {
+    return [];
+  }
+  const seen = new Set<string>();
+  for (const k of joined.split(',')) {
+    const t = k.trim();
+    if (t) {
+      seen.add(t);
+    }
+  }
+  return [...seen];
+}
