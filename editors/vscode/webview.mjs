@@ -430,10 +430,11 @@ const envelope = lift('esc', 'strip', 'causes', 'spans', 'hl', 'rat',
   // value, the tail -- which this asserts the stylesheet still marks.
   {
     const { SHARED_CSS } = require('./out/webviewParts.js');
-    check(/pre\.field \{[^}]*border-left: 0/.test(SHARED_CSS),
-          'a field value loses the rule the label already stands in for');
-    check(/^pre \{[^}]*border-left: 2px/m.test(SHARED_CSS),
-          'while a standalone block keeps it');
+    const preRule = /\npre \{[^}]*\}/.exec(SHARED_CSS)[0];
+    check(/pre\.field \{[^}]*border: 0/.test(SHARED_CSS),
+          'a field value carries no box; the label beside it is its structure');
+    check(/border: 1px solid/.test(preRule) && /border-radius/.test(preRule),
+          'while a standalone block is boxed, the same idiom as an event card');
   }
   check((h.match(/data-fold="g-ev:[^":]*"/g) || []).length === 2,
         'an event with nothing to show gets no fold');

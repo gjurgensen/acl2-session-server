@@ -66,14 +66,14 @@ h3 { margin: 14px 0 4px; font-size: 11px; text-transform: uppercase;
      letter-spacing: 0.05em; opacity: 0.75; }
 pre, code { font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; }
 /* A block of ACL2's own text -- a checkpoint term, the live log, a value --
-   marked by a rule down its left edge rather than by a filled slab. The
-   slab read as heavy against a panel that is mostly code already, and three
-   of them in one failure made the page look built out of boxes. The rule
-   says the same thing (this is one block, and it is ACL2 speaking) at a
-   fraction of the weight, and keeps working when several sit in a row. */
-pre { background: none; margin: 4px 0; padding: 1px 0 1px 10px;
-      border-left: 2px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
-      overflow: auto; white-space: pre-wrap; }
+   in an outlined box. The same box an event card uses (same border colour,
+   same radius), on purpose: a box is this page's grouping idiom, so a block
+   of output reads as one more grouped unit rather than a new kind of thing.
+   An outline rather than a fill keeps it light where several stack in a
+   failure. A field's own value is exempt -- see pre.field below. */
+pre { background: none; margin: 4px 0; padding: 2px 6px;
+      border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+      border-radius: 4px; overflow: auto; white-space: pre-wrap; }
 /* Override the webview default: its light chip behind inline code is
    unreadable on dark themes. A faint neutral chip with the theme
    foreground works on both. */
@@ -113,7 +113,7 @@ ul.rules table.inner { margin: 2px 0 5px 14px; }
    it. So the mark means "a top-level block of ACL2 output" rather than "code
    that happened to wrap". Kept in the value cell, not promoted to its own
    line, so it reads as this label's value and no more. */
-pre.field { margin: 1px 0; border-left: 0; padding: 0; }
+pre.field { margin: 1px 0; border: 0; padding: 0; }
 .cp { margin: 8px 0; }
 details > summary { cursor: pointer; }
 details > summary h3 { display: inline; }
