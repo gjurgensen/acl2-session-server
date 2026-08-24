@@ -63,6 +63,10 @@ export interface Envelope {
   prover_steps?: number;
   warnings?: string;
   time?: string;
+  /** What the form evaluated to. Absent when there is nothing worth showing. */
+  value?: string;
+  /** Whether that value arrived as an error triple rather than a single value. */
+  value_triple?: boolean;
   hint_events?: string[];
   splitter_rules?: string[];
   rules?: string[];

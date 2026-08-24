@@ -335,6 +335,9 @@ pub struct UnitReport {
     pub names: Vec<String>,
     pub elapsed: Duration,
     pub event_data: EventData,
+    /// What the form evaluated to, when that says anything the events do not.
+    /// See [`FormValue`].
+    pub value: Option<FormValue>,
     /// Events recorded inside this unit, newest first. See `InnerEvent`.
     pub inner: Vec<InnerEvent>,
     /// Total inner events ACL2 recorded, which may exceed `inner.len()`: a
@@ -602,6 +605,12 @@ pub struct EvalResult {
     /// the agent was back to fishing in prose for exactly the form it was
     /// actively debugging.
     pub failed: Option<EvalFailure>,
+    /// What the form evaluated to. See [`FormValue`].
+    ///
+    /// Not filtered against the names it introduced, the way a unit's is: an
+    /// eval's events are undone, so there is no event list beside it for the
+    /// value to be repeating.
+    pub value: Option<FormValue>,
     pub output_ref: OutputRef,
     pub output_lines: usize,
     pub elapsed: Duration,
@@ -1812,6 +1821,62 @@ pub struct SyncOptions {
     pub skip_proofs: bool,
 }
 
+/// What a form evaluated to.
+///
+/// Asked of `ld-history` by `VALUE_PROBE` rather than read back out of what
+/// `ld` printed, because the printed form cannot be told apart from the
+/// form's own output -- see the probe for the measurements.
+///
+/// Absent rather than empty when there is nothing to show. ACL2's own rule
+/// decides that, in the probe: a triple whose error component is non-nil or
+/// whose value is `:invisible` prints nothing, and so yields no block here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormValue {
+    /// The value, printed by ACL2 with `~x` and laid out as ACL2 laid it out.
+    pub text: String,
+    /// Whether the form returned an error triple rather than a single value.
+    ///
+    /// Carried because it is free and because it is a real distinction --
+    /// ACL2 marks it itself, printing a leading `triple-print-prefix` space
+    /// before a triple's value. Nothing in this crate branches on it.
+    pub triple: bool,
+}
+
+/// Read the `value` block, if the probe left one.
+///
+/// The block is `vkind` and then the printed value. `vkind none` is the
+/// probe having applied ACL2's rule and found nothing to show; a missing
+/// block is the probe never having run, which is what a form that signalled
+/// an error looks like under `:ld-error-action :return!`.
+fn parse_value(sub: &crate::session::Submission) -> Option<FormValue> {
+    let body = sub.block("value")?;
+    let mut lines = body.lines();
+    let kind = lines.next()?.strip_prefix("vkind ")?.trim().to_string();
+    if kind == "none" {
+        return None;
+    }
+    let text = lines.collect::<Vec<_>>().join("\n").trim().to_string();
+    if text.is_empty() {
+        return None;
+    }
+    Some(FormValue { text, triple: kind == "triple" })
+}
+
+/// Drop a value that only repeats a name the form introduced.
+///
+/// An event's value *is* its own name -- `(defun f ...)` returns `f` -- and
+/// that name is already the heading of the event's own block. Saying it
+/// twice is noise. Compared case-insensitively, because ACL2 prints symbols
+/// in whatever case the current print settings call for while the split
+/// records them as they were written.
+fn value_unless_a_name(v: Option<FormValue>, names: &[String], inner: &[InnerEvent]) -> Option<FormValue> {
+    let v = v?;
+    let t = v.text.trim().to_ascii_lowercase();
+    let repeats = names.iter().any(|n| n.to_ascii_lowercase() == t)
+        || inner.iter().any(|e| e.name.to_ascii_lowercase() == t);
+    if repeats { None } else { Some(v) }
+}
+
 /// One rune a name introduced, and what the world knows about it.
 ///
 /// The fields are ACL2's own, keyword-keyed: `:hyps`, `:equiv`, `:lhs`,
@@ -2232,7 +2297,8 @@ impl Book {
         // not visible to an eval'd form -- accepted, because the envelope
         // already delivered them structurally, and `:pso` (the post-mortem
         // that matters) reads `saved-output-reversed`, which is untouched.
-        let body = format!("{CLEAR_STALE}\n{form}\n{CMD_PROBE}");
+        let body =
+            format!("{CLEAR_STALE}\n{form}\n{}\n{CMD_PROBE}", crate::session::VALUE_PROBE);
         let sub = self.session.submit(&body, deadline)?;
         self.finish_eval(sub, deadline)
     }
@@ -2549,6 +2615,7 @@ impl Book {
             outcome: sub.outcome,
             world_change,
             failed,
+            value: parse_value(&sub),
             output_ref,
             output_lines,
             elapsed: sub.elapsed,
@@ -2821,6 +2888,7 @@ impl Book {
                         names: u.names.clone(),
                         elapsed: sub.elapsed,
                         event_data: parse_event_data(&sub),
+                        value: value_unless_a_name(parse_value(&sub), &u.names, &inner),
                         inner,
                         inner_total,
                         clique,
@@ -3134,6 +3202,11 @@ impl Book {
         } else {
             body.extend_from_slice(text);
         }
+        // Immediately after the unit's own text and before every other probe:
+        // this one reads the head of `ld-history`, so whatever runs between
+        // the two is what it would describe instead.
+        body.push(b'\n');
+        body.extend_from_slice(crate::session::VALUE_PROBE.as_bytes());
         body.extend_from_slice(
             format!(
                 "\n{EVENT_DATA_PROBE}\n{}\n\
@@ -3301,6 +3374,7 @@ impl Book {
                 names: p.names.clone(),
                 elapsed: sub.elapsed,
                 event_data: parse_event_data(&sub),
+                value: value_unless_a_name(parse_value(&sub), &p.names, &inner),
                 inner,
                 inner_total,
                 clique,

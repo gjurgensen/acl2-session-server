@@ -70,6 +70,18 @@ export interface FormEnvelope {
   rules: string[];
   warnings?: string;
   time?: string;
+  /**
+   * What the form evaluated to, as ACL2 printed it.
+   *
+   * Absent when there is nothing to show, and that is ACL2's judgement
+   * rather than this end's: a triple whose error component is non-nil or
+   * whose value is `:invisible` prints nothing at the REPL and arrives
+   * missing here. Absent too when the value only repeats a name the form
+   * introduced, since the event below already carries that name.
+   */
+  value?: string;
+  /** Whether it came back as an error triple. Carried, not rendered. */
+  valueTriple?: boolean;
   hintEvents?: string[];
   splitterRules?: string[];
   preRevert?: boolean;
@@ -164,6 +176,7 @@ export function rulesStrings(entries: FormNameRules[]): string[] {
 /** The strings in an envelope that are ACL2 code rather than prose. */
 export function highlightable(m: FormEnvelope): string[] {
   return [
+    ...(m.value === undefined ? [] : [m.value]),
     ...m.checkpoints.map((c) => c.term),
     ...(m.rules ?? []),
     ...(m.hintEvents ?? []),

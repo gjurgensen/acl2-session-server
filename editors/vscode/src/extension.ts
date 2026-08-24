@@ -2648,6 +2648,8 @@ function toPanelEnvelope(e: Envelope): FormEnvelope {
     rules: e.rules ?? [],
     warnings: e.warnings,
     time: e.time,
+    value: e.value,
+    valueTriple: e.value_triple,
     hintEvents: e.hint_events ?? [],
     splitterRules: e.splitter_rules ?? [],
     preRevert: e.pre_revert ?? false,

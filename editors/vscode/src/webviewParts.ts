@@ -405,8 +405,16 @@ function eventHtml(e, p, openByDefault) {
  * same order the buffer has.
  */
 function productiveHtml(m, p) {
+  // What the form evaluated to, when ACL2 would have shown it. Whether it
+  // says anything is already decided upstream -- a value that only repeats
+  // an event's own name never arrives, and neither does one ACL2 itself
+  // declines to print.
+  let head = '';
+  if (m.value) {
+    head += '<h3>Value</h3><pre>' + hl(m.value) + '</pre>';
+  }
   const inner = (m.inner || []).slice().reverse();
-  if (!inner.length) { return ''; }
+  if (!inner.length) { return head; }
   const total = m.innerTotal != null && m.innerTotal > inner.length
     ? inner.length + ' shown of ' + m.innerTotal
     : String(inner.length);
@@ -415,7 +423,7 @@ function productiveHtml(m, p) {
   // open blocks is a page that cannot be scrolled.
   const limit = m.eventsOpenLimit != null ? m.eventsOpenLimit : 4;
   const openByDefault = inner.length <= limit;
-  let h = '<h3>Events (' + total + ')</h3>';
+  let h = head + '<h3>Events (' + total + ')</h3>';
   h += inner.map((e) => eventHtml(e, p, openByDefault)).join('');
   const detailed = inner.filter(
     (e) => e.kind || e.time || e.proverSteps != null || (e.rules || []).length || e.detail

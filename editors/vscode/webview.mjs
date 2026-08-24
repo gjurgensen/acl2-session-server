@@ -338,6 +338,29 @@ const envelope = lift('esc', 'strip', 'causes', 'spans', 'hl', 'rat',
 check(!pages[1][1].includes('Introduced ('),
       'the form view has no second, pooled copy of what the form introduced');
 
+// The value a form evaluated to. Whether there is one to show is ACL2's
+// decision, made in the core; the page's whole job is to put it above the
+// events and not invent a section when there is nothing.
+{
+  const withValue = envelope(
+    { checkpoints: [], rules: [], value: '(1 2 3)', inner: [] }, 'v-');
+  check(withValue.includes('Value'), 'a form that evaluated to something shows it');
+  check(withValue.includes('(1 2 3)'), 'and shows the value itself');
+  check(!withValue.includes('Events ('),
+        'a form with a value and no events grows no events section');
+
+  const both = envelope({
+    checkpoints: [], rules: [], value: '7',
+    inner: [{ name: 'e', kind: 'defthm', rules: ['(:definition endp)'] }],
+  }, 'w-');
+  check(both.indexOf('Value') < both.indexOf('Events ('),
+        'and when a form did both, the value comes first');
+
+  const neither = envelope({ checkpoints: [], rules: [], inner: [] }, 'y-');
+  check(!neither.includes('Value'),
+        'while a form ACL2 printed no value for gets no section at all');
+}
+
 // A failure is a different page, not the same one with a red chip. What is
 // pinned here is the *order*: the abort cause is nearly always
 // induction-depth-limit-exceeded and the fix is nearly never the depth

@@ -126,6 +126,63 @@ fn session_submits_and_classifies() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// What a form evaluated to, asked of `ld-history` rather than scraped.
+///
+/// The four cases that make scraping impossible, which is why this is asked
+/// instead: a form whose value is all it prints, a form that prints *and*
+/// returns, a form that returns nothing visible, and an event whose value is
+/// its own name. The third is the one that settles it -- a `thm` ends with
+/// "Proof succeeded." and no value at all, so the last line of a log is not
+/// a value and cannot be read as one.
+///
+/// The probe is appended here rather than by `submit_bytes`, which is the
+/// contract: it reads the *head* of `ld-history`, so it has to be the form
+/// immediately after the one it is about. `sync` appends four more probes to
+/// every unit it admits, and this sitting at the end of that would describe
+/// the last of them.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_forms_value_is_asked_for_not_scraped() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("value");
+    let mut s = Session::start(&acl2, &dir, SessionControl::new()).expect("start");
+
+    let value_of = |s: &mut Session, form: &str| -> String {
+        let with_probe = format!("{form}\n{}", acl2_session::session::VALUE_PROBE);
+        let sub = s.submit(&with_probe, D).expect("submit");
+        sub.block("value").unwrap_or_default().to_string()
+    };
+
+    let plain = value_of(&mut s, "(acl2::+ 1 2)");
+    assert!(plain.contains("vkind value"), "an ordinary value is not a triple: {plain}");
+    assert!(plain.contains('3'), "and it is the value: {plain}");
+
+    let triple = value_of(&mut s, "(acl2::value (acl2::+ 1 2))");
+    assert!(triple.contains("vkind triple"), "an error triple says so: {triple}");
+    assert!(triple.contains('3'), "and yields the same value: {triple}");
+
+    // Printed output and the value are different things. Scraping cannot tell
+    // them apart; this must return the value and not the line.
+    let printed = value_of(&mut s, "(acl2::cw \"printed by cw~%\")");
+    assert!(printed.contains("vkind value"), "cw returns an ordinary value: {printed}");
+    assert!(!printed.contains("printed by cw"), "the printed line is not the value: {printed}");
+
+    let ev = value_of(&mut s, ALPHA);
+    assert!(ev.contains("vkind triple"), "an event returns a triple: {ev}");
+    assert!(ev.to_lowercase().contains("alpha"), "whose value is its own name: {ev}");
+
+    // `(value :invisible)`, which is exactly what ACL2 declines to print.
+    let inv = value_of(&mut s, "(acl2::thm (acl2::equal x x))");
+    assert!(inv.contains("vkind none"), "an invisible value is withheld: {inv}");
+
+    // And none of this reaches the form's own captured output.
+    let sub = s.submit("(acl2::+ 1 2)", D).expect("submit");
+    assert!(!sub.output.contains("ASS-BEGIN"), "the probe does not pollute the log");
+    assert!(!sub.output.contains("vkind"), "nor leak its keys: {}", sub.output);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The file-prefix invariant, end to end.
 #[test]
 #[ignore = "needs ACL2"]

@@ -736,6 +736,11 @@ pub struct EvalReply {
     pub warnings: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time: Option<String>,
+    /// What the form evaluated to. See `UnitEvent::value`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(skip_serializing_if = "is_false")]
+    pub value_triple: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hint_events: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -827,6 +832,20 @@ pub struct UnitEvent {
     /// `(prove print proof-tree other)`, in seconds, as ACL2 prints it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time: Option<String>,
+    /// What the form evaluated to, as ACL2 printed it.
+    ///
+    /// Absent when there is nothing to show, which is ACL2's own judgement
+    /// rather than ours: a triple whose error component is non-nil or whose
+    /// value is `:invisible` prints nothing at the REPL and yields nothing
+    /// here. Also absent when the value only repeats a name the form
+    /// introduced, since that name is already the event's own heading.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// Whether that value came back as an error triple rather than a single
+    /// value. Carried because it is free and because ACL2 marks the
+    /// distinction itself; no client is obliged to show it.
+    #[serde(skip_serializing_if = "is_false")]
+    pub value_triple: bool,
     /// Hints that fired -- "did my hint do anything" without the log.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hint_events: Vec<String>,
@@ -1138,6 +1157,8 @@ pub fn unit_admitted(book: &str, revision: u64, u: &UnitReport) -> UnitEvent {
         prover_steps: u.event_data.prover_steps,
         warnings: join_warnings(&u.event_data.warnings),
         time: u.event_data.time.clone(),
+        value: u.value.as_ref().map(|v| laid(&v.text)),
+        value_triple: u.value.as_ref().is_some_and(|v| v.triple),
         hint_events: u.event_data.hint_events.clone(),
         splitter_rules: u.event_data.splitter_rules.clone(),
         rules: u.event_data.rules.clone(),
@@ -1190,6 +1211,11 @@ pub fn unit_failure(
         prover_steps: f.event_data.prover_steps,
         warnings: join_warnings(&f.event_data.warnings),
         time: f.event_data.time.clone(),
+        // A form that signalled an error halted the `ld` before the value
+        // probe could run, so there is nothing to carry here and never will
+        // be. See `VALUE_PROBE`.
+        value: None,
+        value_triple: false,
         hint_events: f.event_data.hint_events.clone(),
         splitter_rules: f.event_data.splitter_rules.clone(),
         rules: f.event_data.rules.clone(),
@@ -1229,6 +1255,8 @@ pub fn evaluated(r: &EvalResult) -> EvalReply {
         prover_steps: f.and_then(|f| f.event_data.prover_steps),
         warnings: f.and_then(|f| join_warnings(&f.event_data.warnings)),
         time: f.and_then(|f| f.event_data.time.clone()),
+        value: r.value.as_ref().map(|v| laid(&v.text)),
+        value_triple: r.value.as_ref().is_some_and(|v| v.triple),
         hint_events: f.map(|f| f.event_data.hint_events.clone()).unwrap_or_default(),
         splitter_rules: f.map(|f| f.event_data.splitter_rules.clone()).unwrap_or_default(),
         rules: f.map(|f| f.event_data.rules.clone()).unwrap_or_default(),

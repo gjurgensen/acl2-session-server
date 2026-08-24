@@ -558,6 +558,68 @@ fn reader_loop(fd: Arc<OwnedFd>, control: Arc<SessionControl>, epoch: u64, shutd
     }
 }
 
+
+/// What the form just evaluated to, asked of `ld` rather than read back out
+/// of what it printed.
+///
+/// Reading the printed value is not possible. `ld` prints a form's output and
+/// then its value with nothing between them, so a `cw` that prints one line
+/// and returns `nil` is indistinguishable from a form that printed nothing
+/// and returned that line -- and a form returning `:invisible` prints no
+/// value at all, leaving the last line of its *proof* looking like one.
+/// Measured: a `thm` ends with "Proof succeeded." and nothing else.
+///
+/// So this asks. `ld-history` is an `ld` special, rebound per call, and the
+/// user's form and this probe are consecutive forms of the *same* temp file
+/// and therefore the same `ld` -- which puts the user's form at the head of
+/// the history when this runs. The entry carries the value structurally,
+/// along with the `stobjs-out` that says how to read it.
+///
+/// The rule for what to show is ACL2's own, from :doc error-triple: a triple
+/// prints nothing when its error component is non-nil or its value component
+/// is `:invisible`, and otherwise prints just the value. Adopting it verbatim
+/// means a reader sees exactly what the REPL would have shown them. Note it
+/// is narrower than it looks -- `:invisible` is special only *for a triple*,
+/// so a form whose ordinary value happens to be that keyword still shows it.
+///
+/// The error component is unreachable in practice and is handled anyway: a
+/// form that signals one halts the `ld` under `:ld-error-action :return!`, so
+/// this probe never runs and the block is simply absent.
+///
+/// Nothing here can fail into the submission's own failure path. Everything
+/// is guarded on the history being a cons, and it runs before the OK marker,
+/// so a form that never reached it is reported exactly as it is now.
+///
+/// **Placed by the caller, immediately after the user's form.** It reads the
+/// *head* of the history, so anything between the two is what it would
+/// report instead -- and a submission is not just the user's form: `sync`
+/// appends the event-data and inner-event probes, a `deflabel` and the
+/// command probe to every one of them. Putting this at the end of the file
+/// read the command probe's value on every unit, which is what the daemon's
+/// wire test caught.
+pub const VALUE_PROBE: &str = "(acl2::let* \
+  ((acl2::hst (acl2::@ acl2::ld-history)) \
+   (acl2::ent (acl2::and (acl2::consp acl2::hst) (acl2::car acl2::hst))) \
+   (acl2::so (acl2::and acl2::ent \
+                (acl2::ld-history-entry-stobjs-out acl2::ent))) \
+   (acl2::raw (acl2::and acl2::ent (acl2::ld-history-entry-value acl2::ent))) \
+   (acl2::trip (acl2::equal acl2::so '(acl2::nil acl2::nil acl2::state))) \
+   (acl2::erp (acl2::and acl2::trip (acl2::car acl2::raw))) \
+   (acl2::val (acl2::if acl2::trip (acl2::cadr acl2::raw) acl2::raw)) \
+   (acl2::hide (acl2::or (acl2::not acl2::ent) \
+                         (acl2::and acl2::erp acl2::t) \
+                         (acl2::and acl2::trip \
+                                    (acl2::eq acl2::val :invisible))))) \
+  (acl2::prog2$ \
+    (acl2::cw \"~%<<<ASS-BEGIN value>>>~%vkind ~x0~%\" \
+      (acl2::if acl2::hide 'acl2::none \
+        (acl2::if acl2::trip 'acl2::triple 'acl2::value))) \
+    (acl2::prog2$ \
+      (acl2::if acl2::hide 0 (acl2::cw \"~x0~%\" acl2::val)) \
+      (acl2::prog2$ (acl2::cw \"<<<ASS-END value>>>~%\") \
+                    (acl2::value :invisible)))))
+";
+
 impl Session {
     /// Start ACL2 with its working directory set to `book_dir`.
     ///

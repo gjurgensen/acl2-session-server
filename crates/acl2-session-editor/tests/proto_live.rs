@@ -1495,6 +1495,58 @@ fn a_target_moved_back_retracts_without_an_edit() {
     assert_eq!(k["found"], true, "and the form before the target is still in it: {k}");
 }
 
+/// A form's value reaches the wire, and only when it says something.
+///
+/// The three outcomes the core decides between, checked here at the layer
+/// the editor actually reads: an ordinary value is carried, an event's value
+/// is dropped because it only repeats the name the event already carries,
+/// and a value ACL2 itself declines to print never appears.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_forms_value_reaches_the_wire_when_it_says_something() {
+    let Some(acl2) = acl2() else {
+        eprintln!("ACL2 not set; skipping");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("acl2-editord-value-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let book_path: PathBuf = dir.join("value.lisp");
+    let text = "(in-package \"ACL2\")\n\
+                (+ 1 2)\n\
+                (defun one (x) x)\n\
+                (thm (equal x x))\n";
+    std::fs::write(&book_path, text).expect("write book");
+
+    let mut d = Daemon::start(&acl2);
+    let opened = d.request("open", json!({ "path": book_path.to_str().unwrap() }));
+    let book = opened["book"].as_str().expect("book id").to_string();
+    d.notify("update", json!({ "book": book, "text": text, "revision": 1 }));
+    let events = d.events_until_settled();
+
+    let value_at = |index: u64| -> Option<String> {
+        events
+            .iter()
+            .filter(|(m, p)| m == "unit" && p["index"] == index)
+            .find_map(|(_, p)| p["value"].as_str())
+            .map(str::to_string)
+    };
+
+    assert_eq!(value_at(1).as_deref(), Some("3"), "an ordinary value is carried");
+    assert_eq!(
+        value_at(2),
+        None,
+        "an event's value is only its own name, which its event already carries"
+    );
+    assert_eq!(
+        value_at(3),
+        None,
+        "and a thm returns :invisible, which ACL2 itself declines to print"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A form past the target is not queued for anything, and does not say it is.
 #[test]
 #[ignore = "needs ACL2"]
