@@ -492,21 +492,24 @@ ${SHARED_CSS}
 html, body { height: 100%; }
 body { padding: 2px 12px 12px; box-sizing: border-box; }
 #tailtext { max-height: 45vh; overflow: auto; }
-/* While a form is running the tail is the only thing on the page, so it
-   takes the pane instead of sitting in a fixed box with dead space under
-   it -- and the button, being after it, lands at the foot of the pane
-   rather than above the output it is offering an alternative to.
+/* While a form is running the log is the only thing on the page, so it gets
+   the pane rather than a fixed box with dead space under it.
+   Grown, not stretched: \`0 1 auto\` lets the log take its content's height
+   up to whatever is left, so a long proof fills the pane and scrolls while
+   a proof that has printed two lines is two lines tall. Stretching it with
+   \`flex: 1\` would fill the pane either way and leave the button stranded
+   at the foot of an empty box, when where it belongs is under the output.
    \`min-height: 0\` on both, or a flex child refuses to shrink below the
-   size of its content and the pane scrolls instead of the log. Only while
-   the fold is open: a closed one should stay its own height and let the
-   button rise. */
+   size of its content and the *pane* scrolls instead of the log. Only while
+   the fold is open: a closed one keeps its own height and the button rises
+   to meet it. */
 #root { min-height: 100%; }
 #root.running { display: flex; flex-direction: column; height: 100%; }
 #root.running details.tail[open] {
-  display: flex; flex-direction: column; flex: 1; min-height: 0;
+  display: flex; flex-direction: column; flex: 0 1 auto; min-height: 0;
 }
 #root.running details.tail[open] #tailtext {
-  flex: 1; min-height: 0; max-height: none;
+  flex: 0 1 auto; min-height: 0; max-height: none;
 }
 .openrow { margin: 8px 0 0; }
 </style>

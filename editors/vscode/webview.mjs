@@ -224,18 +224,22 @@ check(spans([[{ t: 'a', c: '' }], [{ t: 'b', c: '' }]]) === 'a\nb', 'and joins l
 
 // ---- the running form: the tail takes the pane ----
 //
-// While a form runs the log is the only thing on the page, so it fills the
-// pane rather than sitting in a fixed box. Both `min-height: 0` rules are
-// load-bearing -- without them a flex child will not shrink below its
-// content and the *pane* scrolls instead of the log, which looks like the
-// tail simply not working.
+// While a form runs the log is the only thing on the page, so it grows into
+// the pane rather than sitting in a fixed box. Grown and not stretched: the
+// button belongs under the output, and `flex: 1` would fill the pane even
+// when two lines had been printed and strand the button at the foot of an
+// empty box. Both `min-height: 0` rules are load-bearing -- without them a
+// flex child will not shrink below its content and the *pane* scrolls
+// instead of the log, which looks like the tail simply not working.
 
 {
   const page = pages[1][1];
   check(/#root\.running \{[^}]*display: flex/.test(page),
         'a running form lays its page out as a column');
-  check(/#root\.running details\.tail\[open\] \{[^}]*flex: 1;[^}]*min-height: 0/.test(page),
-        'the open tail fold takes the leftover room');
+  check(/#root\.running details\.tail\[open\] \{[^}]*flex: 0 1 auto;[^}]*min-height: 0/.test(page),
+        'the open tail fold grows into the leftover room without claiming it');
+  check(!/#root\.running[^}]*\{[^}]*flex: 1;/.test(page),
+        'and nothing stretches, which would strand the button under empty space');
   check(/#root\.running details\.tail\[open\] #tailtext \{[^}]*min-height: 0/.test(page),
         'and so does the log inside it, or the pane scrolls instead');
   check(/details\.tail\[open\]/.test(page) && !/details\.tail \{/.test(page),
