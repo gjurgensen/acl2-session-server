@@ -116,24 +116,6 @@ export interface FormNameRules {
   runes: FormRune[];
 }
 
-/** Why the prover inducted -- see `InductionWire`. */
-export interface FormInduction {
-  goal?: string;
-  suggestedBy?: string;
-  attribution?: string;
-  scheme?: string;
-  /**
-   * How long the scheme really is, when `scheme` is only its head.
-   *
-   * The daemon cuts it: a mutual recursion's scheme is the whole clique, and
-   * the one that started this arrived at 6.83 MB. Present means the page must
-   * say so rather than showing a term that stops without explanation.
-   */
-  schemeChars?: number;
-  justifiedBy?: string;
-  subgoals?: string;
-}
-
 export interface FormModel extends FormEnvelope {
   book: string;
   index: number;
@@ -150,13 +132,6 @@ export interface FormModel extends FormEnvelope {
   /** The paint status: `admitted`, `conditional`, `skipped`, `failed`, ... */
   status: string;
   skipped: boolean;
-}
-
-/** The strings in an induction record that are ACL2 code rather than prose. */
-function inductionStrings(records: FormInduction[]): string[] {
-  return records.flatMap((r) =>
-    [r.scheme, r.suggestedBy].filter((x): x is string => x !== undefined)
-  );
 }
 
 /**
@@ -284,8 +259,6 @@ export class FormView {
    */
   onCols?: (cols: number) => void;
 
-  private lastInduction?: { book: string; index: number; records: FormInduction[] };
-
   get visible(): boolean {
     return this.panel !== undefined;
   }
@@ -334,11 +307,11 @@ export class FormView {
 
   render(model: FormModel): void {
     this.model = model;
-    // The guard `rules` and `induction` carry, for the same reason and with
-    // more force: this post is the largest of the three. It carries the
-    // model, the induction narrative and the rules records together, and
-    // tokenizes all of them in one pass -- so a render that changes nothing
-    // is the most expensive way the form view can do nothing.
+    // The guard `rules` carries, for the same reason and with more force:
+    // this post is the larger of the two. It carries the model and the rules
+    // records together and tokenizes both in one pass -- so a render that
+    // changes nothing is the most expensive way the form view can do
+    // nothing.
     //
     // It is not a rare case. `onState` follows the form view on every state
     // event, and a form landing produces a burst of them while the form on
@@ -361,9 +334,8 @@ export class FormView {
   /**
    * Fill in what the form introduced.
    *
-   * Keyed by book and unit like the induction narrative, and for the same
-   * reason: the cursor may have moved on while this was being fetched, and
-   * detail for the form you have left is noise.
+   * Keyed by book and unit: the cursor may have moved on while this was
+   * being fetched, and detail for the form you have left is noise.
    */
   rules(book: string, index: number, entries: FormNameRules[]): void {
     const s = this.shown();
@@ -458,13 +430,6 @@ export class FormView {
         .getConfiguration('acl2-session')
         .get<number>('eventsOpenLimit', 4),
     };
-    // The narrative rides along rather than following in a second message.
-    // It used to follow, and the page replaces its token map on a model --
-    // so every state event rendered once with the scheme uncolored and again
-    // a moment later with it colored. That is the flicker.
-    const i = this.lastInduction;
-    const records =
-      i && i.book === model.book && i.index === model.index ? i.records : undefined;
     const u = this.lastRules;
     const entries =
       u && u.book === model.book && u.index === model.index
@@ -473,14 +438,9 @@ export class FormView {
     void this.panel?.webview.postMessage({
       kind: 'model',
       model: laid,
-      records,
       entries,
       toks: tokenizeAll(
-        [
-          ...highlightable(laid),
-          ...(records ? inductionStrings(records) : []),
-          ...(entries ? rulesStrings(entries) : []),
-        ],
+        [...highlightable(laid), ...(entries ? rulesStrings(entries) : [])],
         this.tokenizer
       ),
     });
@@ -491,41 +451,6 @@ export class FormView {
     if (s && s.book === book && s.index === unit) {
       void this.panel?.webview.postMessage({ kind: 'tail', elapsedMs, text });
     }
-  }
-
-  /**
-   * The induction narrative for the form on show.
-   *
-   * A separate message rather than a field of the model, because it is a
-   * second round trip: the form view renders as soon as the envelope arrives,
-   * and this fills in afterwards for the minority of forms that inducted.
-   */
-  induction(book: string, index: number, records: FormInduction[]): void {
-    const s = this.shown();
-    if (!s || s.book !== book || s.index !== index) {
-      return;
-    }
-    // The same guard `rules` carries, and for the same reason: a render
-    // replaces the whole page and resets every dropdown the reader has
-    // opened, so a post that would change nothing must not happen. The form view
-    // follows the cursor, and the same form arriving again is the common
-    // case rather than the rare one.
-    const l = this.lastInduction;
-    if (l && l.book === book && l.index === index && same(l.records, records)) {
-      return;
-    }
-    this.lastInduction = { book, index, records };
-    this.postInduction(this.lastInduction);
-  }
-
-  private postInduction(i: { book: string; index: number; records: FormInduction[] }): void {
-    void this.panel?.webview.postMessage({
-      kind: 'induction',
-      book: i.book,
-      index: i.index,
-      records: i.records,
-      toks: tokenizeAll(inductionStrings(i.records), this.tokenizer),
-    });
   }
 
   dispose(): void {
@@ -559,37 +484,19 @@ let model;
 // and a message the next render wiped would never be seen. Cleared when the
 // form view is held again.
 let note;
-let inductions = [];
 let ruleEntries = [];
 let rulesKey = '';
-// Which form the records belong to, so a re-render of the *same* form keeps
-// them. The form view re-renders on every state event, and clearing on each one
-// made the section blink out and back for the whole time a book was being
-// checked. No backticks in here: this comment lives inside a template
-// literal, and one would end the string.
-let inductionKey = null;
 
 window.addEventListener('message', (ev) => {
   const m = ev.data;
   if (m.kind === 'model') {
     model = m.model;
     toks = m.toks || {};
-    // A different form: whatever induction the last one did is not this
-    // one's. The same form again is just a refresh, and keeps it.
     const key = m.model.book + ':' + m.model.index;
     // Folds belong to a form. Arriving at a different one forgets them, the
-    // same as the induction and rules records below.
+    // same as the rules records below.
     foldScopeIs(key);
-    if (m.records) {
-      // Carried with the model, so this render has both the terms and their
-      // colors -- rendering once rather than twice is the whole point.
-      inductions = m.records;
-      inductionKey = key;
-    } else if (key !== inductionKey) {
-      inductions = [];
-      inductionKey = key;
-    }
-    // Same reasoning for what the form introduced: carried when it is known,
+    // What the form introduced rides with the model when it is known,
     // dropped when the form changed, kept when this is the same form again.
     if (m.entries) {
       ruleEntries = m.entries;
@@ -603,11 +510,6 @@ window.addEventListener('message', (ev) => {
     Object.assign(toks, m.toks || {});
     ruleEntries = m.entries || [];
     rulesKey = m.book + ':' + m.index;
-    render();
-  } else if (m.kind === 'induction') {
-    Object.assign(toks, m.toks || {});
-    inductions = m.records || [];
-    inductionKey = m.book + ':' + m.index;
     render();
   } else if (m.kind === 'note') {
     note = m.text;

@@ -36,14 +36,14 @@ import {
   UnitEvent,
   UnitState,
 } from './protocol';
-import { Envelope, InductionWire, RulesReply, RuneWire } from './protocol';
+import { Envelope, RulesReply, RuneWire } from './protocol';
 import { DecorationMode, Decorations } from './decorations';
 import { byteColumn, charOffset } from './positions';
 import { paintMap } from './paintmap';
 import { problemFor } from './bars';
 import { EVAL_SCHEME, OutputView, SCHEME } from './outputView';
 import { Highlighter } from './highlight';
-import { FormEnvelope, FormInduction, FormModel, FormNameRules, FormView } from './formView';
+import { FormEnvelope, FormModel, FormNameRules, FormView } from './formView';
 import { Console, ConsoleResult, HISTORY } from './console';
 import { DocView, plainSpans } from './docView';
 import { indentCommand, registerFormatting } from './formatting';
@@ -151,21 +151,6 @@ interface BookSession {
    * the only way what it introduced can change.
    */
   rulesByUnit: Map<number, FormNameRules[]>;
-  /**
-   * Why each unit inducted, once asked for.
-   *
-   * Cached for the reason `rulesByUnit` is -- the form view follows the cursor,
-   * so this is asked again on every selection change and every state event --
-   * and *more* than it is, because answering means reading the unit's whole
-   * captured log. One `defines` in `kestrel/c/syntax/validator.lisp` printed
-   * 490,000 lines and 20.9 MB of induction schemes; asking again per event is
-   * how a form view takes the editor down with it.
-   *
-   * The promise, not the records, so a burst of events makes one request.
-   * Dropped when the unit is admitted again, which is the only way what its
-   * log says can change.
-   */
-  inductionByUnit: Map<number, Promise<FormInduction[]>>;
   debounce?: ReturnType<typeof setTimeout>;
   /**
    * Resolves when the daemon has split the book for the first time.
@@ -1475,7 +1460,6 @@ async function startCommand(initial?: Held): Promise<void> {
       ready: undefined,
       unitEvents: new Map(),
       rulesByUnit: new Map(),
-      inductionByUnit: new Map(),
       evalQueue: [],
       evalReplies: new Map(),
     };
@@ -2043,10 +2027,8 @@ function onUnit(p: UnitEvent): void {
     s.runningUnit = undefined;
     s.runningRef = undefined;
   }
-  // Re-admitted: whatever it introduced, and whatever its log says about
-  // why it inducted, may be different now.
+  // Re-admitted: whatever it introduced may be different now.
   s.rulesByUnit.delete(p.index);
-  s.inductionByUnit.delete(p.index);
   if (outputView.shownBook === s.id && outputView.shownUnit === p.index) {
     void showUnitOutput(s, p.index);
   }
@@ -2382,7 +2364,6 @@ function setLayout(cols: number): void {
   client?.notify('layout', { cols });
   for (const s of books.values()) {
     s.rulesByUnit.clear();
-    s.inductionByUnit.clear();
   }
   const shown = formView.shown();
   const s = shown && byId.get(shown.book);
@@ -2543,7 +2524,6 @@ async function followFormView(s: BookSession, index?: number): Promise<void> {
   const model = buildFormModel(s, at);
   if (model) {
     formView.render(model);
-    void followInduction(s, at);
     void followRules(s, at);
   }
 }
@@ -2552,9 +2532,9 @@ async function followFormView(s: BookSession, index?: number): Promise<void> {
  * Fill in what the form introduced.
  *
  * One request per name the form's events recorded, answered from the scrape
- * the daemon took as the form was admitted -- so unlike the log-reading
- * `induction` this needs no prover and returns during a proof, which is when
- * a reader is most likely to be looking at an earlier form.
+ * the daemon took as the form was admitted -- so this needs no prover and
+ * returns during a proof, which is when a reader is most likely to be looking
+ * at an earlier form.
  *
  * Names come from the unit's inner events, which is what "inside this form"
  * means for anything macro-generated: a `define` records the function and
@@ -2611,82 +2591,6 @@ async function followRules(s: BookSession, index: number): Promise<void> {
     // indistinguishable from a form that introduced less.
     channel.appendLine(`rules: form ${index} could not be read (${err})`);
   }
-}
-
-/**
- * Fill in why the form inducted, if it did.
- *
- * Gated on the envelope rather than always asked: ACL2 records the
- * `:induction` rune structurally in `rules`, so the cheap fact decides
- * whether to pay for the expensive one -- which reads the whole captured log.
- * Most forms never induct, and this keeps the form view free for them.
- */
-async function followInduction(s: BookSession, index: number): Promise<void> {
-  const e = s.unitEvents.get(index);
-  // Both places, and the second is the one that matters. A macro that
-  // expands to a `defthm` -- `defrule`, `define`, most of std -- records its
-  // runes against the *inner* event, leaving the form's own `rules` empty.
-  // Checking only the outer list missed every such form, which is to say
-  // most real books.
-  const runes = [...(e?.rules ?? []), ...(e?.inner ?? []).flatMap((i) => i.rules ?? [])];
-  if (!e || !runes.some((r) => r.toLowerCase().includes(':induction'))) {
-    return;
-  }
-  // Cached like `rules`, and dropped by the same event for the same reason:
-  // re-admission is the only thing that can change what this unit's log says.
-  //
-  // The *promise* rather than the records, which is the part `rulesByUnit`
-  // gets wrong and gets away with. A memo filled in after the await is empty
-  // for every caller that arrives before the first reply, and callers arrive
-  // in bursts -- fifteen `state` events landed in the six seconds after one
-  // `defines` was admitted, each one re-rendering the form on show. At 50 KB
-  // a reply that is invisible; reading a half-million-line log fifteen times
-  // over is not. Storing the promise makes the burst one request.
-  let pending = s.inductionByUnit.get(index);
-  if (!pending) {
-    pending = readInduction(s, index, e.output_ref);
-    s.inductionByUnit.set(index, pending);
-  }
-  try {
-    const records = await pending;
-    // Keyed by book and unit: the cursor may have moved on while the log was
-    // being read, and a narrative for the form you have left is noise.
-    formView.induction(s.id, index, records);
-  } catch (err) {
-    // Not cached, so the next look asks again -- a failed read is a fault to
-    // retry, not an answer to remember.
-    s.inductionByUnit.delete(index);
-    // Best effort in the form view, but not silent: swallowing this hid a real
-    // fault once already.
-    channel.appendLine(`induction: form ${index} could not be read (${err})`);
-  }
-}
-
-/** Read one unit's log and recover the narrative. One request, no caching. */
-async function readInduction(
-  s: BookSession,
-  index: number,
-  ref: string
-): Promise<FormInduction[]> {
-  const r = await client?.request('induction', { book: s.id, output_ref: ref });
-  const wire = (r?.inductions ?? []) as InductionWire[];
-  if (wire.length === 0) {
-    // The form inducted -- a rune says so -- and the log yielded nothing.
-    // That is either an ACL2 wording this does not know or a bug here, and
-    // both are worth a line rather than silence.
-    channel.appendLine(
-      `induction: form ${index} has an :induction rune but its log parsed to nothing`
-    );
-  }
-  return wire.map((i) => ({
-    goal: i.goal,
-    suggestedBy: i.suggested_by,
-    attribution: i.attribution,
-    scheme: i.scheme,
-    schemeChars: i.scheme_chars,
-    justifiedBy: i.justified_by,
-    subgoals: i.subgoals,
-  }));
 }
 
 function buildFormModel(s: BookSession, index: number): FormModel | undefined {
