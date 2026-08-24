@@ -178,6 +178,29 @@ check(
 );
 check(spans([[{ t: 'a', c: '' }], [{ t: 'b', c: '' }]]) === 'a\nb', 'and joins lines with newlines');
 
+// ---- `statusLabel`: the word on the chip ----
+//
+// The chips stopped echoing the wire because `admitted` is wrong for a form
+// that was evaluated rather than defined, and the console had already needed
+// a second word for the same state. What matters is that the map is total:
+// every status the stylesheet paints must come out as something, and a
+// status it has never heard of must come out as itself.
+
+{
+  const statusLabel = lift('statusLabel');
+  check(statusLabel('admitted') === 'success', 'an admitted form reads as a success');
+  check(statusLabel('ok') === 'success', 'and so does an eval, which the wire calls ok');
+  check(statusLabel('failed') === 'failed', 'the rest keep the word they already had');
+  check(statusLabel('gubbins') === 'gubbins',
+        'and a status from a newer daemon renders as itself, not as nothing');
+  for (const st of ['admitted', 'ok', 'conditional', 'skipped', 'failed',
+                    'running', 'queued', 'pending', 'beyond']) {
+    const got = statusLabel(st);
+    check(!!got && got === got.toLowerCase(),
+          `${st} has a lowercase label (${got})`);
+  }
+}
+
 // ---- folds: what the reader opened, surviving the next render ----
 //
 // A render replaces the page's markup, so `open` on a `<details>` is gone

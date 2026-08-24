@@ -167,6 +167,25 @@ function bindFolds(root) {
   }, true);
 }
 
+/**
+ * What a status is called, where a reader can see it.
+ *
+ * The chips stopped echoing the wire, and not for taste: \`admitted\` is
+ * simply wrong for half of what it covers -- \`(+ 1 2)\` is not admitted, it
+ * is evaluated -- and the console had already needed a second word,
+ * \`ok\`, for the same green state, which is why the stylesheet still
+ * carries the two class names as a pair. Both land on one label here.
+ *
+ * Total on purpose, with anything unrecognized falling through to the wire's
+ * own word: a status the daemon grows next should render as itself rather
+ * than as nothing. Lowercase throughout, matching the rest of the surface.
+ */
+function statusLabel(status) {
+  const s = String(status);
+  if (s === 'admitted' || s === 'ok') { return 'success'; }
+  return s;
+}
+
 function codes(list) {
   return '<p class="codes">' +
     list.map((r) => '<code class="lisp">' + hl(r) + '</code>').join('') + '</p>';

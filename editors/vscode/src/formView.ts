@@ -141,8 +141,9 @@ export interface FormModel extends FormEnvelope {
   lineStart: number;
   lineEnd: number;
   /**
-   * The form's columns, shown only when they say something: a form starting
-   * in column 1 is the only one on its line, and the lines alone name it.
+   * The form's columns. Not rendered -- they identify the form for the
+   * extension's own bookkeeping, which is the job they were always doing
+   * underneath the line-and-column line the header used to carry.
    */
   colStart: number;
   colEnd: number;
@@ -719,12 +720,12 @@ function render() {
     return;
   }
   let h = note ? '<div class="notice">' + esc(note) + '</div>' : '';
+  // The chip, and what the form cost. Neither the coordinates nor the
+  // position in the book earned their place: a reader looking at this panel
+  // has the form under their cursor, and the events below name it better than
+  // an ordinal could.
   h += '<div class="h">' +
-    '<span class="status ' + esc(m.status) + '">' + esc(m.status) + '</span>' +
-    '<span>form ' + (m.index + 1) + '/' + m.total + '</span>' +
-    '<span class="meta">lines ' + (m.colStart === 1
-      ? m.lineStart + '\\u2013' + m.lineEnd
-      : m.lineStart + ':' + m.colStart + '\\u2013' + m.lineEnd + ':' + m.colEnd) + '</span>';
+    '<span class="status ' + esc(m.status) + '">' + esc(statusLabel(m.status)) + '</span>';
   if (m.elapsedMs != null) {
     h += '<span class="meta">' + (m.elapsedMs / 1000).toFixed(m.elapsedMs < 10000 ? 1 : 0) + 's</span>';
   }

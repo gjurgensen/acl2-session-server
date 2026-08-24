@@ -359,7 +359,8 @@ function entryHtml(e) {
   const secs = r && r.elapsedMs != null
     ? (r.elapsedMs / 1000).toFixed(r.elapsedMs < 10000 ? 1 : 0) + 's'
     : e.elapsedMs != null ? Math.round(e.elapsedMs / 1000) + 's' : '';
-  let head = '<summary><span class="status ' + esc(chip) + '">' + esc(chip) + '</span>' +
+  let head = '<summary><span class="status ' + esc(chip) + '">' +
+    esc(statusLabel(chip)) + '</span>' +
     '<span class="sform lisp">' + hl(e.form) + '</span>' +
     '<span class="meta">' + esc(secs) + '</span>';
   if (r && r.worldChange && r.worldChange !== 'none') {
