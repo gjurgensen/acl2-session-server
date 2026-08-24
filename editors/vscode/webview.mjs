@@ -424,7 +424,17 @@ const envelope = lift('esc', 'strip', 'causes', 'spans', 'hl', 'rat',
     check(/<td class="meta" colspan="2">corollary<\/td>/.test(many),
           'a multi-line term puts its label on its own line');
     check(/<td colspan="2" class="blockrow"><pre>/.test(many),
-          'and the block full width below, where the rule down its edge fits');
+          'and the block full width below, under the label that names it');
+  }
+  // A field value carries no rule down its edge, at any length: the label is
+  // the structure. The rule is for a standalone block -- a checkpoint, the
+  // value, the tail -- which this asserts the stylesheet still marks.
+  {
+    const { SHARED_CSS } = require('./out/webviewParts.js');
+    check(/td\.blockrow pre \{[^}]*border-left: 0/.test(SHARED_CSS),
+          'a field block loses the rule the label already stands in for');
+    check(/^pre \{[^}]*border-left: 2px/m.test(SHARED_CSS),
+          'while a standalone block keeps it');
   }
   check((h.match(/data-fold="g-ev:[^":]*"/g) || []).length === 2,
         'an event with nothing to show gets no fold');

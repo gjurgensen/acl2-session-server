@@ -108,7 +108,12 @@ ul.rules { list-style: none; margin: 3px 0 0; padding: 0; }
 ul.rules > li { padding: 1px 0; }
 ul.rules table.inner { margin: 2px 0 5px 14px; }
 td.blockrow { padding: 0 0 3px; }
-td.blockrow pre { margin: 2px 0 4px; }
+/* A field's own value carries no rule, however many lines it runs to. The
+   label above it is already the structure; the rule is what a *standalone*
+   block gets -- a checkpoint, the value, the live log -- where nothing else
+   bounds it. So the mark comes to mean "a top-level block of ACL2 output"
+   rather than "code that happened to wrap". */
+td.blockrow pre { margin: 2px 0 4px; border-left: 0; padding-left: 0; }
 .cp { margin: 8px 0; }
 details > summary { cursor: pointer; }
 details > summary h3 { display: inline; }
