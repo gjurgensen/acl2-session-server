@@ -65,8 +65,15 @@ body { font-family: var(--vscode-font-family); color: var(--vscode-foreground);
 h3 { margin: 14px 0 4px; font-size: 11px; text-transform: uppercase;
      letter-spacing: 0.05em; opacity: 0.75; }
 pre, code { font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; }
-pre { background: var(--vscode-textCodeBlock-background); padding: 6px 8px;
-      border-radius: 4px; overflow: auto; margin: 4px 0; white-space: pre-wrap; }
+/* A block of ACL2's own text -- a checkpoint term, the live log, a value --
+   marked by a rule down its left edge rather than by a filled slab. The
+   slab read as heavy against a panel that is mostly code already, and three
+   of them in one failure made the page look built out of boxes. The rule
+   says the same thing (this is one block, and it is ACL2 speaking) at a
+   fraction of the weight, and keeps working when several sit in a row. */
+pre { background: none; margin: 4px 0; padding: 1px 0 1px 10px;
+      border-left: 2px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+      overflow: auto; white-space: pre-wrap; }
 /* Override the webview default: its light chip behind inline code is
    unreadable on dark themes. A faint neutral chip with the theme
    foreground works on both. */
