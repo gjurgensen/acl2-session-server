@@ -156,10 +156,13 @@ details.event > summary, .event.bare .esum { padding: 5px 8px; }
 /* On its own line: a signature and four facts do not fit beside each other
    in a pane this narrow, and wrapping them mid-phrase reads worse. */
 .efacts { display: block; margin-top: 2px; }
-/* A rule that exists but is off. Red because it is the field most likely to
-   explain a proof that did not fire. */
+/* A rule that exists but is off. Blue, not red: a disabled rule is a fact
+   worth surfacing -- it is the field most likely to explain a proof that did
+   not fire -- but it is a state, not a fault, and red reads as something
+   having gone wrong. The same blue the running chip uses, to stay within the
+   palette. */
 .off {
-  background: rgba(198, 40, 40, 0.25); border-radius: 3px; padding: 0 5px;
+  background: rgba(90, 140, 210, 0.3); border-radius: 3px; padding: 0 5px;
   font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em;
   margin-left: 5px;
 }
