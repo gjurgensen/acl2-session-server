@@ -73,6 +73,18 @@ pre { background: var(--vscode-textCodeBlock-background); padding: 6px 8px;
 code { background-color: rgba(128, 128, 128, 0.14);
        color: var(--vscode-foreground); padding: 0 4px; border-radius: 3px; }
 pre code { background: none; padding: 0; }
+/* The chip is for a token being called out on its own -- an abort cause, a
+   name in a sentence. It is not for the places that are *made* of code: a
+   rule per line, a table of a rule's fields, the name and signature at the
+   head of an event. Left on there, every one of them became a grey pill and
+   the shading stopped meaning anything, since what it is supposed to mark is
+   a block of ACL2's own text you might select as a unit -- a checkpoint, the
+   live tail -- and those are pre blocks, which keep it. */
+ul.rules code,
+table.inner code,
+details.event > summary code,
+.event.bare .esum code,
+.failed-what code { background: none; padding: 0; }
 button { background: var(--vscode-button-secondaryBackground);
          color: var(--vscode-button-secondaryForeground); border: none;
          padding: 2px 9px; border-radius: 3px; cursor: pointer; font-size: 11px; }

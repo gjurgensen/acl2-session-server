@@ -205,6 +205,15 @@ check(spans([[{ t: 'a', c: '' }], [{ t: 'b', c: '' }]]) === 'a\nb', 'and joins l
   check(/details\[data-fold\]/.test(SHARED_CSS),
         'scoped to the folds, so the console keeps its own summaries');
 
+  // The shading has one job: marking a block of ACL2's own text you might
+  // select as a unit. Left on every inline `code`, a rule list became a
+  // stack of grey pills and the mark stopped marking anything.
+  check(/ul\.rules code,[\s\S]*?\{ background: none/.test(SHARED_CSS),
+        'the places made of code carry no chip behind them');
+  check(/\.body pre \{[^}]*background: var\(--vscode-textCodeBlock-background\)/
+          .test(SHARED_CSS) || /^pre \{[^}]*background:/m.test(SHARED_CSS),
+        'while a pre block keeps its own, which is what the shading is for');
+
   for (const [what, page] of pages) {
     check(page.includes('%%CODICON%%'), `${what} carries the font placeholder`);
     check(/font-src %%CSPSOURCE%%/.test(page), `${what} allows the font in its CSP`);
