@@ -45,18 +45,39 @@ button:hover { background: var(--vscode-button-secondaryHoverBackground); }
    red in here already means a form went red. */
 .notice { border-left: 3px solid var(--vscode-focusBorder, #888); padding: 4px 9px;
           margin: 8px 0; font-size: 12px; opacity: 0.85; }
-.rules code, .codes code { display: inline-block; margin: 1px 5px 1px 0; }
+/* Rules one per line, the way :pr prints them. No chip behind each: the
+   line break delimits them, which is all the chip was ever doing. */
+ul.rules { list-style: none; margin: 3px 0 0; padding: 0; }
+ul.rules > li { padding: 1px 0; }
+ul.rules table.inner { margin: 2px 0 5px 14px; }
 .cp { margin: 8px 0; }
 details > summary { cursor: pointer; }
 details > summary h3 { display: inline; }
 table.inner { border-collapse: collapse; font-size: 12px; }
 table.inner td { padding: 1px 10px 1px 0; vertical-align: baseline; }
 .failtag { color: var(--vscode-terminal-ansiRed, #cc6666); font-weight: 600; }
-/* The second-level row under an event: indented under its own name, and
-   given room to breathe, because what is in it is paragraphs rather than a
-   cell. */
-td.detail { padding: 0 0 6px 12px; }
-td.detail table.inner { margin: 2px 0; }
+/* One event a form recorded. Classed "event" and not "ev": the console
+   already uses "ev" for a whole eval entry, and these pages share a
+   stylesheet. */
+details.event, .event.bare {
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border-radius: 4px; margin: 6px 0;
+}
+details.event > summary, .event.bare .esum { padding: 5px 8px; }
+.einside { padding: 2px 9px 8px 20px; }
+.ekind { font-size: 11px; opacity: 0.65; margin-right: 6px; }
+.ename { font-weight: 600; }
+/* On its own line: a signature and four facts do not fit beside each other
+   in a pane this narrow, and wrapping them mid-phrase reads worse. */
+.efacts { display: block; margin-top: 2px; }
+/* A rule that exists but is off. Red because it is the field most likely to
+   explain a proof that did not fire. */
+.off {
+  background: rgba(198, 40, 40, 0.25); border-radius: 3px; padding: 0 5px;
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em;
+  margin-left: 5px;
+}
+.failed-what { margin: 10px 0 2px; }
 `;
 
 /**
@@ -186,10 +207,6 @@ function statusLabel(status) {
   return s;
 }
 
-function codes(list) {
-  return '<p class="codes">' +
-    list.map((r) => '<code class="lisp">' + hl(r) + '</code>').join('') + '</p>';
-}
 
 // A length of ACL2 text, said the way a reader would say it. Only ever used
 // to explain that something was cut, so the units are the ones that make the
@@ -246,164 +263,285 @@ function guardNote(c) {
   return '';
 }
 
+/** A term inline when it fits on one line, in a block when it does not. */
+function termHtml(t) {
+  return String(t).includes('\\n')
+    ? '<pre>' + hl(t) + '</pre>'
+    : '<code class="lisp">' + hl(t) + '</code>';
+}
+
+function kvRow(label, value) {
+  return '<tr><td class="meta">' + esc(label) + '</td><td>' + value + '</td></tr>';
+}
+
 /**
- * What one name a form introduced actually is, in the world.
+ * What a name turned out to be -- the part of it that is not in the buffer.
  *
- * Almost none of it is in the buffer: the guard and measure ACL2 worked out,
- * the left-hand side a rewrite rule will match, the trigger a
- * forward-chaining rule waits for, the four runes a defun adds without being
- * asked. Fields arrive in ACL2's own order and keep its keys, so nothing
- * here has to know what a given rule class carries. The definition rune's
- * body is deliberately absent -- that part *is* in the buffer, a few lines
- * above.
+ * The guard and measure ACL2 worked out, the relation the measure decreases
+ * under, the statement of a theorem. Not the rules it wrote: those are a
+ * list rather than a fact about the name, and they get their own fold.
  */
-function nameDetail(d) {
-  const row = (label, value) =>
-    '<tr><td class="meta">' + esc(label) + '</td><td>' + value + '</td></tr>';
-  // A term goes in a pre when it has to wrap; short ones read better inline.
-  const term = (t) =>
-    String(t).includes('\\n')
-      ? '<pre>' + hl(t) + '</pre>'
-      : '<code class="lisp">' + hl(t) + '</code>';
+function nameFacts(d) {
   let rows = '';
-  if (d.guard) { rows += row('guard', term(d.guard)); }
-  if (d.measure) { rows += row('measure', term(d.measure)); }
-  if (d.relation) { rows += row('decreasing under', term(d.relation)); }
-  if (d.statement) { rows += row('statement', term(d.statement)); }
-  let h = rows ? '<table class="inner">' + rows + '</table>' : '';
-  h += (d.runes || []).map((u) => {
-    // The enabled flag first: a rule that exists but is off explains a proof
-    // that does not fire far more often than any of its other fields.
-    const off = u.enabled === false ? ' <span class="status failed">disabled</span>' : '';
+  if (d.guard) { rows += kvRow('guard', termHtml(d.guard)); }
+  if (d.measure) { rows += kvRow('measure', termHtml(d.measure)); }
+  if (d.relation) { rows += kvRow('decreasing under', termHtml(d.relation)); }
+  if (d.statement) { rows += kvRow('statement', termHtml(d.statement)); }
+  return rows ? '<table class="inner">' + rows + '</table>' : '';
+}
+
+/**
+ * The rules an event added to the world.
+ *
+ * One per line, the way :pr prints them, because a single event can write
+ * dozens and a wrapped row of them reads as one long rule. A rule that
+ * exists but is *off* says so first: nothing in the source shows it, and it
+ * explains a later proof not firing more often than any other field. That
+ * is not a corner case -- a plain std::define, measured, disables two of the
+ * four rules it writes.
+ *
+ * A rule with no fields under it is not a gap in the scrape. :pr prints
+ * nothing at all for :executable-counterpart or :induction, and the
+ * definition rune's body is deliberately absent, since that part *is* in the
+ * buffer a few lines above.
+ */
+function introducedHtml(d) {
+  return '<ul class="rules">' + (d.runes || []).map((u) => {
+    const off = u.enabled === false ? ' <span class="off">disabled</span>' : '';
     const fs = (u.fields || [])
-      .map((f) => row(f.key.replace(/^:/, ''), term(f.value))).join('');
-    return '<div class="cp"><div><code class="lisp">' + hl(u.rune) + '</code>' + off + '</div>' +
-      (fs ? '<table class="inner">' + fs + '</table>' : '') + '</div>';
-  }).join('');
+      .map((f) => kvRow(f.key.replace(/^:/, ''), termHtml(f.value))).join('');
+    return '<li><code class="lisp">' + hl(u.rune) + '</code>' + off +
+      (fs ? '<table class="inner">' + fs + '</table>' : '') + '</li>';
+  }).join('') + '</ul>';
+}
+
+/** The rules a proof consumed -- the other direction from introducedHtml. */
+function usedHtml(rules) {
+  return '<ul class="rules">' +
+    rules.map((r) => '<li><code class="lisp">' + hl(r) + '</code></li>').join('') +
+    '</ul>';
+}
+
+/**
+ * One event a form recorded, as a block of its own.
+ *
+ * The probe reads event-data-fal, which records *every* event, so a plain
+ * defun arrives here exactly as a defines does and there is no
+ * simple-against-compound case to write. The summary carries what a reader
+ * would otherwise have opened the block to find -- what it cost, whether its
+ * guards were verified, how many rules it wrote and how many of those are
+ * off. The block carries what is written nowhere in the source.
+ *
+ * Introduced against used is the distinction the two folds exist for, and
+ * they run in opposite directions: what the event added to the world, and
+ * what its proof consumed to get admitted. A defun that writes four rules
+ * and uses one is the case that makes it plain.
+ */
+function eventHtml(e, p, openByDefault) {
+  const d = e.detail;
+  // A probed event has *something* -- kind, time, rules. Saying "no steps"
+  // where the probe never reached is a claim we cannot make, so a blank cell
+  // keeps meaning "not looked at".
+  const probed = !!(e.kind || e.time || (e.rules || []).length ||
+                    e.proverSteps != null || d);
+  const facts = [];
+  const secs = proveSecs(e.time);
+  if (secs) { facts.push('prove ' + secs); }
+  if (e.proverSteps != null) {
+    facts.push(e.proverSteps + ' steps');
+  } else if (probed) {
+    facts.push('<span title="the prover was not entered">no steps</span>');
+  }
+  const note = d ? guardNote(d.symbolClass) : '';
+  if (note) { facts.push(note); }
+  const runes = d ? (d.runes || []) : [];
+  const off = runes.filter((u) => u.enabled === false).length;
+  if (runes.length) {
+    facts.push(runes.length + ' rule' + (runes.length === 1 ? '' : 's') +
+               (off ? ', ' + off + ' off' : ''));
+  }
+  const used = e.rules || [];
+
+  let body = d ? nameFacts(d) : '';
+  if (runes.length) {
+    body += fold(p + 'ev:' + e.name + ':introduced', true,
+      '<span class="meta">introduced \\u2014 ' + runes.length +
+        ' rule' + (runes.length === 1 ? '' : 's') +
+        (off ? ', ' + off + ' disabled' : '') + '</span>',
+      introducedHtml(d));
+  }
+  if (used.length) {
+    body += fold(p + 'ev:' + e.name + ':used', false,
+      '<span class="meta">used \\u2014 ' + used.length +
+        ' rule' + (used.length === 1 ? '' : 's') + '</span>',
+      usedHtml(used));
+  }
+
+  // The formals sit beside the name because together they are the signature,
+  // which is what a reader looking a function up came for -- and for a
+  // macro-generated one there is nothing in the buffer to read it off.
+  const head = '<span class="ekind">' + esc(e.kind || '') + '</span>' +
+    '<code class="ename">' + esc(e.name) + '</code>' +
+    (d && d.formals ? ' <code class="lisp">' + hl(d.formals) + '</code>' : '') +
+    causes(e.abortCauses || '')
+      .map((c) => ' <span class="failtag">' + esc(c) + '</span>').join('') +
+    (facts.length ? '<span class="efacts meta">' + facts.join(' \\u00b7 ') + '</span>' : '');
+
+  // An event with nothing under it gets no fold: a chevron that opens onto
+  // nothing is worse than no chevron.
+  return body
+    ? fold(p + 'ev:' + e.name, openByDefault, head,
+           '<div class="einside">' + body + '</div>', 'event')
+    : '<div class="event bare"><div class="esum">' + head + '</div></div>';
+}
+
+/**
+ * A form that produced something: its events, in the order the source has
+ * them.
+ *
+ * The wire sends them newest first, which is how the event data is kept and
+ * the wrong way to read it -- a define writes its function before the
+ * theorems about it, and someone following the form from the top wants the
+ * same order the buffer has.
+ */
+function productiveHtml(m, p) {
+  const inner = (m.inner || []).slice().reverse();
+  if (!inner.length) { return ''; }
+  const total = m.innerTotal != null && m.innerTotal > inner.length
+    ? inner.length + ' shown of ' + m.innerTotal
+    : String(inner.length);
+  // Open by default only while there are few enough to read past. The
+  // defines in kestrel/c/syntax/validator.lisp records 620 events, and 620
+  // open blocks is a page that cannot be scrolled.
+  const limit = m.eventsOpenLimit != null ? m.eventsOpenLimit : 4;
+  const openByDefault = inner.length <= limit;
+  let h = '<h3>Events (' + total + ')</h3>';
+  h += inner.map((e) => eventHtml(e, p, openByDefault)).join('');
+  const detailed = inner.filter(
+    (e) => e.kind || e.time || e.proverSteps != null || (e.rules || []).length || e.detail
+  ).length;
+  if (detailed < inner.length) {
+    h += '<p class="meta">detail (kind, time, steps, rules) is probed for the first ' +
+      detailed + ' events; the rest are names only.</p>';
+  }
   return h;
 }
 
 /**
- * What ACL2 had to say about one form: why it failed, what it warned about,
- * what fired, what it used, and what was inside it. A file's form and an
- * eval'd one carry the same fields, so this renders either.
+ * A form that failed: what failed, then the goals, then what explains them.
  *
- * \`p\` prefixes the ids of the per-goal output slots, and \`on\` names the
- * command a goal button posts -- a page may hold several envelopes at once,
- * and their slots must not collide.
+ * The abort cause is last on purpose. In practice it is nearly always
+ * induction-depth-limit-exceeded, the fix is nearly never the depth limit,
+ * and the first thing anyone does with a failed proof is read the subgoals.
+ * Nothing above it is left empty when the form never reached the prover:
+ * the top slot is the *name* of what failed, and for a translate error or a
+ * name clash that name and the error line are the whole story.
+ *
+ * Naming what failed is not decoration. A define expands to a progn, so its
+ * checkpoints mention the return variable and never mention the theorem --
+ * without the name a reader goes looking at the function.
  */
-function envelope(m, p, on) {
+function failureHtml(m, p, on) {
   let h = '';
-  if (m.errorLine || m.abortCause || (m.checkpoints || []).length) {
-    h += '<h3>Failure</h3>';
-    if (m.errorLine) { h += '<pre>' + esc(m.errorLine) + '</pre>'; }
-    if (m.abortCause) {
-      const cs = causes(m.abortCause);
-      h += '<p class="meta">abort cause' + (cs.length > 1 ? 's' : '') + ': ' +
-        cs.map((c) => '<code>' + esc(c) + '</code>').join(' ') + '</p>';
-    }
-    if (m.forced) {
-      h += '<p class="meta">forced assumptions are present.</p>';
-    }
+  const inner = m.inner || [];
+  // The wire marks the failing event with its abort causes. A form with one
+  // event and no causes -- a translate-level failure -- is still that event.
+  const bad = inner.find((e) => e.abortCauses) ||
+    (inner.length === 1 ? inner[0] : undefined);
+  if (bad) {
+    h += '<div class="failed-what"><span class="ekind">' + esc(bad.kind || '') +
+      '</span><code class="ename">' + esc(bad.name) + '</code></div>';
+  }
+
+  const cps = m.checkpoints || [];
+  if (cps.length) {
+    h += '<h3>Checkpoints (' + cps.length + ')</h3>';
+    // Both of these change how the checkpoints below are to be read, so they
+    // sit with them rather than in a footer.
     if (m.preRevert) {
-      h += '<p class="meta">top checkpoints are from before the proof reverted to induction.</p>';
+      h += '<p class="meta">the top checkpoints are from before the proof ' +
+        'reverted to induction.</p>';
     }
-    (m.checkpoints || []).forEach((c, i) => {
-      const kind = c.kind === 'top' && m.preRevert ? 'top!' : c.kind;
-      h += '<div class="cp"><div class="meta">' + esc(kind) + ' ' + esc(c.goal || '') + ' ' +
-        (c.goal
-          ? '<button data-goal="' + esc(c.goal) + '" data-slot="' + i +
+    if (m.forced) { h += '<p class="meta">forced assumptions are present.</p>'; }
+    cps.forEach((c, i) => {
+      // No kind tag: the goal name already says which pool it came from,
+      // Goal against Subgoal *1/1.
+      h += '<div class="cp"><div class="meta">' + esc(c.goal || '') +
+        (on && c.goal
+          ? ' <button data-goal="' + esc(c.goal) + '" data-slot="' + i +
             '" data-on="' + on + '">prover output</button>'
           : '') +
-        '</div><pre>' + hl(c.term) + '</pre><pre id="' + p + i + '" hidden></pre></div>';
+        '</div><pre>' + hl(c.term) + '</pre>' +
+        (on ? '<pre id="' + p + i + '" hidden></pre>' : '') + '</div>';
     });
-    const shownTop = (m.checkpoints || []).filter((c) => c.kind === 'top').length;
-    const shownSub = (m.checkpoints || []).filter((c) => c.kind === 'sub').length;
+    const shownTop = cps.filter((c) => c.kind === 'top').length;
+    const shownSub = cps.filter((c) => c.kind === 'sub').length;
     if ((m.nTop || 0) > shownTop || (m.nSub || 0) > shownSub) {
       h += '<p class="meta">showing ' + shownTop + ' of ' + (m.nTop || shownTop) +
         ' top and ' + shownSub + ' of ' + (m.nSub || shownSub) +
         ' subgoal checkpoints; the rest are in the full log.</p>';
     }
   }
-  if (m.warnings) {
-    // The daemon joins the kinds with ", ", so splitting counts them exactly.
-    const kinds = String(m.warnings).split(', ');
-    h += fold(p + 'warnings', true, '<h3>Warnings (' + kinds.length + ')</h3>',
-      '<pre>' + esc(m.warnings) + '</pre>');
+
+  if ((m.rules || []).length) {
+    h += fold(p + 'rules', true, '<h3>Rules (' + m.rules.length + ')</h3>',
+      usedHtml(m.rules));
   }
   if ((m.hintEvents || []).length) {
-    h += '<h3>Hints that fired</h3>' + codes(m.hintEvents);
+    h += '<h3>Hints that fired</h3>' + usedHtml(m.hintEvents);
   }
   if ((m.splitterRules || []).length) {
-    h += '<h3>Splitter rules</h3>' + codes(m.splitterRules);
+    h += '<h3>Splitter rules</h3>' + usedHtml(m.splitterRules);
   }
-  if ((m.rules || []).length) {
-    const label = m.failed ? 'Rules the attempt used' : 'Rules';
-    h += fold(p + 'rules', true, '<h3>' + label + ' (' + m.rules.length + ')</h3>',
-      codes(m.rules));
-  }
-  const inner = m.inner || [];
-  if (inner.length) {
-    const total = m.innerTotal != null && m.innerTotal > inner.length
-      ? inner.length + ' shown of ' + m.innerTotal
-      : String(inner.length);
-    let innerBody = '<table class="inner">' +
-      inner.map((e) => {
-        // An empty steps cell has meant two different things: this event
-        // never entered the prover, and this event's detail was never read.
-        // A probed event has *something* -- kind, time, rules -- so a dash
-        // can say "no steps" where blank keeps meaning "not looked at".
-        const probed = !!(e.kind || e.time || (e.rules || []).length ||
-                          e.proverSteps != null || e.detail);
-        const steps = e.proverSteps != null
-          ? e.proverSteps + ' steps'
-          : (probed ? '<span title="the prover was not entered">&mdash;</span>' : '');
-        const d = e.detail;
-        // The formals sit beside the name because together they are the
-        // signature, which is what a reader is looking for when they look up
-        // a function at all -- and for a macro-generated one there is nothing
-        // in the buffer to read it off.
-        const sig = '<code>' + esc(e.name) + '</code>' +
-          (d && d.formals ? ' <code class="lisp">' + hl(d.formals) + '</code>' : '');
-        let row = '<tr><td>' + esc(e.kind || '') + '</td>' +
-          '<td>' + sig + '</td>' +
-          '<td class="meta">' + proveSecs(e.time) + '</td>' +
-          '<td class="meta">' + steps + '</td>' +
-          '<td>' + causes(e.abortCauses || '')
-            .map((c) => '<span class="failtag">' + esc(c) + '</span>').join(', ') + '</td></tr>';
-        // Second-level detail, folded: what this event introduced, then what
-        // its proof consumed. The summary carries the two facts worth having
-        // without opening it -- whether the guards were verified, and how
-        // many runes came with the event -- because a wall of terms between
-        // one row and the next is what the fold is there to prevent.
-        const bits = [];
-        const note = d ? guardNote(d.symbolClass) : '';
-        if (note) { bits.push(note); }
-        const nr = d ? (d.runes || []).length : 0;
-        if (nr) { bits.push(nr + ' rune' + (nr === 1 ? '' : 's')); }
-        const used = (e.rules || []).length;
-        if (used) { bits.push(used + ' rule' + (used === 1 ? '' : 's') + ' used'); }
-        const body = (d ? nameDetail(d) : '') +
-          (used ? '<div class="meta">rules the proof used</div>' + codes(e.rules) : '');
-        if (body || bits.length) {
-          row += '<tr><td></td><td colspan="4" class="detail">' +
-            fold(p + 'ev:' + e.name, false,
-              '<span class="meta">' + (bits.join(' \\u00b7 ') || 'detail') + '</span>',
-              body) +
-            '</td></tr>';
-        }
-        return row;
-      }).join('') + '</table>';
-    const detailed = inner.filter(
-      (e) => e.kind || e.time || e.proverSteps != null || (e.rules || []).length || e.detail
-    ).length;
-    if (detailed < inner.length) {
-      innerBody += '<p class="meta">detail (kind, time, steps, rules) is probed for the first ' +
-        detailed + ' events; the rest are names only.</p>';
+  if (m.time) { h += '<h3>Time</h3><p class="meta">' + fmtTime(m.time) + '</p>'; }
+
+  if (m.errorLine || m.abortCause) {
+    h += '<h3>Failure</h3>';
+    if (m.abortCause) {
+      const cs = causes(m.abortCause);
+      h += '<p class="meta">abort cause' + (cs.length > 1 ? 's' : '') + ': ' +
+        cs.map((c) => '<code>' + esc(c) + '</code>').join(' ') + '</p>';
     }
-    h += fold(p + 'inner', true, '<h3>Inside this form (' + total + ')</h3>', innerBody);
+    if (m.errorLine) { h += '<pre>' + esc(m.errorLine) + '</pre>'; }
+  }
+
+  // What got in before the thing that did not. Useful and not urgent, so it
+  // is folded and it is last: a compound form can have admitted half its
+  // events before one of them failed.
+  const before = inner.filter((e) => e !== bad).slice().reverse();
+  if (before.length) {
+    h += fold(p + 'before', false,
+      '<h3>Admitted before the failure (' + before.length + ')</h3>',
+      before.map((e) => eventHtml(e, p, false)).join(''));
   }
   return h;
+}
+
+/** Warnings. Form-level -- the wire carries no per-event field for them. */
+function warningsHtml(m, p) {
+  if (!m.warnings) { return ''; }
+  // The daemon joins the kinds with ", ", so splitting counts them exactly.
+  const kinds = String(m.warnings).split(', ');
+  return fold(p + 'warnings', true, '<h3>Warnings (' + kinds.length + ')</h3>',
+    '<pre>' + esc(m.warnings) + '</pre>');
+}
+
+/**
+ * What ACL2 had to say about one form.
+ *
+ * Two shapes rather than one. A form that produced something shows what it
+ * produced; a form that failed leads with the goals. A file's form and an
+ * eval'd one carry the same fields, so this renders either.
+ *
+ * p prefixes the fold ids and the per-goal output slots, since a page may
+ * hold several envelopes at once and their ids must not collide. on names
+ * the command a goal button posts, and giving no on means no buttons --
+ * which is how the form view asks for the drill-down to be left out.
+ */
+function envelope(m, p, on) {
+  const failed = !!(m.failed || m.errorLine || m.abortCause ||
+                    (m.checkpoints || []).length);
+  return (failed ? failureHtml(m, p, on) : productiveHtml(m, p)) + warningsHtml(m, p);
 }
 
 // Goal buttons can sit in any number of envelopes on one page, so they are

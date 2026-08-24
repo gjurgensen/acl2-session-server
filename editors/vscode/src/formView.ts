@@ -235,7 +235,8 @@ export class FormView {
   /** The serialised model last sent to the page. See `render`. */
   private postedModel?: string;
 
-  onGoal?: (model: FormModel, goal: string, slot: number) => void;
+  /** Asked for by the page's button while a form is running. */
+  onShowOutput?: () => void;
 
   /**
    * Set by the extension once the grammar and theme are loaded. Terms travel
@@ -309,7 +310,7 @@ export class FormView {
     this.panel.iconPath = this.iconPath;
     this.panel.webview.html = HTML;
     this.panel.webview.onDidReceiveMessage(
-      (m: { cmd?: string; goal?: string; slot?: number; cols?: number }) => {
+      (m: { cmd?: string; cols?: number }) => {
       // Width first: it arrives before any form is shown, and re-flowing is
       // the whole reason the page reports it.
       if (m.cmd === 'cols' && typeof m.cols === 'number' && m.cols !== this.cols) {
@@ -317,11 +318,9 @@ export class FormView {
         this.onCols?.(this.layoutCols());
         return;
       }
-      if (!this.model) {
+      if (m.cmd === 'showOutput') {
+        this.onShowOutput?.();
         return;
-      }
-      if (m.cmd === 'goal' && typeof m.goal === 'string' && typeof m.slot === 'number') {
-        this.onGoal?.(this.model, m.goal, m.slot);
       }
     }
     );
@@ -450,8 +449,15 @@ export class FormView {
     // callers -- `refresh`, and the panel's first post -- keep it honest.
     this.postedModel = key;
     // No re-flow here: terms arrive from the daemon already laid out for
-    // the width this pane reported.
-    const laid = model;
+    // the width this pane reported. The fold limit rides along because the
+    // page decides per form whether its events open, and only this end can
+    // read a setting.
+    const laid = {
+      ...model,
+      eventsOpenLimit: vscode.workspace
+        .getConfiguration('acl2-session')
+        .get<number>('eventsOpenLimit', 4),
+    };
     // The narrative rides along rather than following in a second message.
     // It used to follow, and the page replaces its token map on a model --
     // so every state event rendered once with the scheme uncolored and again
@@ -520,10 +526,6 @@ export class FormView {
       records: i.records,
       toks: tokenizeAll(inductionStrings(i.records), this.tokenizer),
     });
-  }
-
-  goalResult(slot: number, text: string): void {
-    void this.panel?.webview.postMessage({ kind: 'goal', slot, text });
   }
 
   dispose(): void {
@@ -618,80 +620,9 @@ window.addEventListener('message', (ev) => {
       const e = document.getElementById('elapsed');
       if (e) { e.textContent = Math.round(m.elapsedMs / 1000) + 's'; }
     }
-  } else if (m.kind === 'goal') {
-    const d = document.getElementById('goal-' + m.slot);
-    if (d) { d.textContent = m.text || '(nothing captured under this goal)'; }
   }
 });
 
-/**
- * The induction narrative, when there is one.
- *
- * Folded open: for a proof that inducted this is usually the first thing
- * worth reading, and it is a handful of lines rather than a wall.
- */
-function inductionHtml() {
-  if (!inductions.length) { return ''; }
-  // ACL2's attribution is prose -- "the :induction rule segment-listp" --
-  // and the two things worth picking out of it are the rune class and the
-  // name. A token opening with a colon is unambiguously the former; the
-  // token after "rule"/"rules" is the latter. Everything else stays prose,
-  // because it is prose.
-  const runeWords = (phrase) => {
-    // Doubled on purpose: this lives in a template literal, where a lone
-    // \\s is not an escape and collapses to the letter s -- which split on
-    // every "s" in the phrase and then rejoined into something that looked
-    // exactly right.
-    const words = String(phrase).split(/(\\s+)/);
-    let nameNext = false;
-    return words.map((w) => {
-      if (/^\\s+$/.test(w)) { return w; }
-      const bare = w.replace(/[.,;]+$/, '');
-      const tail = w.slice(bare.length);
-      if (bare.startsWith(':')) { nameNext = false; return '<code>' + esc(bare) + '</code>' + tail; }
-      if (nameNext) { nameNext = false; return '<code class="lisp">' + hl(bare) + '</code>' + tail; }
-      if (/^rules?$/.test(bare)) { nameNext = true; }
-      return esc(w);
-    }).join('');
-  };
-  const row = (label, value) =>
-    '<tr><td class="meta">' + label + '</td><td>' + value + '</td></tr>';
-  const one = (r) => {
-    let h = '<div class="cp">';
-    if (r.goal) { h += '<div class="meta">' + esc(r.goal) + '</div>'; }
-    // A labelled table rather than one sentence: these are two different
-    // facts -- the term it came from, and the rule that suggested it -- and
-    // running them together made both harder to find.
-    let rows = '';
-    if (r.suggestedBy) {
-      rows += row('suggested by', '<code class="lisp">' + hl(r.suggestedBy) + '</code>');
-    }
-    if (r.attribution) { rows += row('using', runeWords(r.attribution)); }
-    if (rows) { h += '<table class="inner">' + rows + '</table>'; }
-    // Laid out as ACL2 printed it -- the indentation is the structure.
-    if (r.scheme) {
-      h += '<pre>' + hl(r.scheme) + '</pre>';
-      // A scheme the daemon cut says so, with the size it really is and
-      // where the rest of it lives. Said plainly rather than with an
-      // ellipsis: a term that stops without explanation reads as a bug in
-      // the parser, which is what this one would look like at 6.83 MB.
-      if (r.schemeChars) {
-        h += '<p class="meta">showing ' + fmtChars(r.scheme.length) + ' of ' +
-             fmtChars(r.schemeChars) +
-             '; the whole scheme is in the full log.</p>';
-      }
-    }
-    // Neither justifiedBy nor subgoals is shown. The first is the head
-    // symbol of the term in the suggested-by row, so it only repeats it; the
-    // second is about what happened next rather than about the scheme, and
-    // the subgoals themselves are already the checkpoints above. Both stay
-    // on the wire for callers that want them. (No backticks in comments
-    // here -- this whole page is a template literal.)
-    return h + '</div>';
-  };
-  return fold('induction', true, '<h3>Induction (' + inductions.length + ')</h3>',
-    inductions.map(one).join(''));
-}
 
 /**
  * Hang what each name turned out to be on the event that introduced it.
@@ -731,37 +662,43 @@ function render() {
   }
   if (m.proverSteps != null) { h += '<span class="meta">' + m.proverSteps + ' steps</span>'; }
   h += '</div>';
-  if (m.time) {
-    h += '<p class="meta">time: ' + fmtTime(m.time) + '</p>';
-  }
   if (m.skipped) {
     h += '<div class="note">Admitted with its proofs skipped \\u2014 checking continued. ' +
          'Every form below is conditional on this unproved claim.</div>';
   }
   if (m.status === 'running') {
-    h += '<h3>Proving <span id="elapsed" class="meta"></span></h3>' +
-         '<pre id="tailtext">(waiting for output\\u2026)</pre>';
+    // Highlighting the tail here would mean a second grammar and a full
+    // re-tokenize twice a second, because a webview cannot do what the
+    // output view does -- that is a real TextDocument, colored by VSCode
+    // from its language. So hand the reader to the thing that already works.
+    h += '<p><button id="openoutput">Open in Output view</button></p>' +
+      fold('tail', true,
+        '<h3>Prover output <span id="elapsed" class="meta"></span></h3>',
+        '<pre id="tailtext">(waiting for output\\u2026)</pre>');
   }
-  if (m.status === 'pending') {
-    h += '<p class="meta">Not processed yet.</p>';
-  }
-  if (m.status === 'beyond') {
-    h += '<p class="meta">Beyond the target \u2014 not processed, and not queued to be.</p>';
-  }
+  // pending and beyond render nothing below the chip. There is no further
+  // information about either, and a sentence saying so is filler -- the
+  // difference between them, that one is queued and one is not, is carried
+  // by the word in the chip.
   h += envelope(
     withDetail({ ...m, failed: m.status === 'skipped' || m.status === 'failed' }),
-    'goal-',
-    'goal'
+    'goal-'
   );
-  h += inductionHtml();
   // No actions row. Retracting and holding the target are editor verbs with
   // their own keybindings, and the full log has one too; a form view that follows
   // the cursor is a poor place to put a button whose effect is elsewhere.
   document.getElementById('root').innerHTML = h;
 }
 
-bindGoals(document, (b, slot) => 'goal-' + slot);
 bindFolds(document);
+
+// The output view is a command away, and the tail is the one thing this page
+// deliberately does not render well.
+document.addEventListener('click', (ev) => {
+  if (ev.target && ev.target.id === 'openoutput') {
+    vscode.postMessage({ cmd: 'showOutput' });
+  }
+});
 
 // Tell the extension how wide this pane is, in characters.
 //

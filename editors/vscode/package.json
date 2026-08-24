@@ -460,6 +460,12 @@
           "default": true,
           "description": "Highlight ACL2's output log: goal headers, errors and Q.E.D. as markers, and the terms inside goals, rune lists and `pe` forms as Lisp. Best effort -- the log is prose with Lisp embedded in it, so a misread is possible; off, the log is plain text."
         },
+        "acl2-session.eventsOpenLimit": {
+          "type": "number",
+          "default": 4,
+          "minimum": 0,
+          "description": "How many events a form may record before the form view stops opening them by default. At or below this, every event's block starts expanded; above it, all of them start collapsed. A macro like defines can record hundreds, and a page of hundreds of open blocks cannot be scrolled past."
+        },
         "acl2-session.termWidth": {
           "type": "number",
           "default": 60,

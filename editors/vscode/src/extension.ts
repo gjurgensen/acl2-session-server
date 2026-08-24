@@ -321,8 +321,8 @@ export function activate(context: vscode.ExtensionContext): void {
   problems = vscode.languages.createDiagnosticCollection('acl2');
   context.subscriptions.push(problems);
 
-  formView.onGoal = (m, goal, slot) => void fetchGoal(m, goal, slot);
   formView.onCols = (cols) => setLayout(cols);
+  formView.onShowOutput = () => void vscode.commands.executeCommand('acl2-session.showOutput');
 
   // The grammar and theme load off disk, so the first form view may render
   // before they arrive; refresh once they have, and again whenever the
@@ -2765,22 +2765,3 @@ function toConsoleResult(r: EvalReply): ConsoleResult {
   };
 }
 
-async function fetchGoal(m: FormModel, goal: string, slot: number): Promise<void> {
-  const s = byId.get(m.book);
-  const e = s?.unitEvents.get(m.index);
-  if (!s || !e) {
-    formView.goalResult(slot, '(no captured output for this form)');
-    return;
-  }
-  try {
-    const r = await client?.request('output', {
-      book: s.id,
-      output_ref: e.output_ref,
-      mode: 'goal',
-      text: goal,
-    });
-    formView.goalResult(slot, (r.text as string) || '(nothing captured under this goal)');
-  } catch (err) {
-    formView.goalResult(slot, `(output unavailable: ${err})`);
-  }
-}

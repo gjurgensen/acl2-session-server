@@ -27,7 +27,14 @@ const { Module } = require('module');
 const resolve = Module._resolveFilename;
 Module._resolveFilename = (request, ...rest) =>
   request === 'vscode' ? 'vscode' : resolve.call(Module, request, ...rest);
-require.cache.vscode = { id: 'vscode', filename: 'vscode', loaded: true, exports: {} };
+// Enough of `vscode` to post a model: the form view reads the fold limit
+// from configuration on its way out. `get` hands back the caller's own
+// default, which is what a harness should say about an unset setting.
+const vscodeStub = {
+  workspace: { getConfiguration: () => ({ get: (_key, fallback) => fallback }) },
+};
+require.cache.vscode =
+  { id: 'vscode', filename: 'vscode', loaded: true, exports: vscodeStub };
 
 let bad = 0;
 function check(ok, what) {
@@ -258,15 +265,17 @@ check(spans([[{ t: 'a', c: '' }], [{ t: 'b', c: '' }]]) === 'a\nb', 'and joins l
 
 // ---- `envelope`: what a form left behind, per event ----
 //
-// The scrape hangs off the events under "inside this form", which is the
-// only place a macro-generated name has a row of its own. Rendered from the
-// shape the daemon actually sends: a guard-verified function with derived
-// runes, and a theorem whose left-hand side is nowhere in the buffer.
+// A productive form is its events, each carrying the facts the buffer does
+// not have. Rendered from the shape the daemon actually sends: a
+// guard-verified function with derived rules, one of them disabled, and a
+// theorem whose left-hand side is written nowhere in the source.
 
 globalThis.toks = {};
-const envelope = lift('esc', 'strip', 'causes', 'spans', 'hl', 'codes', 'rat',
-                      'fmtSecs', 'timeParts', 'proveSecs', 'guardNote', 'nameDetail',
+const envelope = lift('esc', 'strip', 'causes', 'spans', 'hl', 'rat',
+                      'fmtSecs', 'timeParts', 'proveSecs', 'fmtTime', 'guardNote',
                       'folds', 'foldScope', 'foldScopeIs', 'fold',
+                      'termHtml', 'kvRow', 'nameFacts', 'introducedHtml', 'usedHtml',
+                      'eventHtml', 'productiveHtml', 'failureHtml', 'warningsHtml',
                       'envelope');
 {
   const fn = {
@@ -285,17 +294,19 @@ const envelope = lift('esc', 'strip', 'causes', 'spans', 'hl', 'codes', 'rat',
   };
   const h = envelope({
     checkpoints: [], rules: [], inner: [
-      { name: 'dfn-app', kind: 'defun', detail: fn },
       { name: 'true-listp-of-dfn-app', kind: 'defthm', proverSteps: 12,
         rules: ['(:definition dfn-app)'], detail: thm },
+      { name: 'dfn-app', kind: 'defun', detail: fn },
       { name: 'undetailed' },
     ],
-  }, 'g-', 'goal');
+  }, 'g-');
 
-  check(h.includes('<code>dfn-app</code> <code class="lisp">(x y)</code>'),
+  check(h.includes('<code class="ename">dfn-app</code> <code class="lisp">(x y)</code>'),
         'a function shows its formals beside its name, as a signature');
-  check(h.includes('guards verified · 2 runes'),
-        'and says in the fold summary that its guards were verified');
+  check(h.includes('guards verified'),
+        'and says in the summary that its guards were verified');
+  check(h.includes('2 rules, 1 off'),
+        'and counts the rules it wrote, and how many of those are switched off');
   check(h.includes('guards not verified') === false,
         'and does not claim otherwise');
   check(/guard<\/td><td><code[^>]*>\(if \(true-listp x\)/.test(h),
@@ -307,18 +318,97 @@ const envelope = lift('esc', 'strip', 'causes', 'spans', 'hl', 'codes', 'rat',
         'the measure is the term, not the justification record around it');
   check(/decreasing under<\/td><td><code[^>]*>l&lt;/.test(h),
         'and a relation that is not o< is named, since it was chosen');
-  check(h.includes('1 rune · 1 rule used'),
+  check(h.includes('introduced \u2014 1 rule') && h.includes('used \u2014 1 rule'),
         'a theorem counts what it introduced apart from what its proof used');
-  check(h.includes('rules the proof used'), 'and the two are labelled apart');
+  check(h.includes('data-fold="g-ev:true-listp-of-dfn-app:introduced"') &&
+        h.includes('data-fold="g-ev:true-listp-of-dfn-app:used"'),
+        'and the two are separate folds, so opening one does not open the other');
+  check(h.indexOf('Events (') !== -1 && h.indexOf('dfn-app') > h.indexOf('Events ('),
+        'the events are the section, not a table appended under one');
+  check(h.indexOf('<code class="ename">dfn-app</code>') <
+        h.indexOf('<code class="ename">true-listp-of-dfn-app</code>'),
+        'and run in source order, not the newest-first order the wire sends');
   check(/lhs<\/td><td><code[^>]*>\(true-listp \(dfn-app x y\)\)/.test(h),
         'the left-hand side a rewrite rule will match is shown');
-  check((h.match(/data-fold="[^"]*ev:/g) || []).length === 2,
+  check((h.match(/data-fold="g-ev:[^":]*"/g) || []).length === 2,
         'an event with nothing to show gets no fold');
   check(h.includes('detail (kind, time, steps, rules) is probed for the first 2'),
         'and is counted as unprobed, so a truncated probe still says so');
 }
 check(!pages[1][1].includes('Introduced ('),
       'the form view has no second, pooled copy of what the form introduced');
+
+// A failure is a different page, not the same one with a red chip. What is
+// pinned here is the *order*: the abort cause is nearly always
+// induction-depth-limit-exceeded and the fix is nearly never the depth
+// limit, so the goals come first and the cause sinks to the bottom.
+{
+  const h = envelope({
+    failed: true,
+    abortCause: '(ACL2::EMPTY-CLAUSE)',
+    errorLine: 'ACL2 Error [Failure] in ( PROGN (defthm true-listp-of-app ...) ...)',
+    time: '(1/100 0 0 0)',
+    rules: ['(:definition endp)', '(:induction app)'],
+    checkpoints: [
+      { kind: 'top', goal: 'Goal', term: '(true-listp (app x y))' },
+      { kind: 'sub', goal: "Subgoal *1/1''", term: '(implies (not (consp x)) (true-listp y))' },
+    ],
+    nTop: 1, nSub: 1,
+    inner: [
+      { name: 'true-listp-of-app', kind: 'defthm', abortCauses: '(EMPTY-CLAUSE)' },
+      { name: 'app', kind: 'defun' },
+    ],
+  }, 'f-');
+
+  const at = (t) => h.indexOf(t);
+  check(at('true-listp-of-app') < at('Checkpoints'),
+        'a failure names what failed before it shows a single goal');
+  check(at('Checkpoints') < at('Rules ('), 'the goals come before the rules');
+  check(at('Rules (') < at('abort cause'), 'and the cause comes after both');
+  check(at('abort cause') < at('Admitted before the failure'),
+        'while what already worked is last of all');
+  check(!/>top</.test(h) && !/>sub</.test(h),
+        'checkpoints carry no pool tag -- the goal name already says which they are');
+  check(h.includes("Subgoal *1/1''"), 'and the goal name is there to say it');
+  check(!h.includes('<button'), 'no per-goal button, which the first version leaves out');
+  check(h.includes('data-fold="f-before"'),
+        'the events that got in before the failure are folded');
+  check((h.match(/class="ename">app</g) || []).length === 1,
+        'and the failed event is not repeated among them');
+}
+
+// A form that never reached the prover has no goals at all. The name and the
+// error line are then the whole page, which is why the name is the top slot
+// rather than the cause.
+{
+  const h = envelope({
+    failed: true,
+    errorLine: 'ACL2 Error in ( DEFUN app ...):  The name APP is in use.',
+    checkpoints: [],
+    inner: [{ name: 'app', kind: 'defun' }],
+  }, 'x-');
+  check(h.indexOf('class="ename">app<') < h.indexOf('The name APP is in use'),
+        'a translate-level failure still says what failed, then why');
+  check(!h.includes('Checkpoints'), 'and shows no empty checkpoint section');
+}
+
+// Open by default only while there are few enough to read past. The defines
+// in kestrel/c/syntax/validator.lisp records 620 events.
+{
+  const events = (n) => {
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      out.push({ name: 'e' + i, kind: 'defthm', rules: ['(:definition endp)'] });
+    }
+    return out;
+  };
+  const render = (n, eventsOpenLimit) =>
+    envelope({ checkpoints: [], rules: [], inner: events(n), eventsOpenLimit }, 'c-');
+  check(render(3, 4).includes(' open>'), 'a handful of events open by default');
+  check(!render(6, 4).includes(' open>'),
+        'and past the limit every one of them starts collapsed');
+  check(render(6, 99).includes(' open>'), 'the limit is a setting, not a constant');
+}
 
 // The link range, which is where a coordinate bug would hide: the daemon
 // sends no columns, so the client places them by finding the quoted name on
