@@ -466,7 +466,7 @@ pub struct Submission {
     pub outcome: Outcome,
     /// Everything ACL2 printed for this form, sentinels stripped.
     pub output: String,
-    /// Single-line structured values, via `<<<ASS-DATA key value>>>`.
+    /// Single-line structured values, via `<<<PROBE-DATA key value>>>`.
     /// This is how the caller gets facts out of the session without parsing
     /// prover prose: the body computes them in ACL2 and prints them under a
     /// key we chose.
@@ -476,8 +476,8 @@ pub struct Submission {
     /// marker loses its `>>>` and the datum silently vanishes. Anything
     /// potentially wide goes in `blocks`.
     pub data: Vec<(String, String)>,
-    /// Multi-line structured values, delimited by `<<<ASS-BEGIN key>>>` and
-    /// `<<<ASS-END key>>>`. Needed because most of what is worth extracting --
+    /// Multi-line structured values, delimited by `<<<PROBE-BEGIN key>>>` and
+    /// `<<<PROBE-END key>>>`. Needed because most of what is worth extracting --
     /// a rune list, a checkpoint goal -- does not fit on one line and ACL2
     /// wraps at its right margin.
     pub blocks: Vec<(String, String)>,
@@ -611,12 +611,12 @@ pub const VALUE_PROBE: &str = "(acl2::let* \
                          (acl2::and acl2::trip \
                                     (acl2::eq acl2::val :invisible))))) \
   (acl2::prog2$ \
-    (acl2::cw \"~%<<<ASS-BEGIN value>>>~%vkind ~x0~%\" \
+    (acl2::cw \"~%<<<PROBE-BEGIN value>>>~%vkind ~x0~%\" \
       (acl2::if acl2::hide 'acl2::none \
         (acl2::if acl2::trip 'acl2::triple 'acl2::value))) \
     (acl2::prog2$ \
       (acl2::if acl2::hide 0 (acl2::cw \"~x0~%\" acl2::val)) \
-      (acl2::prog2$ (acl2::cw \"<<<ASS-END value>>>~%\") \
+      (acl2::prog2$ (acl2::cw \"<<<PROBE-END value>>>~%\") \
                     (acl2::value :invisible)))))
 ";
 
@@ -796,9 +796,9 @@ impl Session {
     fn handshake(&mut self, deadline: Duration) -> io::Result<bool> {
         self.generation += 1;
         let genid = self.generation;
-        let done = format!("<<<ASS-DONE {genid}>>>");
+        let done = format!("<<<PROBE-DONE {genid}>>>");
         let line = format!(
-            "(acl2::prog2$ (acl2::cw \"~%<<<ASS-DONE {genid}>>>~%\") \
+            "(acl2::prog2$ (acl2::cw \"~%<<<PROBE-DONE {genid}>>>~%\") \
              (acl2::value :invisible))\n"
         );
         self.write_all(line.as_bytes())?;
@@ -900,7 +900,7 @@ impl Session {
         file.extend_from_slice(form);
         file.extend_from_slice(
             format!(
-                "\n(acl2::prog2$ (acl2::cw \"~%<<<ASS-OK {genid}>>>~%\") \
+                "\n(acl2::prog2$ (acl2::cw \"~%<<<PROBE-OK {genid}>>>~%\") \
                  (acl2::value :invisible))\n"
             )
             .as_bytes(),
@@ -926,7 +926,7 @@ impl Session {
                (acl2::ld \"{}\" :ld-error-action :return! \
                           :ld-verbose acl2::nil :ld-prompt acl2::nil) \
                (acl2::declare (acl2::ignore acl2::erp acl2::val)) \
-               (acl2::prog2$ (acl2::cw \"~%<<<ASS-DONE {genid}>>>~%\") \
+               (acl2::prog2$ (acl2::cw \"~%<<<PROBE-DONE {genid}>>>~%\") \
                              (acl2::value :invisible)))\n",
             lisp_string(&path.display().to_string())
         );
@@ -964,7 +964,7 @@ impl Session {
         // The completion sentinel is fully qualified, so it reads correctly
         // in whatever package the submitted form just switched to.
         let line = format!(
-            "{form}\n(acl2::prog2$ (acl2::cw \"~%<<<ASS-DONE {genid}>>>~%\") \
+            "{form}\n(acl2::prog2$ (acl2::cw \"~%<<<PROBE-DONE {genid}>>>~%\") \
              (acl2::value :invisible))\n"
         );
         self.control.begin();
@@ -993,7 +993,7 @@ impl Session {
         let Some(InFlight { generation: genid, started, raw }) = self.inflight else {
             return Err(io::Error::other("nothing in flight"));
         };
-        let done = format!("<<<ASS-DONE {genid}>>>");
+        let done = format!("<<<PROBE-DONE {genid}>>>");
         let from = self.control.consumed_offset();
         let end = match self.control.wait_for_marker(done.as_bytes(), from, deadline) {
             WaitEnd::Found(end) => end,
@@ -1050,7 +1050,7 @@ impl Session {
         // One decode for the whole capture. Doing this per read chunk split
         // multi-byte sequences at arbitrary 64 KB boundaries.
         let captured = crate::split::decode(&kept);
-        let outcome = if raw || captured.contains(&format!("<<<ASS-OK {genid}>>>")) {
+        let outcome = if raw || captured.contains(&format!("<<<PROBE-OK {genid}>>>")) {
             Outcome::Ok
         } else {
             Outcome::Failed
@@ -1248,7 +1248,7 @@ fn lisp_string(s: &str) -> String {
 /// output because the generation moved on just shows the client a magic
 /// string it should never have seen.
 fn is_completion_marker(l: &str) -> bool {
-    for pat in ["<<<ASS-OK ", "<<<ASS-DONE "] {
+    for pat in ["<<<PROBE-OK ", "<<<PROBE-DONE "] {
         if let Some(i) = l.find(pat)
             && let Some(end) = l[i + pat.len()..].find(">>>")
         {
@@ -1261,8 +1261,8 @@ fn is_completion_marker(l: &str) -> bool {
     false
 }
 
-/// What a capture separates into: the display text, the one-line `ASS-DATA`
-/// pairs, and the `ASS-BEGIN`/`ASS-END` blocks.
+/// What a capture separates into: the display text, the one-line `PROBE-DATA`
+/// pairs, and the `PROBE-BEGIN`/`PROBE-END` blocks.
 type Stripped = (String, Vec<(String, String)>, Vec<(String, String)>);
 
 /// Just the display half of `strip_sentinels`, for a capture still being
@@ -1272,7 +1272,7 @@ type Stripped = (String, Vec<(String, String)>, Vec<(String, String)>);
 /// form is watched through and the log it leaves behind are different
 /// documents. They diverge the moment the form ends: ACL2 runs our probes
 /// before anything consumes the stream, so a reader watching at that instant
-/// sees `<<<ASS-BEGIN evd>>>` and our planted labels, and then watches them
+/// sees `<<<PROBE-BEGIN evd>>>` and our planted labels, and then watches them
 /// vanish. Measured: 77 raw lines against the 45 the same form filed.
 pub(crate) fn display_of(raw: &str) -> String {
     // Stop at this form's completion marker. Everything past it is the prompt
@@ -1287,7 +1287,7 @@ pub(crate) fn display_of(raw: &str) -> String {
 }
 
 /// Remove our own markers, returning what ACL2 printed plus any structured
-/// values reported via `<<<ASS-DATA key value>>>`.
+/// values reported via `<<<PROBE-DATA key value>>>`.
 ///
 /// Also trims the prompt fragment that ACL2 emits *before* reading our line and
 /// which therefore lands at the head of the capture. This is cosmetic only --
@@ -1304,16 +1304,24 @@ fn strip_sentinels(s: &str) -> Stripped {
         }
         // Multi-line block delimiters. Collected out of the output entirely,
         // so a block's contents never appear twice.
-        if let Some(i) = l.find("<<<ASS-BEGIN ")
-            && let Some(end) = l[i + 13..].find(">>>")
+        // Offsets are taken from the pattern's own length, never written as a
+        // literal: the fenced prefix was renamed once (from a three-letter
+        // abbreviation to `PROBE`) and every hand-counted `+13` silently
+        // pointed into the middle of the new marker until this was fixed.
         {
-            open = Some((l[i + 13..i + 13 + end].trim().to_string(), Vec::new()));
-            continue;
+            const OPEN: &str = "<<<PROBE-BEGIN ";
+            if let Some(i) = l.find(OPEN)
+                && let Some(end) = l[i + OPEN.len()..].find(">>>")
+            {
+                open = Some((l[i + OPEN.len()..i + OPEN.len() + end].trim().to_string(), Vec::new()));
+                continue;
+            }
         }
-        if let Some(i) = l.find("<<<ASS-END ")
-            && let Some(end) = l[i + 11..].find(">>>")
+        const CLOSE: &str = "<<<PROBE-END ";
+        if let Some(i) = l.find(CLOSE)
+            && let Some(end) = l[i + CLOSE.len()..].find(">>>")
         {
-            let key = l[i + 11..i + 11 + end].trim().to_string();
+            let key = l[i + CLOSE.len()..i + CLOSE.len() + end].trim().to_string();
             if let Some((k, body)) = open.take() {
                 if k == key {
                     blocks.push((k, body.join("\n").trim().to_string()));
@@ -1342,7 +1350,8 @@ fn strip_sentinels(s: &str) -> Stripped {
                 continue;
             }
         }
-        if let Some(rest) = l.find("<<<ASS-DATA ").map(|i| &l[i + 12..])
+        const DATA: &str = "<<<PROBE-DATA ";
+        if let Some(rest) = l.find(DATA).map(|i| &l[i + DATA.len()..])
             && let Some(end) = rest.find(">>>")
         {
             let mut it = rest[..end].splitn(2, ' ');

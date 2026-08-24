@@ -625,9 +625,9 @@ pub struct EvalResult {
 #[derive(Debug)]
 pub struct QueryResult {
     pub outcome: Outcome,
-    /// One-line `<<<ASS-DATA key value>>>` pairs the probe printed.
+    /// One-line `<<<PROBE-DATA key value>>>` pairs the probe printed.
     pub data: Vec<(String, String)>,
-    /// `<<<ASS-BEGIN key>>>`/`<<<ASS-END key>>>` blocks -- where anything that
+    /// `<<<PROBE-BEGIN key>>>`/`<<<PROBE-END key>>>` blocks -- where anything that
     /// can wrap at ACL2's right margin has to go.
     pub blocks: Vec<(String, String)>,
     /// Everything ACL2 printed, for diagnosing a probe. Not a parsing surface.
@@ -986,7 +986,7 @@ const CLEAR_STALE: &str = "(acl2::pprogn \
 /// `certify` falling back to the checkout walk. The block parser tolerates
 /// wrapping by construction.
 const OWN_OUTPUT: &str = "(acl2::prog2$ \
-    (acl2::cw \"~%<<<ASS-BEGIN env>>>~%inhibit ~x0~%sbd ~x1~%<<<ASS-END env>>>~%\" \
+    (acl2::cw \"~%<<<PROBE-BEGIN env>>>~%inhibit ~x0~%sbd ~x1~%<<<PROBE-END env>>>~%\" \
       (acl2::@ acl2::inhibit-output-lst) \
       (acl2::system-books-dir acl2::state)) \
     (acl2::er-progn \
@@ -1002,8 +1002,8 @@ const OWN_OUTPUT: &str = "(acl2::prog2$ \
 /// rollback re-establishes it explicitly. Both values are short; the one-line
 /// marker protocol is safe for them (see `Submission::data`).
 const CMD_PROBE: &str = "(acl2::prog2$ \
-    (acl2::cw \"~%<<<ASS-DATA cmd ~x0>>>~%<<<ASS-DATA pkg ~x1>>>~%\
-<<<ASS-DATA ndeps ~x2>>>~%\" \
+    (acl2::cw \"~%<<<PROBE-DATA cmd ~x0>>>~%<<<PROBE-DATA pkg ~x1>>>~%\
+<<<PROBE-DATA ndeps ~x2>>>~%\" \
       (acl2::max-absolute-command-number (acl2::w acl2::state)) \
       (acl2::f-get-global 'acl2::current-package acl2::state) \
       (acl2::len (acl2::global-val 'acl2::include-book-alist-all \
@@ -1032,7 +1032,7 @@ const CMD_PROBE: &str = "(acl2::prog2$ \
 /// violation, and a probe's guard violation fails the *unit* it is spliced
 /// into.
 const DEPS_PROBE: &str = r#"(acl2::prog2$
-  (acl2::cw "~%<<<ASS-BEGIN deps>>>~%")
+  (acl2::cw "~%<<<PROBE-BEGIN deps>>>~%")
   (acl2::prog2$
     (acl2::cw "~*0"
       (acl2::list "" "dep ~x*~%" "dep ~x*~%" "dep ~x*~%"
@@ -1041,7 +1041,7 @@ const DEPS_PROBE: &str = r#"(acl2::prog2$
             (acl2::global-val 'acl2::include-book-alist-all
                               (acl2::w acl2::state))))))
     (acl2::prog2$
-      (acl2::cw "<<<ASS-END deps>>>~%")
+      (acl2::cw "<<<PROBE-END deps>>>~%")
       (acl2::value :invisible))))"#;
 
 /// Report the events ACL2 recorded *inside* this unit.
@@ -1100,7 +1100,7 @@ fn inner_events_probe(limit: usize) -> String {
    (acl2::ds (acl2::loop$ acl2::for acl2::e acl2::in (acl2::take acl2::nn acl2::fal0)
                acl2::collect (acl2::car (acl2::cdr (acl2::true-list-fix acl2::e))))))
   (acl2::prog2$
-    (acl2::cw "~%<<<ASS-BEGIN inner>>>~%")
+    (acl2::cw "~%<<<PROBE-BEGIN inner>>>~%")
     (acl2::prog2$
       (acl2::cw "~*0" (acl2::list "" "iname ~x*~%" "iname ~x*~%" "iname ~x*~%"
                         (acl2::strip-cars acl2::fal0)))
@@ -1154,7 +1154,7 @@ fn inner_events_probe(limit: usize) -> String {
                                          (acl2::cdr (acl2::assoc-equal 'acl2::rules acl2::d))))
                           acl2::collect (acl2::cons acl2::i acl2::r)))))
                   (acl2::prog2$
-                    (acl2::cw "<<<ASS-END inner>>>~%")
+                    (acl2::cw "<<<PROBE-END inner>>>~%")
                     (acl2::value :invisible))))))))))))"#
     )
 }
@@ -1340,7 +1340,7 @@ fn parse_inner(sub: &crate::session::Submission) -> (Vec<InnerEvent>, usize, Vec
 /// immediately preceding event, and planting a label first would make it
 /// describe the label.
 const EVENT_DATA_PROBE: &str = r#"(acl2::prog2$
-  (acl2::cw "~%<<<ASS-BEGIN evd>>>~%steps ~x0~%time ~x1~%"
+  (acl2::cw "~%<<<PROBE-BEGIN evd>>>~%steps ~x0~%time ~x1~%"
     (acl2::get-event-data 'acl2::prover-steps-counted acl2::state)
     (acl2::get-event-data 'acl2::time acl2::state))
   (acl2::prog2$
@@ -1360,7 +1360,7 @@ const EVENT_DATA_PROBE: &str = r#"(acl2::prog2$
           (acl2::list "" "splitter ~x*~%" "splitter ~x*~%" "splitter ~x*~%"
             (acl2::get-event-data 'acl2::splitter-rules acl2::state)))
         (acl2::prog2$
-          (acl2::cw "<<<ASS-END evd>>>~%")
+          (acl2::cw "<<<PROBE-END evd>>>~%")
           (acl2::value :invisible)))))))"#;
 
 /// Report the key checkpoints of the most recent failed proof.
@@ -1409,7 +1409,7 @@ const CHECKPOINT_PROBE: &str = r#"(acl2::let*
    (acl2::sb (acl2::access acl2::gag-state acl2::gs :sub-stack))
    (acl2::wr (acl2::w acl2::state)))
   (acl2::prog2$
-    (acl2::cw "~%<<<ASS-BEGIN ckpt>>>~%gag ~x0~%ntop ~x1~%nsub ~x2~%forced ~x3~%abort ~x4~%reverted ~x5~%"
+    (acl2::cw "~%<<<PROBE-BEGIN ckpt>>>~%gag ~x0~%ntop ~x1~%nsub ~x2~%forced ~x3~%abort ~x4~%reverted ~x5~%"
       (acl2::if acl2::gs acl2::t acl2::nil)
       (acl2::len acl2::tp)
       (acl2::len acl2::sb)
@@ -1425,7 +1425,7 @@ const CHECKPOINT_PROBE: &str = r#"(acl2::let*
         (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 1 acl2::sb) :clause) acl2::nil acl2::wr)
         (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 2 acl2::sb) :clause) acl2::nil acl2::wr))
       (acl2::prog2$
-        (acl2::cw "tid0 ~@0~%tid1 ~@1~%tid2 ~@2~%sid0 ~@3~%sid1 ~@4~%sid2 ~@5~%<<<ASS-END ckpt>>>~%"
+        (acl2::cw "tid0 ~@0~%tid1 ~@1~%tid2 ~@2~%sid0 ~@3~%sid1 ~@4~%sid2 ~@5~%<<<PROBE-END ckpt>>>~%"
           (acl2::if (acl2::nth 0 acl2::tp)
             (acl2::tilde-@-clause-id-phrase (acl2::access acl2::gag-info (acl2::nth 0 acl2::tp) :clause-id)) "")
           (acl2::if (acl2::nth 1 acl2::tp)
@@ -1454,12 +1454,12 @@ const CHECKPOINT_PROBE: &str = r#"(acl2::let*
 /// normally fresh; the gate stays as belt-and-braces for the paths that do
 /// not clear (a raw submission, a handshake).
 const INTERRUPT_PROBE: &str = r#"(acl2::prog2$
-  (acl2::cw "~%<<<ASS-BEGIN intr>>>~%iabort ~x0~%itime ~x1~%isteps ~x2~%"
+  (acl2::cw "~%<<<PROBE-BEGIN intr>>>~%iabort ~x0~%itime ~x1~%isteps ~x2~%"
     (acl2::get-event-data 'acl2::abort-causes acl2::state)
     (acl2::get-event-data 'acl2::time acl2::state)
     (acl2::get-event-data 'acl2::prover-steps-counted acl2::state))
   (acl2::prog2$
-    (acl2::cw "ievent ~Y01~%<<<ASS-END intr>>>~%"
+    (acl2::cw "ievent ~Y01~%<<<PROBE-END intr>>>~%"
       (acl2::or (acl2::get-event-data 'acl2::event acl2::state)
                 (acl2::get-event-data 'acl2::form acl2::state))
       (acl2::evisc-tuple 3 8 acl2::nil acl2::nil))
@@ -1554,7 +1554,7 @@ fn is_safe_symbol(name: &str) -> bool {
 /// `in` over the world, never `from`/`to`: the `loop$` index list
 /// materialisation cost 33 GB and a machine.
 const CENSUS_PROBE: &str = r#"(acl2::prog2$
-  (acl2::cw "~%<<<ASS-BEGIN census>>>~%")
+  (acl2::cw "~%<<<PROBE-BEGIN census>>>~%")
   (acl2::prog2$
     (acl2::cw "~*0"
       (acl2::list "" "~x*~%" "~x*~%" "~x*~%"
@@ -1569,7 +1569,7 @@ const CENSUS_PROBE: &str = r#"(acl2::prog2$
                            (cons :path (car (cddr acl2::tr)))
                          (cons (car acl2::tr) (cadr acl2::tr))))))
     (acl2::prog2$
-      (acl2::cw "<<<ASS-END census>>>~%")
+      (acl2::cw "<<<PROBE-END census>>>~%")
       (acl2::value :invisible))))"#;
 
 /// Every documented topic's name and one-line summary.
@@ -1590,21 +1590,21 @@ const CENSUS_PROBE: &str = r#"(acl2::prog2$
 /// is attempted once.
 const DOC_INDEX_PROBE: &str = r#"(acl2::let ((acl2::tbl (xdoc::get-xdoc-table (acl2::w acl2::state))))
   (acl2::prog2$
-    (acl2::cw "~%<<<ASS-BEGIN docnames>>>~%")
+    (acl2::cw "~%<<<PROBE-BEGIN docnames>>>~%")
     (acl2::prog2$
       (acl2::cw "~*0"
         (acl2::list "" "n ~x*~%" "n ~x*~%" "n ~x*~%"
           (loop$ for acl2::x in acl2::tbl
                  collect (acl2::cdr (acl2::assoc-eq :name acl2::x)))))
       (acl2::prog2$
-        (acl2::cw "<<<ASS-END docnames>>>~%<<<ASS-BEGIN docshorts>>>~%")
+        (acl2::cw "<<<PROBE-END docnames>>>~%<<<PROBE-BEGIN docshorts>>>~%")
         (acl2::prog2$
           (acl2::cw "~*0"
             (acl2::list "" "s ~x*~%" "s ~x*~%" "s ~x*~%"
               (loop$ for acl2::x in acl2::tbl
                      collect (acl2::cdr (acl2::assoc-eq :short acl2::x)))))
           (acl2::prog2$
-            (acl2::cw "<<<ASS-END docshorts>>>~%")
+            (acl2::cw "<<<PROBE-END docshorts>>>~%")
             (acl2::value :invisible)))))))"#;
 
 /// One topic's full documentation, transported verbatim.
@@ -1628,12 +1628,12 @@ fn doc_topic_probe(upcased: &str) -> String {
          \"{upcased}\")\n\
          collect acl2::x))))\n\
          (acl2::pprogn\n\
-         (acl2::princ$ \"<<<ASS-BEGIN topic>>>\" acl2::*standard-co* acl2::state)\n\
+         (acl2::princ$ \"<<<PROBE-BEGIN topic>>>\" acl2::*standard-co* acl2::state)\n\
          (acl2::princ$ \"\n\" acl2::*standard-co* acl2::state)\n\
          (acl2::princ$ (acl2::if acl2::hit\n\
          (acl2::cdr (acl2::assoc-eq :long acl2::hit)) \"\")\n\
          acl2::*standard-co* acl2::state)\n\
-         (acl2::princ$ \"\n<<<ASS-END topic>>>\n\" acl2::*standard-co* acl2::state)\n\
+         (acl2::princ$ \"\n<<<PROBE-END topic>>>\n\" acl2::*standard-co* acl2::state)\n\
          (acl2::value :invisible)))"
     )
 }
@@ -1664,8 +1664,8 @@ fn detail_probe(name: &str) -> String {
          (acl2::bk (acl2::and acl2::ev\n\
          (acl2::global-val 'acl2::include-book-path acl2::ev))))\n\
          (acl2::prog2$\n\
-         (acl2::cw \"~%<<<ASS-BEGIN detail>>>~%found ~x0~%formals ~x1~%guard ~x2~%\
-         margs ~x3~%thm ~x4~%const ~x5~%book ~x6~%evcmd ~x7~%<<<ASS-END detail>>>~%\"\n\
+         (acl2::cw \"~%<<<PROBE-BEGIN detail>>>~%found ~x0~%formals ~x1~%guard ~x2~%\
+         margs ~x3~%thm ~x4~%const ~x5~%book ~x6~%evcmd ~x7~%<<<PROBE-END detail>>>~%\"\n\
          (acl2::if acl2::ev acl2::t acl2::nil)\n\
          (acl2::getpropc acl2::nm 'acl2::formals :none acl2::wrld)\n\
          (acl2::untranslate\n\
@@ -2321,8 +2321,8 @@ impl Book {
     /// - **Nothing reaches the `OutputStore`.** Hovering a file walks hundreds
     ///   of names; storing a log apiece would evict the unit logs the form view
     ///   exists to show. The markers come back inline instead.
-    /// - **The answer is structured, not prose.** Callers get the `ASS-DATA`
-    ///   pairs and `ASS-BEGIN`/`ASS-END` blocks their probe printed, which is
+    /// - **The answer is structured, not prose.** Callers get the `PROBE-DATA`
+    ///   pairs and `PROBE-BEGIN`/`PROBE-END` blocks their probe printed, which is
     ///   the same wrapping-tolerant protocol every other probe uses. Nobody
     ///   parses printed Lisp out of `output`; it is carried only so a
     ///   misbehaving probe can be diagnosed, which is the failure mode probes
@@ -3282,7 +3282,7 @@ impl Book {
     fn make_package_stick(&mut self, target: &str, deadline: Duration) -> Result<(), SyncError> {
         let raw = format!(
             "(acl2::in-package \"{target}\")\n\
-             (acl2::prog2$ (acl2::cw \"~%<<<ASS-DATA pkg ~x0>>>~%\" \
+             (acl2::prog2$ (acl2::cw \"~%<<<PROBE-DATA pkg ~x0>>>~%\" \
                (acl2::f-get-global 'acl2::current-package acl2::state)) \
                (acl2::value :invisible))"
         );
@@ -4314,7 +4314,7 @@ fn rules_probe(names: &[String], untranslated: bool) -> String {
     // value otherwise, and a stray `NIL` landing inside the block would be
     // read as part of the structure it follows.
     let mut out = String::from(
-        "(acl2::prog2$ (acl2::cw \"~%<<<ASS-BEGIN rules>>>~%\") \
+        "(acl2::prog2$ (acl2::cw \"~%<<<PROBE-BEGIN rules>>>~%\") \
          (acl2::value :invisible))\n",
     );
     for n in names {
@@ -4359,7 +4359,7 @@ fn rules_probe(names: &[String], untranslated: bool) -> String {
         ));
     }
     out.push_str(
-        "(acl2::prog2$ (acl2::cw \"<<<ASS-END rules>>>~%\") \
+        "(acl2::prog2$ (acl2::cw \"<<<PROBE-END rules>>>~%\") \
          (acl2::value :invisible))\n",
     );
     out

@@ -177,7 +177,7 @@ fn a_forms_value_is_asked_for_not_scraped() {
 
     // And none of this reaches the form's own captured output.
     let sub = s.submit("(acl2::+ 1 2)", D).expect("submit");
-    assert!(!sub.output.contains("ASS-BEGIN"), "the probe does not pollute the log");
+    assert!(!sub.output.contains("PROBE-BEGIN"), "the probe does not pollute the log");
     assert!(!sub.output.contains("vkind"), "nor leak its keys: {}", sub.output);
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -1914,7 +1914,7 @@ fn a_killed_acl2_reads_as_dead_not_busy() {
 
 /// A value ACL2's fmt wraps at the margin survives the block protocol.
 ///
-/// The environment report used to travel in one-line `ASS-DATA` markers, and
+/// The environment report used to travel in one-line `PROBE-DATA` markers, and
 /// ACL2 wraps `~x` at the right margin, so a books path longer than the
 /// margin lost its closing `>>>` -- the datum silently vanished and the
 /// marker fragments leaked into the capture. The report now travels in a
@@ -1933,7 +1933,7 @@ fn a_wrapped_block_value_survives_the_real_fmt() {
         (0..14).map(|i| format!("/deeply-nested-directory-{i:02}")).collect::<String>() + "/books/";
     assert!(long.len() > 120, "the value must outrun ACL2's margin");
     let probe = format!(
-        "(acl2::prog2$ (acl2::cw \"~%<<<ASS-BEGIN env>>>~%inhibit ~x0~%sbd ~x1~%<<<ASS-END env>>>~%\" \
+        "(acl2::prog2$ (acl2::cw \"~%<<<PROBE-BEGIN env>>>~%inhibit ~x0~%sbd ~x1~%<<<PROBE-END env>>>~%\" \
            '(acl2::proof-tree acl2::observation acl2::warning acl2::history acl2::summary) \
            \"{long}\") \
          (acl2::value :invisible))"
@@ -1947,7 +1947,7 @@ fn a_wrapped_block_value_survives_the_real_fmt() {
             "the wrapped value must survive whole; got block: {body:?}");
     assert!(flat.contains("proof-tree") || flat.to_lowercase().contains("proof-tree"),
             "the inhibit list survives too: {body:?}");
-    assert!(!sub.output.contains("<<<ASS-"),
+    assert!(!sub.output.contains("<<<PROBE-"),
             "no marker fragments may leak into the capture: {:?}", sub.output);
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -2428,7 +2428,7 @@ fn a_running_forms_output_can_be_read_before_it_finishes() {
     // The live view and the filed log are the same document: our probe
     // scaffolding is stripped from both, so nothing a reader watched
     // disappears when the form lands.
-    for marker in ["<<<ASS-BEGIN", "<<<ASS-END", "<<<ASS-DATA", "ACL2-SESSION-MARK-"] {
+    for marker in ["<<<PROBE-BEGIN", "<<<PROBE-END", "<<<PROBE-DATA", "ACL2-SESSION-MARK-"] {
         assert!(
             !live_text.contains(marker),
             "live output carries no bookkeeping ({marker}): {live_text:.400}"
