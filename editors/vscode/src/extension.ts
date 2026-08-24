@@ -2612,7 +2612,6 @@ function buildFormModel(s: BookSession, index: number): FormModel | undefined {
     status: u.status,
     checkpoints: [],
     rules: [],
-    skipped: u.status === 'skipped',
   };
   // An unchecked or running unit's cached envelope describes an earlier life
   // (before a rollback re-queued it), so it is not shown.

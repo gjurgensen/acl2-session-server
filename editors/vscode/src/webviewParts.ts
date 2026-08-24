@@ -257,13 +257,24 @@ function bindFolds(root) {
  * \`ok\`, for the same green state, which is why the stylesheet still
  * carries the two class names as a pair. Both land on one label here.
  *
+ * The words are verbs -- what happened to this form -- rather than nouns for
+ * what it is. That is what keeps the set consistent: past participle for a
+ * form that finished, present participle for one that has not, which is one
+ * grammatical family across all eight. Nouns agree for
+ * success-against-failure and then fall apart, since \`running\` and
+ * \`pending\` have no one-word noun and \`conditional\` has none at all.
+ *
+ * \`conditional\` is the deliberate holdout: it is not an outcome but a
+ * qualification of one. The form did succeed; what is conditional is the
+ * world underneath it.
+ *
  * Total on purpose, with anything unrecognized falling through to the wire's
  * own word: a status the daemon grows next should render as itself rather
  * than as nothing. Lowercase throughout, matching the rest of the surface.
  */
 function statusLabel(status) {
   const s = String(status);
-  if (s === 'admitted' || s === 'ok') { return 'success'; }
+  if (s === 'admitted' || s === 'ok') { return 'succeeded'; }
   return s;
 }
 

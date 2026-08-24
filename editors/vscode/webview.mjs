@@ -226,15 +226,24 @@ check(spans([[{ t: 'a', c: '' }], [{ t: 'b', c: '' }]]) === 'a\nb', 'and joins l
 //
 // The chips stopped echoing the wire because `admitted` is wrong for a form
 // that was evaluated rather than defined, and the console had already needed
-// a second word for the same state. What matters is that the map is total:
-// every status the stylesheet paints must come out as something, and a
-// status it has never heard of must come out as itself.
+// a second word for the same state. Two things matter. The map is total:
+// every status the stylesheet paints comes out as something, and one it has
+// never heard of comes out as itself. And the words agree with each other --
+// they are verbs, so a finished form reads as a past participle and an
+// unfinished one as a present participle, rather than mixing a noun in among
+// them.
 
 {
   const statusLabel = lift('statusLabel');
-  check(statusLabel('admitted') === 'success', 'an admitted form reads as a success');
-  check(statusLabel('ok') === 'success', 'and so does an eval, which the wire calls ok');
+  check(statusLabel('admitted') === 'succeeded', 'an admitted form reads as succeeded');
+  check(statusLabel('ok') === 'succeeded', 'and so does an eval, which the wire calls ok');
   check(statusLabel('failed') === 'failed', 'the rest keep the word they already had');
+  // The inconsistency this replaced: a noun beside a participle.
+  for (const [st, want] of [['admitted', 'succeeded'], ['failed', 'failed'],
+                            ['skipped', 'skipped'], ['running', 'running'],
+                            ['queued', 'queued'], ['pending', 'pending']]) {
+    check(statusLabel(st) === want, `${st} reads as a verb (${want})`);
+  }
   check(statusLabel('gubbins') === 'gubbins',
         'and a status from a newer daemon renders as itself, not as nothing');
   for (const st of ['admitted', 'ok', 'conditional', 'skipped', 'failed',

@@ -143,7 +143,6 @@ export interface FormModel extends FormEnvelope {
   colEnd: number;
   /** The paint status: `admitted`, `conditional`, `skipped`, `failed`, ... */
   status: string;
-  skipped: boolean;
 }
 
 /**
@@ -578,10 +577,6 @@ function render() {
   }
   if (m.proverSteps != null) { h += '<span class="meta">' + m.proverSteps + ' steps</span>'; }
   h += '</div>';
-  if (m.skipped) {
-    h += '<div class="note">Admitted with its proofs skipped \\u2014 checking continued. ' +
-         'Every form below is conditional on this unproved claim.</div>';
-  }
   if (m.status === 'running') {
     // Highlighting the tail here would mean a second grammar and a full
     // re-tokenize twice a second, because a webview cannot do what the
