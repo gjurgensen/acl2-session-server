@@ -107,13 +107,13 @@ button:hover { background: var(--vscode-button-secondaryHoverBackground); }
 ul.rules { list-style: none; margin: 3px 0 0; padding: 0; }
 ul.rules > li { padding: 1px 0; }
 ul.rules table.inner { margin: 2px 0 5px 14px; }
-td.blockrow { padding: 0 0 3px; }
-/* A field's own value carries no rule, however many lines it runs to. The
-   label above it is already the structure; the rule is what a *standalone*
-   block gets -- a checkpoint, the value, the live log -- where nothing else
-   bounds it. So the mark comes to mean "a top-level block of ACL2 output"
-   rather than "code that happened to wrap". */
-td.blockrow pre { margin: 2px 0 4px; border-left: 0; padding-left: 0; }
+/* A field's own value, however many lines it runs to. No rule down its edge:
+   the label beside it is the structure, and the rule is for a standalone
+   block -- a checkpoint, the value, the live log -- where nothing else bounds
+   it. So the mark means "a top-level block of ACL2 output" rather than "code
+   that happened to wrap". Kept in the value cell, not promoted to its own
+   line, so it reads as this label's value and no more. */
+pre.field { margin: 1px 0; border-left: 0; padding: 0; }
 .cp { margin: 8px 0; }
 details > summary { cursor: pointer; }
 details > summary h3 { display: inline; }
@@ -360,25 +360,23 @@ function guardNote(c) {
   return '';
 }
 
-/** A term inline when it fits on one line, in a block when it does not. */
 /**
  * One labelled fact -- a guard, a measure, a rule's left-hand side.
  *
- * A term that fits on a line stays inline in the value column, unmarked:
- * beside its label it reads as one row of a key/value grid. A term that
- * needs more than a line takes its *own* line instead -- the label above it,
- * the block full width below -- because a marked block wedged into the value
- * column next to inline one-liners is the one thing that looked wrong here.
- * Own-line is what earns the rule down the left; inline never does.
+ * The value sits beside its label in the value column either way. A term that
+ * fits is inline; a term that runs to several lines keeps ACL2's own layout
+ * in a preformatted block, still in the cell, still to the right of the label
+ * -- it does not get promoted onto a line of its own. Neither is marked: the
+ * label is the structure, and the rule down the edge is for a standalone
+ * block, not a field's own value. (No backticks in here: this is inside a
+ * template literal.)
  */
 function factRow(label, term) {
   const t = String(term);
-  if (t.includes('\\n')) {
-    return '<tr><td class="meta" colspan="2">' + esc(label) + '</td></tr>' +
-      '<tr><td colspan="2" class="blockrow"><pre>' + hl(t) + '</pre></td></tr>';
-  }
-  return '<tr><td class="meta">' + esc(label) + '</td>' +
-    '<td><code class="lisp">' + hl(t) + '</code></td></tr>';
+  const value = t.includes('\\n')
+    ? '<pre class="field">' + hl(t) + '</pre>'
+    : '<code class="lisp">' + hl(t) + '</code>';
+  return '<tr><td class="meta">' + esc(label) + '</td><td>' + value + '</td></tr>';
 }
 
 /**

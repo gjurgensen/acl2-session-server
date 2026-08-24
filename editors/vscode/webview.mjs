@@ -411,28 +411,27 @@ const envelope = lift('esc', 'strip', 'causes', 'spans', 'hl', 'rat',
         'and run in source order, not the newest-first order the wire sends');
   check(/lhs<\/td><td><code[^>]*>\(true-listp \(dfn-app x y\)\)/.test(h),
         'the left-hand side a rewrite rule will match is shown, inline');
-  // A one-liner stays in the value column; a term that needs its own line
-  // takes one, full width, rather than sitting boxed in the cell next to the
-  // inline rows -- the block-next-to-non-block that read wrong.
+  // The value sits beside its label either way: a one-liner inline, a
+  // multi-line term as a pre still in the value cell, never promoted to its
+  // own line. Neither is marked.
   {
     const factRow = lift('esc', 'spans', 'hl', 'factRow');
     const one = factRow('lhs', '(true-listp x)');
     check(/<td class="meta">lhs<\/td><td><code/.test(one),
-          'a one-line term stays inline in the value column, unmarked');
-    check(!one.includes('blockrow'), 'and takes no block row');
+          'a one-line term is inline in the value column');
     const many = factRow('corollary', '(or (consp x)\n    (equal x y))');
-    check(/<td class="meta" colspan="2">corollary<\/td>/.test(many),
-          'a multi-line term puts its label on its own line');
-    check(/<td colspan="2" class="blockrow"><pre>/.test(many),
-          'and the block full width below, under the label that names it');
+    check(/<td class="meta">corollary<\/td><td><pre class="field">/.test(many),
+          'a multi-line term stays in the value cell, beside its label');
+    check(!many.includes('colspan'),
+          'and is not promoted onto a line of its own');
   }
   // A field value carries no rule down its edge, at any length: the label is
   // the structure. The rule is for a standalone block -- a checkpoint, the
   // value, the tail -- which this asserts the stylesheet still marks.
   {
     const { SHARED_CSS } = require('./out/webviewParts.js');
-    check(/td\.blockrow pre \{[^}]*border-left: 0/.test(SHARED_CSS),
-          'a field block loses the rule the label already stands in for');
+    check(/pre\.field \{[^}]*border-left: 0/.test(SHARED_CSS),
+          'a field value loses the rule the label already stands in for');
     check(/^pre \{[^}]*border-left: 2px/m.test(SHARED_CSS),
           'while a standalone block keeps it');
   }
