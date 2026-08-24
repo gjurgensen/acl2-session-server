@@ -355,7 +355,7 @@ globalThis.toks = {};
 const envelope = lift('esc', 'strip', 'causes', 'spans', 'hl', 'rat',
                       'fmtSecs', 'timeParts', 'proveSecs', 'fmtTime', 'guardNote',
                       'folds', 'foldScope', 'foldScopeIs', 'fold',
-                      'termHtml', 'kvRow', 'nameFacts', 'introducedHtml', 'usedHtml',
+                      'factRow', 'nameFacts', 'introducedHtml', 'usedHtml',
                       'eventHtml', 'productiveHtml', 'failureHtml', 'warningsHtml',
                       'envelope');
 {
@@ -410,7 +410,22 @@ const envelope = lift('esc', 'strip', 'causes', 'spans', 'hl', 'rat',
         h.indexOf('<code class="ename">true-listp-of-dfn-app</code>'),
         'and run in source order, not the newest-first order the wire sends');
   check(/lhs<\/td><td><code[^>]*>\(true-listp \(dfn-app x y\)\)/.test(h),
-        'the left-hand side a rewrite rule will match is shown');
+        'the left-hand side a rewrite rule will match is shown, inline');
+  // A one-liner stays in the value column; a term that needs its own line
+  // takes one, full width, rather than sitting boxed in the cell next to the
+  // inline rows -- the block-next-to-non-block that read wrong.
+  {
+    const factRow = lift('esc', 'spans', 'hl', 'factRow');
+    const one = factRow('lhs', '(true-listp x)');
+    check(/<td class="meta">lhs<\/td><td><code/.test(one),
+          'a one-line term stays inline in the value column, unmarked');
+    check(!one.includes('blockrow'), 'and takes no block row');
+    const many = factRow('corollary', '(or (consp x)\n    (equal x y))');
+    check(/<td class="meta" colspan="2">corollary<\/td>/.test(many),
+          'a multi-line term puts its label on its own line');
+    check(/<td colspan="2" class="blockrow"><pre>/.test(many),
+          'and the block full width below, where the rule down its edge fits');
+  }
   check((h.match(/data-fold="g-ev:[^":]*"/g) || []).length === 2,
         'an event with nothing to show gets no fold');
   check(h.includes('detail (kind, time, steps, rules) is probed for the first 2'),

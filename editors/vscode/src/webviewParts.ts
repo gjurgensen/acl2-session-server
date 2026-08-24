@@ -107,6 +107,8 @@ button:hover { background: var(--vscode-button-secondaryHoverBackground); }
 ul.rules { list-style: none; margin: 3px 0 0; padding: 0; }
 ul.rules > li { padding: 1px 0; }
 ul.rules table.inner { margin: 2px 0 5px 14px; }
+td.blockrow { padding: 0 0 3px; }
+td.blockrow pre { margin: 2px 0 4px; }
 .cp { margin: 8px 0; }
 details > summary { cursor: pointer; }
 details > summary h3 { display: inline; }
@@ -354,14 +356,24 @@ function guardNote(c) {
 }
 
 /** A term inline when it fits on one line, in a block when it does not. */
-function termHtml(t) {
-  return String(t).includes('\\n')
-    ? '<pre>' + hl(t) + '</pre>'
-    : '<code class="lisp">' + hl(t) + '</code>';
-}
-
-function kvRow(label, value) {
-  return '<tr><td class="meta">' + esc(label) + '</td><td>' + value + '</td></tr>';
+/**
+ * One labelled fact -- a guard, a measure, a rule's left-hand side.
+ *
+ * A term that fits on a line stays inline in the value column, unmarked:
+ * beside its label it reads as one row of a key/value grid. A term that
+ * needs more than a line takes its *own* line instead -- the label above it,
+ * the block full width below -- because a marked block wedged into the value
+ * column next to inline one-liners is the one thing that looked wrong here.
+ * Own-line is what earns the rule down the left; inline never does.
+ */
+function factRow(label, term) {
+  const t = String(term);
+  if (t.includes('\\n')) {
+    return '<tr><td class="meta" colspan="2">' + esc(label) + '</td></tr>' +
+      '<tr><td colspan="2" class="blockrow"><pre>' + hl(t) + '</pre></td></tr>';
+  }
+  return '<tr><td class="meta">' + esc(label) + '</td>' +
+    '<td><code class="lisp">' + hl(t) + '</code></td></tr>';
 }
 
 /**
@@ -373,10 +385,10 @@ function kvRow(label, value) {
  */
 function nameFacts(d) {
   let rows = '';
-  if (d.guard) { rows += kvRow('guard', termHtml(d.guard)); }
-  if (d.measure) { rows += kvRow('measure', termHtml(d.measure)); }
-  if (d.relation) { rows += kvRow('decreasing under', termHtml(d.relation)); }
-  if (d.statement) { rows += kvRow('statement', termHtml(d.statement)); }
+  if (d.guard) { rows += factRow('guard', d.guard); }
+  if (d.measure) { rows += factRow('measure', d.measure); }
+  if (d.relation) { rows += factRow('decreasing under', d.relation); }
+  if (d.statement) { rows += factRow('statement', d.statement); }
   return rows ? '<table class="inner">' + rows + '</table>' : '';
 }
 
@@ -399,7 +411,7 @@ function introducedHtml(d) {
   return '<ul class="rules">' + (d.runes || []).map((u) => {
     const off = u.enabled === false ? ' <span class="off">disabled</span>' : '';
     const fs = (u.fields || [])
-      .map((f) => kvRow(f.key.replace(/^:/, ''), termHtml(f.value))).join('');
+      .map((f) => factRow(f.key.replace(/^:/, ''), f.value)).join('');
     return '<li><code class="lisp">' + hl(u.rune) + '</code>' + off +
       (fs ? '<table class="inner">' + fs + '</table>' : '') + '</li>';
   }).join('') + '</ul>';
