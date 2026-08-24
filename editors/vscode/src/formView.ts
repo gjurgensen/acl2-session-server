@@ -574,6 +574,9 @@ window.addEventListener('message', (ev) => {
     // A different form: whatever induction the last one did is not this
     // one's. The same form again is just a refresh, and keeps it.
     const key = m.model.book + ':' + m.model.index;
+    // Folds belong to a form. Arriving at a different one forgets them, the
+    // same as the induction and rules records below.
+    foldScopeIs(key);
     if (m.records) {
       // Carried with the model, so this render has both the terms and their
       // colors -- rendering once rather than twice is the whole point.
@@ -685,8 +688,8 @@ function inductionHtml() {
     // here -- this whole page is a template literal.)
     return h + '</div>';
   };
-  return '<details open><summary><h3>Induction (' + inductions.length + ')</h3></summary>' +
-    inductions.map(one).join('') + '</details>';
+  return fold('induction', true, '<h3>Induction (' + inductions.length + ')</h3>',
+    inductions.map(one).join(''));
 }
 
 /**
@@ -757,6 +760,7 @@ function render() {
 }
 
 bindGoals(document, (b, slot) => 'goal-' + slot);
+bindFolds(document);
 
 // Tell the extension how wide this pane is, in characters.
 //

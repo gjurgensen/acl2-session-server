@@ -420,6 +420,12 @@ function render() {
 }
 
 bindGoals(document, (b, slot) => 'egoal-' + seqOf(b) + '-' + slot);
+// The folds inside each entry's envelope. The console never scopes them: its
+// transcript is cumulative, so an entry scrolled past keeps whatever the
+// reader left open on it. Its own per-entry details.ev is separate and stays
+// on e.open, which collapseOthers drives. (No backticks in here: this comment
+// lives inside a template literal, and one would end the string.)
+bindFolds(document);
 
 // A form is complete when its parens close. Strings, character literals,
 // bar-quoted symbols and both comment syntaxes all hide parens that must not

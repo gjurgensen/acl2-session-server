@@ -87,21 +87,38 @@ const consoleScript = scriptOf(pages[0][1]);
  * that instead and every character class in the function under test is
  * quietly wrong. Names are given in dependency order; the last is returned.
  */
-function lift(...names) {
-  const parts = [];
+function parts(names) {
+  const out = [];
   for (const name of names) {
-    // Declarations end at a closing brace in column zero; arrow constants at
-    // the first `;` that ends a line. Both spellings are in use.
+    // Declarations end at a closing brace in column zero; arrow constants and
+    // mutable page state at the first `;` that ends a line. All three
+    // spellings are in use -- the fold map is a `let` because the page
+    // rewrites it when the cursor moves to another form.
     const m =
       new RegExp(`function ${name}\\([^)]*\\) \\{[\\s\\S]*?\\n\\}`).exec(consoleScript) ??
-      new RegExp(`const ${name} = [\\s\\S]*?;$`, 'm').exec(consoleScript);
+      new RegExp(`const ${name} = [\\s\\S]*?;$`, 'm').exec(consoleScript) ??
+      new RegExp(`let ${name} = [\\s\\S]*?;$`, 'm').exec(consoleScript);
     if (!m) {
       console.error(`FAIL: ${name} is not in the console script`);
       process.exit(2);
     }
-    parts.push(m[0]);
+    out.push(m[0]);
   }
-  return new Function(`${parts.join('\n')}; return ${names[names.length - 1]};`)();
+  return out.join('\n');
+}
+
+function lift(...names) {
+  return new Function(`${parts(names)}; return ${names[names.length - 1]};`)();
+}
+
+/**
+ * Several names at once, for a group that only means anything together.
+ *
+ * `fold` is the case: it reads and writes page state that `bindFolds`
+ * records, so testing either one alone tests nothing.
+ */
+function liftAll(names, expr) {
+  return new Function(`${parts(names)}; return ${expr};`)();
 }
 
 // ---- `complete`: does Enter send this, or give the user another line? ----
@@ -161,6 +178,61 @@ check(
 );
 check(spans([[{ t: 'a', c: '' }], [{ t: 'b', c: '' }]]) === 'a\nb', 'and joins lines with newlines');
 
+// ---- folds: what the reader opened, surviving the next render ----
+//
+// A render replaces the page's markup, so `open` on a `<details>` is gone
+// with the element that carried it. Everything here is about the three
+// states being distinct -- opened, closed, and never touched -- because a
+// fold the reader deliberately shut must not spring back open just because
+// its section's default says open.
+
+{
+  const { fold, foldScopeIs, bindFolds } =
+    liftAll(['esc', 'folds', 'foldScope', 'foldScopeIs', 'fold', 'bindFolds'],
+            '({ fold, foldScopeIs, bindFolds })');
+
+  // The page binds one listener on the document; this stands in for it, and
+  // records how it was bound.
+  let toggled;
+  let capture;
+  bindFolds({
+    addEventListener: (type, fn, useCapture) => {
+      if (type === 'toggle') { toggled = fn; capture = useCapture; }
+    },
+  });
+  check(capture === true,
+    'folds are recorded in the capture phase, since toggle does not bubble');
+
+  const details = (id, open) => ({ tagName: 'DETAILS', dataset: { fold: id }, open });
+  const open = (id, byDefault) => fold(id, byDefault, 'S', 'B').includes(' open>');
+
+  check(open('a', true), 'an untouched fold takes its section default');
+  check(!open('b', false), 'and a closed default stays closed');
+
+  toggled({ target: details('a', false) });
+  check(!open('a', true), 'a fold the reader shut stays shut through the next render');
+  toggled({ target: details('b', true) });
+  check(open('b', false), 'and one they opened stays open');
+
+  foldScopeIs('book:4');
+  toggled({ target: details('c', false) });
+  foldScopeIs('book:4');
+  check(!open('c', true), 'a re-render of the same form keeps what they left');
+  foldScopeIs('book:5');
+  check(open('c', true), 'while moving to another form forgets it');
+
+  check(fold('4:event:my-app:introduced', true, 'S', 'B')
+          .includes('data-fold="4:event:my-app:introduced"'),
+    'the id is carried on the element, so the next render can find it again');
+  check(fold('a&b', true, 'S', 'B').includes('data-fold="a&amp;b"'),
+    'and escaped, since an ACL2 name is not HTML');
+
+  // Neither of these is a fold; neither should be recorded or throw.
+  toggled({ target: { tagName: 'DETAILS', dataset: {} } });
+  toggled({ target: { tagName: 'DIV', dataset: { fold: 'a' } } });
+  check(open('a', true), 'a details with no id, and a non-details, are both ignored');
+}
+
 // ---- `envelope`: what a form left behind, per event ----
 //
 // The scrape hangs off the events under "inside this form", which is the
@@ -171,6 +243,7 @@ check(spans([[{ t: 'a', c: '' }], [{ t: 'b', c: '' }]]) === 'a\nb', 'and joins l
 globalThis.toks = {};
 const envelope = lift('esc', 'strip', 'causes', 'spans', 'hl', 'codes', 'rat',
                       'fmtSecs', 'timeParts', 'proveSecs', 'guardNote', 'nameDetail',
+                      'folds', 'foldScope', 'foldScopeIs', 'fold',
                       'envelope');
 {
   const fn = {
@@ -216,7 +289,7 @@ const envelope = lift('esc', 'strip', 'causes', 'spans', 'hl', 'codes', 'rat',
   check(h.includes('rules the proof used'), 'and the two are labelled apart');
   check(/lhs<\/td><td><code[^>]*>\(true-listp \(dfn-app x y\)\)/.test(h),
         'the left-hand side a rewrite rule will match is shown');
-  check((h.match(/<summary class="meta">/g) || []).length === 2,
+  check((h.match(/data-fold="[^"]*ev:/g) || []).length === 2,
         'an event with nothing to show gets no fold');
   check(h.includes('detail (kind, time, steps, rules) is probed for the first 2'),
         'and is counted as unprobed, so a truncated probe still says so');

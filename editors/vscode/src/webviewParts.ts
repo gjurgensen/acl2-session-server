@@ -101,6 +101,72 @@ function hl(src) {
   return lines ? spans(lines) : esc(src);
 }
 
+/**
+ * Which folds the reader has opened or closed, by id, and what those ids
+ * belong to.
+ *
+ * A render replaces the page's markup wholesale, and \`open\` is state on the
+ * \`<details>\` element -- so without this every re-render returns every fold
+ * to its authored default. That is not a rare event: the form view re-renders
+ * on every state event, and a form landing produced fifteen of them in six
+ * seconds in \`kestrel/c/syntax/validator.lisp\`. The rules scrape and the
+ * induction narrative each arrive as their own later message besides. Open a
+ * rule list, let the scrape land two hundred milliseconds later, and it shuts
+ * under you.
+ *
+ * A map rather than a set, because the three states are distinct: opened,
+ * closed, and never touched -- and only the last should take the section's
+ * default.
+ */
+let folds = {};
+let foldScope = '';
+
+/**
+ * Say what the folds now belong to, forgetting them if it changed.
+ *
+ * The form view follows the cursor, so folds opened on the form you have left
+ * mean nothing on the one you arrived at. Same lifecycle as \`inductionKey\`
+ * and \`rulesKey\` in the form view, and for the same reason. The console
+ * never calls this: its transcript is cumulative, so its folds are too.
+ */
+function foldScopeIs(scope) {
+  if (scope !== foldScope) {
+    foldScope = scope;
+    folds = {};
+  }
+}
+
+/**
+ * A \`<details>\` whose open state survives the next render.
+ *
+ * \`id\` must be derived from what is inside it -- \`4:event:my-app:introduced\`
+ * -- and never from its position. A positional id is wrong the moment a list
+ * changes length, which is exactly when a form is re-probed and re-rendered.
+ */
+function fold(id, openByDefault, summaryHtml, bodyHtml, cls) {
+  const open = id in folds ? folds[id] : openByDefault;
+  return '<details data-fold="' + esc(id) + '"' +
+    (cls ? ' class="' + cls + '"' : '') + (open ? ' open' : '') + '>' +
+    '<summary>' + summaryHtml + '</summary>' + bodyHtml + '</details>';
+}
+
+/**
+ * Record every fold the reader touches.
+ *
+ * In the capture phase on purpose: \`toggle\` does not bubble, so a delegated
+ * listener on the document never sees it otherwise. One listener for the page
+ * rather than one per element, because the elements are replaced on every
+ * render and their listeners would go with them.
+ */
+function bindFolds(root) {
+  root.addEventListener('toggle', (ev) => {
+    const d = ev.target;
+    if (d && d.tagName === 'DETAILS' && d.dataset && d.dataset.fold) {
+      folds[d.dataset.fold] = d.open;
+    }
+  }, true);
+}
+
 function codes(list) {
   return '<p class="codes">' +
     list.map((r) => '<code class="lisp">' + hl(r) + '</code>').join('') + '</p>';
@@ -243,8 +309,8 @@ function envelope(m, p, on) {
   if (m.warnings) {
     // The daemon joins the kinds with ", ", so splitting counts them exactly.
     const kinds = String(m.warnings).split(', ');
-    h += '<details open><summary><h3>Warnings (' + kinds.length + ')</h3></summary>' +
-      '<pre>' + esc(m.warnings) + '</pre></details>';
+    h += fold(p + 'warnings', true, '<h3>Warnings (' + kinds.length + ')</h3>',
+      '<pre>' + esc(m.warnings) + '</pre>');
   }
   if ((m.hintEvents || []).length) {
     h += '<h3>Hints that fired</h3>' + codes(m.hintEvents);
@@ -254,16 +320,15 @@ function envelope(m, p, on) {
   }
   if ((m.rules || []).length) {
     const label = m.failed ? 'Rules the attempt used' : 'Rules';
-    h += '<details open><summary><h3>' + label + ' (' + m.rules.length + ')</h3></summary>' +
-      codes(m.rules) + '</details>';
+    h += fold(p + 'rules', true, '<h3>' + label + ' (' + m.rules.length + ')</h3>',
+      codes(m.rules));
   }
   const inner = m.inner || [];
   if (inner.length) {
     const total = m.innerTotal != null && m.innerTotal > inner.length
       ? inner.length + ' shown of ' + m.innerTotal
       : String(inner.length);
-    h += '<details open><summary><h3>Inside this form (' + total + ')</h3></summary>' +
-      '<table class="inner">' +
+    let innerBody = '<table class="inner">' +
       inner.map((e) => {
         // An empty steps cell has meant two different things: this event
         // never entered the prover, and this event's detail was never read.
@@ -303,8 +368,10 @@ function envelope(m, p, on) {
           (used ? '<div class="meta">rules the proof used</div>' + codes(e.rules) : '');
         if (body || bits.length) {
           row += '<tr><td></td><td colspan="4" class="detail">' +
-            '<details><summary class="meta">' + (bits.join(' \\u00b7 ') || 'detail') +
-            '</summary>' + body + '</details></td></tr>';
+            fold(p + 'ev:' + e.name, false,
+              '<span class="meta">' + (bits.join(' \\u00b7 ') || 'detail') + '</span>',
+              body) +
+            '</td></tr>';
         }
         return row;
       }).join('') + '</table>';
@@ -312,10 +379,10 @@ function envelope(m, p, on) {
       (e) => e.kind || e.time || e.proverSteps != null || (e.rules || []).length || e.detail
     ).length;
     if (detailed < inner.length) {
-      h += '<p class="meta">detail (kind, time, steps, rules) is probed for the first ' +
+      innerBody += '<p class="meta">detail (kind, time, steps, rules) is probed for the first ' +
         detailed + ' events; the rest are names only.</p>';
     }
-    h += '</details>';
+    h += fold(p + 'inner', true, '<h3>Inside this form (' + total + ')</h3>', innerBody);
   }
   return h;
 }
