@@ -222,6 +222,28 @@ check(spans([[{ t: 'a', c: '' }], [{ t: 'b', c: '' }]]) === 'a\nb', 'and joins l
         'and the CSP names the origin that will serve it');
 }
 
+// ---- the running form: the tail takes the pane ----
+//
+// While a form runs the log is the only thing on the page, so it fills the
+// pane rather than sitting in a fixed box. Both `min-height: 0` rules are
+// load-bearing -- without them a flex child will not shrink below its
+// content and the *pane* scrolls instead of the log, which looks like the
+// tail simply not working.
+
+{
+  const page = pages[1][1];
+  check(/#root\.running \{[^}]*display: flex/.test(page),
+        'a running form lays its page out as a column');
+  check(/#root\.running details\.tail\[open\] \{[^}]*flex: 1;[^}]*min-height: 0/.test(page),
+        'the open tail fold takes the leftover room');
+  check(/#root\.running details\.tail\[open\] #tailtext \{[^}]*min-height: 0/.test(page),
+        'and so does the log inside it, or the pane scrolls instead');
+  check(/details\.tail\[open\]/.test(page) && !/details\.tail \{/.test(page),
+        'only while open, so a collapsed fold lets the button rise');
+  check(page.indexOf("fold('tail'") < page.indexOf('id="openoutput"'),
+        'the button sits under the output, not above it');
+}
+
 // ---- `statusLabel`: the word on the chip ----
 //
 // The chips stopped echoing the wire because `admitted` is wrong for a form

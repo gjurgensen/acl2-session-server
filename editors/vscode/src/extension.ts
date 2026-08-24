@@ -308,7 +308,16 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(problems);
 
   formView.onCols = (cols) => setLayout(cols);
-  formView.onShowOutput = () => void vscode.commands.executeCommand('acl2-session.showOutput');
+  // Not the `showOutput` command: that resolves a book from the active text
+  // editor, and clicking this focuses the webview, where there is none.
+  formView.onShowOutput = (book, index) =>
+    void (async () => {
+      const s = byId.get(book);
+      if (s) {
+        await showUnitOutput(s, index);
+        await outputView.open();
+      }
+    })();
 
   // The grammar and theme load off disk, so the first form view may render
   // before they arrive; refresh once they have, and again whenever the

@@ -222,8 +222,16 @@ export class FormView {
   /** The serialised model last sent to the page. See `render`. */
   private postedModel?: string;
 
-  /** Asked for by the page's button while a form is running. */
-  onShowOutput?: () => void;
+  /**
+   * Asked for by the page's button while a form is running.
+   *
+   * Carries the book and unit rather than letting the extension work them
+   * out. Clicking a button in here focuses the webview, so there is no
+   * active text editor to find a book from -- the same reason the lock
+   * commands do not go through `forBook`. The form view knows exactly which
+   * form it is showing; it should say so.
+   */
+  onShowOutput?: (book: string, index: number) => void;
 
   /**
    * Set by the extension once the grammar and theme are loaded. Terms travel
@@ -303,8 +311,8 @@ export class FormView {
         this.onCols?.(this.layoutCols());
         return;
       }
-      if (m.cmd === 'showOutput') {
-        this.onShowOutput?.();
+      if (m.cmd === 'showOutput' && this.model) {
+        this.onShowOutput?.(this.model.book, this.model.index);
         return;
       }
     }
@@ -481,8 +489,26 @@ export const HTML = `<!DOCTYPE html>
                font-src %%CSPSOURCE%%;">
 <style>
 ${SHARED_CSS}
-body { padding: 2px 12px 12px; }
+html, body { height: 100%; }
+body { padding: 2px 12px 12px; box-sizing: border-box; }
 #tailtext { max-height: 45vh; overflow: auto; }
+/* While a form is running the tail is the only thing on the page, so it
+   takes the pane instead of sitting in a fixed box with dead space under
+   it -- and the button, being after it, lands at the foot of the pane
+   rather than above the output it is offering an alternative to.
+   \`min-height: 0\` on both, or a flex child refuses to shrink below the
+   size of its content and the pane scrolls instead of the log. Only while
+   the fold is open: a closed one should stay its own height and let the
+   button rise. */
+#root { min-height: 100%; }
+#root.running { display: flex; flex-direction: column; height: 100%; }
+#root.running details.tail[open] {
+  display: flex; flex-direction: column; flex: 1; min-height: 0;
+}
+#root.running details.tail[open] #tailtext {
+  flex: 1; min-height: 0; max-height: none;
+}
+.openrow { margin: 8px 0 0; }
 </style>
 </head>
 <body>
@@ -561,8 +587,9 @@ function withDetail(m) {
 function render() {
   const m = model;
   if (!m) {
-    document.getElementById('root').innerHTML =
-      note ? '<div class="notice">' + esc(note) + '</div>' : '';
+    const empty = document.getElementById('root');
+    empty.className = '';
+    empty.innerHTML = note ? '<div class="notice">' + esc(note) + '</div>' : '';
     return;
   }
   let h = note ? '<div class="notice">' + esc(note) + '</div>' : '';
@@ -582,10 +609,10 @@ function render() {
     // re-tokenize twice a second, because a webview cannot do what the
     // output view does -- that is a real TextDocument, colored by VSCode
     // from its language. So hand the reader to the thing that already works.
-    h += '<p><button id="openoutput">Open in Output view</button></p>' +
-      fold('tail', true,
-        '<h3>Prover output <span id="elapsed" class="meta"></span></h3>',
-        '<pre id="tailtext">(waiting for output\\u2026)</pre>');
+    h += fold('tail', true,
+      '<h3>Prover output <span id="elapsed" class="meta"></span></h3>',
+      '<pre id="tailtext">(waiting for output\\u2026)</pre>', 'tail') +
+      '<p class="openrow"><button id="openoutput">Open in Output view</button></p>';
   }
   // pending and beyond render nothing below the chip. There is no further
   // information about either, and a sentence saying so is filler -- the
@@ -598,7 +625,12 @@ function render() {
   // No actions row. Retracting and holding the target are editor verbs with
   // their own keybindings, and the full log has one too; a form view that follows
   // the cursor is a poor place to put a button whose effect is elsewhere.
-  document.getElementById('root').innerHTML = h;
+  const root = document.getElementById('root');
+  // The one state whose content should fill the pane rather than flow down
+  // it. Set on the element rather than baked into the markup because the
+  // page is one document across every state.
+  root.className = m.status === 'running' ? 'running' : '';
+  root.innerHTML = h;
 }
 
 bindFolds(document);
