@@ -32,6 +32,7 @@ Module._resolveFilename = (request, ...rest) =>
 // default, which is what a harness should say about an unset setting.
 const vscodeStub = {
   workspace: { getConfiguration: () => ({ get: (_key, fallback) => fallback }) },
+  Uri: { joinPath: (base, ...parts) => `${base}/${parts.join('/')}` },
 };
 require.cache.vscode =
   { id: 'vscode', filename: 'vscode', loaded: true, exports: vscodeStub };
@@ -184,6 +185,42 @@ check(
   'and reproduces the source text exactly, so the overlay stays in register'
 );
 check(spans([[{ t: 'a', c: '' }], [{ t: 'b', c: '' }]]) === 'a\nb', 'and joins lines with newlines');
+
+// ---- the icon font, and the two holes a page cannot fill for itself ----
+//
+// A webview gets no icons for free, so the chevrons on the folds are
+// VSCode's own codicon font shipped with the extension. Where it lives and
+// what the webview will load it from are both per-webview, so the pages
+// carry placeholders and `pageHtml` fills them. A page that forgot either
+// one renders with no chevrons and a console full of CSP violations, which
+// is exactly the kind of thing nothing else here would notice.
+
+{
+  const { pageHtml, setExtensionUri, SHARED_CSS } = require('./out/webviewParts.js');
+
+  check(SHARED_CSS.includes('font-family: "codicon"'),
+        'the shared stylesheet asks for the codicon font');
+  check(SHARED_CSS.includes('\\eab6') && SHARED_CSS.includes('\\eab4'),
+        'and uses chevron-right closed, chevron-down open');
+  check(/details\[data-fold\]/.test(SHARED_CSS),
+        'scoped to the folds, so the console keeps its own summaries');
+
+  for (const [what, page] of pages) {
+    check(page.includes('%%CODICON%%'), `${what} carries the font placeholder`);
+    check(/font-src %%CSPSOURCE%%/.test(page), `${what} allows the font in its CSP`);
+  }
+
+  setExtensionUri('ext:/root');
+  const filled = pageHtml(pages[1][1], {
+    asWebviewUri: (u) => ({ toString: () => `https://webview/${u}` }),
+    cspSource: 'https://webview',
+  });
+  check(!filled.includes('%%'), 'and pageHtml leaves no placeholder behind');
+  check(filled.includes('https://webview/ext:/root/node_modules/@vscode/codicons/dist/codicon.ttf'),
+        'the font URL points at the file the extension ships');
+  check(filled.includes('font-src https://webview'),
+        'and the CSP names the origin that will serve it');
+}
 
 // ---- `statusLabel`: the word on the chip ----
 //

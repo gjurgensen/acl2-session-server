@@ -23,7 +23,7 @@
 import * as vscode from 'vscode';
 import { TokLines } from './highlight';
 import { FormEnvelope, highlightable, tokenizeAll } from './formView';
-import { SHARED_CSS, SHARED_JS } from './webviewParts';
+import { pageHtml, SHARED_CSS, SHARED_JS } from './webviewParts';
 
 export interface ConsoleResult extends FormEnvelope {
   /** `ok` or `failed`. */
@@ -93,7 +93,7 @@ export class Console {
       { enableScripts: true, retainContextWhenHidden: true }
     );
     this.panel.iconPath = this.iconPath;
-    this.panel.webview.html = html(this.title);
+    this.panel.webview.html = pageHtml(html(this.title), this.panel.webview);
     this.panel.webview.onDidReceiveMessage(
       (m: {
         cmd?: string;
@@ -223,7 +223,8 @@ export function html(title: string): string {
 <head>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy"
-      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';
+               font-src %%CSPSOURCE%%;">
 <style>
 ${SHARED_CSS}
 html, body { height: 100%; }

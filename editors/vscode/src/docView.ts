@@ -7,7 +7,7 @@
 // the cursor moving, which is also why it follows nothing.
 
 import * as vscode from 'vscode';
-import { SHARED_CSS, SHARED_JS } from './webviewParts';
+import { pageHtml, SHARED_CSS, SHARED_JS } from './webviewParts';
 import { DocCode } from './xdoc';
 
 /** What the view is asked to show. */
@@ -47,7 +47,7 @@ export class DocView {
       { enableScripts: true, retainContextWhenHidden: true }
     );
     this.panel.iconPath = this.iconPath;
-    this.panel.webview.html = HTML;
+    this.panel.webview.html = pageHtml(HTML, this.panel.webview);
     this.panel.webview.onDidReceiveMessage((m: { cmd?: string; topic?: string }) => {
       if (m.cmd === 'topic' && m.topic) {
         this.onTopic?.(m.topic);
@@ -87,7 +87,8 @@ export const HTML = `<!DOCTYPE html>
      better claim to it: it is the only one whose body is markup derived from
      a book rather than assembled here. -->
 <meta http-equiv="Content-Security-Policy"
-      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';
+               font-src %%CSPSOURCE%%;">
 <style>
 ${SHARED_CSS}
 body { padding: 0 14px 20px; line-height: 1.5; }

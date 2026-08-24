@@ -44,6 +44,7 @@ import { problemFor } from './bars';
 import { EVAL_SCHEME, OutputView, SCHEME } from './outputView';
 import { Highlighter } from './highlight';
 import { FormEnvelope, FormModel, FormNameRules, FormView } from './formView';
+import { setExtensionUri } from './webviewParts';
 import { Console, ConsoleResult, HISTORY } from './console';
 import { DocView, plainSpans } from './docView';
 import { indentCommand, registerFormatting } from './formatting';
@@ -312,6 +313,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // The grammar and theme load off disk, so the first form view may render
   // before they arrive; refresh once they have, and again whenever the
   // colors the editor paints with change under us.
+  setExtensionUri(context.extensionUri);
   highlighter = new Highlighter(context.extensionPath);
   const reload = () => {
     // The status colours are read from the theme too, and a decoration type

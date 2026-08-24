@@ -19,7 +19,7 @@
 
 import * as vscode from 'vscode';
 import { TokLines } from './highlight';
-import { SHARED_CSS, SHARED_JS } from './webviewParts';
+import { pageHtml, SHARED_CSS, SHARED_JS } from './webviewParts';
 import { MAX_TERM } from './policy';
 
 /**
@@ -294,7 +294,7 @@ export class FormView {
       { enableScripts: true, retainContextWhenHidden: true }
     );
     this.panel.iconPath = this.iconPath;
-    this.panel.webview.html = HTML;
+    this.panel.webview.html = pageHtml(HTML, this.panel.webview);
     this.panel.webview.onDidReceiveMessage(
       (m: { cmd?: string; cols?: number }) => {
       // Width first: it arrives before any form is shown, and re-flowing is
@@ -478,7 +478,8 @@ export const HTML = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy"
-      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';
+               font-src %%CSPSOURCE%%;">
 <style>
 ${SHARED_CSS}
 body { padding: 2px 12px 12px; }

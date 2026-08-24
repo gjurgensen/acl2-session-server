@@ -12,6 +12,44 @@
 // each page. They are already-evaluated JS and CSS: interpolating them adds
 // no further escaping, so what is written here is what the browser sees.
 
+import * as vscode from 'vscode';
+
+/**
+ * Where this extension was installed, for building URLs into its own files.
+ *
+ * Module-level and set once at activation, because every page needs the same
+ * answer and none of them is constructed with a context. It is only ever
+ * read while building a page's HTML, which cannot happen before `activate`.
+ */
+let extensionUri: vscode.Uri | undefined;
+
+export function setExtensionUri(uri: vscode.Uri): void {
+  extensionUri = uri;
+}
+
+/**
+ * Fill in the two things a page cannot know for itself: where the icon font
+ * lives, and what this particular webview will accept loading it from.
+ *
+ * Both are per-webview -- `asWebviewUri` rewrites a file path into the
+ * scheme that webview will serve, and `cspSource` is the origin that goes
+ * with it -- so neither can be baked into a page's HTML the way the rest of
+ * it is. If the font fails to resolve the pages still render; the folds just
+ * get no chevron.
+ */
+export function pageHtml(html: string, webview: vscode.Webview): string {
+  const font = extensionUri
+    ? webview
+        .asWebviewUri(
+          vscode.Uri.joinPath(
+            extensionUri, 'node_modules', '@vscode', 'codicons', 'dist', 'codicon.ttf'
+          )
+        )
+        .toString()
+    : '';
+  return html.replace(/%%CODICON%%/g, font).replace(/%%CSPSOURCE%%/g, webview.cspSource);
+}
+
 /** Typography, status chips, code blocks and folds -- the shared look. */
 export const SHARED_CSS = `
 body { font-family: var(--vscode-font-family); color: var(--vscode-foreground);
@@ -53,6 +91,28 @@ ul.rules table.inner { margin: 2px 0 5px 14px; }
 .cp { margin: 8px 0; }
 details > summary { cursor: pointer; }
 details > summary h3 { display: inline; }
+/* VSCode's own icon font, so a fold in here opens with the same chevron the
+   explorer's twisties use. A webview receives no icons for free, so the file
+   is shipped with the extension and its URL is filled in per webview -- see
+   \`pageHtml\`. Scoped to \`data-fold\`, which is exactly the folds \`fold()\`
+   emits: the console draws its own entry summaries and is left alone. */
+@font-face {
+  font-family: "codicon";
+  src: url("%%CODICON%%") format("truetype");
+}
+details[data-fold] > summary { list-style: none; }
+details[data-fold] > summary::-webkit-details-marker { display: none; }
+details[data-fold] > summary::before {
+  font-family: "codicon";
+  content: "\\eab6";
+  display: inline-block;
+  width: 14px;
+  font-size: 13px;
+  line-height: 1;
+  vertical-align: baseline;
+  opacity: 0.75;
+}
+details[data-fold][open] > summary::before { content: "\\eab4"; }
 table.inner { border-collapse: collapse; font-size: 12px; }
 table.inner td { padding: 1px 10px 1px 0; vertical-align: baseline; }
 .failtag { color: var(--vscode-terminal-ansiRed, #cc6666); font-weight: 600; }
