@@ -249,7 +249,10 @@ impl EventData {
 #[derive(Debug, Clone)]
 pub struct InnerEvent {
     pub name: String,
-    /// Non-empty when this is the inner event that failed.
+    /// Non-empty when this is the inner event that failed -- and only then.
+    /// `revert`/`maybe-revert` are filtered out by [`failure_causes`] before
+    /// this is set, because ACL2 records them for a proof that reverted to
+    /// induction and *succeeded*, which is not a failure.
     pub abort_causes: Option<String>,
     /// Runes this inner event used, one per entry.
     pub rules: Vec<String>,
@@ -1316,7 +1319,7 @@ fn parse_inner(sub: &crate::session::Submission) -> (Vec<InnerEvent>, usize, Vec
     for (i, name) in names.iter().enumerate() {
         out.push(InnerEvent {
             name: name.clone(),
-            abort_causes: aborts.get(i).cloned().flatten(),
+            abort_causes: failure_causes(aborts.get(i).cloned().flatten()),
             rules: rules.get(i).cloned().unwrap_or_default(),
             kind: kinds.get(i).cloned().flatten().map(|v| symbol_name_of(&v)),
             // Printed as yes/no rather than t/nil, because a nil would be
@@ -1498,6 +1501,46 @@ fn hash_file(path: &Path) -> u64 {
 fn is_nil(v: &str) -> bool {
     let t = v.trim();
     t.is_empty() || t.eq_ignore_ascii_case("nil")
+}
+
+/// The *failure* causes among an event's `abort-causes`, or `None`.
+///
+/// ACL2 records `revert` -- and, on a progress step, `maybe-revert` -- here
+/// whenever a proof abandons a direct attempt to prove the conjecture by
+/// induction instead (`add-to-tag-tree! 'abort-cause 'revert`, prove.lisp).
+/// That is a routine move that *usually succeeds*, so it is not a failure and
+/// must not read as one: a successful event that reverted was showing a red
+/// "revert" tag, and `failed_event` -- which finds the failing event by
+/// `abort_causes.is_some()` -- could fasten on a reverted-but-successful event
+/// instead of the one that truly failed.
+///
+/// So those two are dropped. Element-wise, not all-or-nothing: a proof that
+/// reverts and then fails carries the real cause alongside `revert`
+/// (`(revert empty-clause)`), and the real one is kept. Every other cause --
+/// `empty-clause`, `induction-depth-limit-exceeded`, `waterfall-loop`,
+/// `time-limit`, the `do-not-induct` pair, `subgoal-path-length-violation`,
+/// `interrupt` -- is a genuine failure and survives. When nothing survives,
+/// the event did not fail here, and the `has_namex` fallback still identifies
+/// a translate-level failure that named nothing.
+fn failure_causes(raw: Option<String>) -> Option<String> {
+    let raw = raw?;
+    let inner = raw.trim();
+    let inner = inner.strip_prefix('(').unwrap_or(inner);
+    let inner = inner.strip_suffix(')').unwrap_or(inner);
+    let kept: Vec<&str> = inner
+        .split_whitespace()
+        .filter(|c| {
+            // Match on the bare symbol, so a package-qualified `acl2::revert`
+            // (a book whose current package is not ACL2) is caught too.
+            let bare = c.rsplit("::").next().unwrap_or(c);
+            !bare.eq_ignore_ascii_case("revert") && !bare.eq_ignore_ascii_case("maybe-revert")
+        })
+        .collect();
+    if kept.is_empty() {
+        None
+    } else {
+        Some(format!("({})", kept.join(" ")))
+    }
 }
 
 /// Rejoin a value ACL2 wrapped across lines.
@@ -4474,6 +4517,26 @@ mod tests {
             }
         }
         depth
+    }
+
+    #[test]
+    fn revert_is_not_a_failure_cause() {
+        let f = |s: &str| super::failure_causes(Some(s.to_string()));
+        // A proof that only reverted to induction has no failure cause.
+        assert_eq!(f("(revert)"), None);
+        assert_eq!(f("(maybe-revert)"), None);
+        assert_eq!(f("(REVERT)"), None, "case-insensitive");
+        assert_eq!(f("(acl2::revert)"), None, "package-qualified");
+        // A real cause is kept, verbatim and parenthesised as it arrived.
+        assert_eq!(f("(empty-clause)").as_deref(), Some("(empty-clause)"));
+        assert_eq!(
+            f("(induction-depth-limit-exceeded)").as_deref(),
+            Some("(induction-depth-limit-exceeded)")
+        );
+        // Reverted, then failed: the real cause survives, the revert does not.
+        assert_eq!(f("(revert empty-clause)").as_deref(), Some("(empty-clause)"));
+        // Nothing at all stays nothing.
+        assert_eq!(super::failure_causes(None), None);
     }
 
     #[test]
