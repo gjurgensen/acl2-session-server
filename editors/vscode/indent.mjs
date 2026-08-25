@@ -228,6 +228,80 @@ plan('and the same line is left alone by a whole-buffer pass',
 plan('Enter after a finished form lands at column zero',
      `(defun f (x) 1)\n`, 1, 0, { blankLines: 'indent' });
 
+// The reader's own escapes. A construct the lexer fails to recognise does not
+// cost one token, it costs the rest of the form: the open-stack desynchronises
+// and every line below is indented against the wrong depth. The grammar and the
+// README both advertise fancy strings, and the indenter did not know them.
+ind('a fancy string hides its quotes and parens', `
+(defun f (x)
+#{"""a ) " ( lone quote and parens"""}
+x)
+`, `
+(defun f (x)
+  #{"""a ) " ( lone quote and parens"""}
+  x)
+`);
+
+// The point of the syntax is spanning lines, so the state has to cross them --
+// and a line inside one is content, exactly like a line inside a string.
+ind('a multi-line fancy string is left exactly as written', `
+(defun f (x)
+#{"""
+   deliberately
+     aligned ) prose
+"""}
+x)
+`, `
+(defun f (x)
+  #{"""
+   deliberately
+     aligned ) prose
+"""}
+  x)
+`);
+
+ind('and the form after one is indented as if it were not there', `
+(defun f (x)
+#{"""((("""}
+(g x))
+`, `
+(defun f (x)
+  #{"""((("""}
+  (g x))
+`);
+
+// `|a\|b|` is one symbol whose name holds a bar. Read as a plain search for
+// the next `|`, it was two symbols with a stray `b` between them.
+// `|a\\|b ( |` is one symbol whose name holds a bar, a space and an open paren.
+// Read as a plain search for the next `|`, the escaped one ended the symbol,
+// the `(` after it was counted as a real open paren, and the second `|` opened
+// a symbol that ran to end of line -- swallowing the `)` that would have closed
+// it. Everything below then indented against a stack two too deep.
+ind('a backslash escapes a bar inside a bar symbol', `
+(defun f (x)
+(|a\\|b ( |)
+(g x))
+`, `
+(defun f (x)
+  (|a\\|b ( |)
+  (g x))
+`);
+
+// The whole-buffer and single-line paths must answer the same, since a reader
+// meets one through Tab and the other through Format Document.
+plan('a line inside a fancy string is not planned', `
+(defxdoc top
+  :long #{"""
+one
+  two"""})
+`, 3, undefined);
+
+plan('and the line after one is planned normally', `
+(defxdoc top
+  :long #{"""x"""}
+:more nil)
+`, 2, 2);
+
 // Formatting part of a buffer. The rule is `reindent`'s -- top down, against
 // the running result -- and the reason it has to be is that a line's target
 // depends on the columns of the lines above it, which this call is in the

@@ -267,11 +267,36 @@ function skipNonDatum(text: string, i: number): number {
     return text.length;
   }
   if (c === '|') {
-    const end = text.indexOf('|', i + 1);
-    return end === -1 ? text.length : end + 1;
+    // A backslash escapes the next character inside a bar symbol, as it does
+    // everywhere else the reader looks: `|a\|b|` is one symbol whose name
+    // holds a bar. Read as a plain search for the next `|`, it was two
+    // symbols and a stray `b`, and every paren after it counted at the wrong
+    // depth.
+    let j = i + 1;
+    while (j < text.length) {
+      if (text[j] === '\\') {
+        j += 2;
+        continue;
+      }
+      if (text[j] === '|') {
+        return j + 1;
+      }
+      j++;
+    }
+    return text.length;
   }
   if (c === '#') {
     const n = text[i + 1];
+    // A fancy string: `#{"""` to the first `"""}`, with everything between
+    // them content -- quotes, parens, backslashes and all. The grammar and
+    // the README both advertise these; the indenter read `#` as an atom, `{`
+    // as an open delimiter and each `"` as an ordinary quote toggle, so one
+    // holding an odd number of quotes or an unbalanced paren desynchronised
+    // the open stack and mis-indented every line after it.
+    if (n === '{' && text.startsWith('"""', i + 2)) {
+      const end = text.indexOf('"""}', i + 5);
+      return end === -1 ? text.length : end + 4;
+    }
     if (n === '|') {
       // Nested, per the standard: `#| a #| b |# c |#` closes once, not twice.
       let depth = 1;
@@ -613,6 +638,16 @@ interface LineState {
   stack: Open[];
   inString: boolean;
   block: number;
+  /**
+   * Inside a `#{"""..."""}` fancy string.
+   *
+   * Its own flag rather than a case of `inString`, because the two end
+   * differently and nothing else about them coincides: an ordinary string
+   * ends at the first unescaped `"`, a fancy string ends only at `"""}` and
+   * has no escapes at all -- which is what it is *for*. Carried across lines
+   * because spanning them is the point of the syntax.
+   */
+  fancy: boolean;
 }
 
 /**
@@ -624,10 +659,21 @@ interface LineState {
  */
 function stepLine(line: string, lineStart: number, st: LineState): LineState {
   const stack = st.stack.slice();
-  let { inString, block } = st;
+  let { inString, block, fancy } = st;
   let i = 0;
   while (i < line.length) {
     const c = line[i];
+    if (fancy) {
+      // Nothing but the closing delimiter means anything in here, escapes
+      // included.
+      const end = line.indexOf('"""}', i);
+      if (end === -1) {
+        break;
+      }
+      fancy = false;
+      i = end + 4;
+      continue;
+    }
     if (inString) {
       if (c === '\\') {
         i += 2;
@@ -659,6 +705,11 @@ function stepLine(line: string, lineStart: number, st: LineState): LineState {
       i++;
       continue;
     }
+    if (c === '#' && line[i + 1] === '{' && line.startsWith('"""', i + 2)) {
+      fancy = true;
+      i += 5;
+      continue;
+    }
     if (c === '#' && line[i + 1] === '|') {
       block++;
       i += 2;
@@ -672,10 +723,26 @@ function stepLine(line: string, lineStart: number, st: LineState): LineState {
       continue;
     }
     if (c === '|') {
-      // A `|bar symbol|` closing on a later line is not a thing any book
-      // does; treating it as line-local keeps the state machine finite.
-      const end = line.indexOf('|', i + 1);
-      i = end === -1 ? line.length : end + 1;
+      // Line-local, and deliberately: a `|bar symbol|` closing on a later
+      // line is not a thing any book does, and a stray `|` that carried
+      // state forward would swallow the rest of the file. `skipNonDatum`
+      // does let one span lines -- it scans text rather than lines and has
+      // no state to carry -- so the two can in principle disagree about the
+      // same text. Neither disagrees about anything in the corpus.
+      //
+      // The escape is honoured either way: `|a\|b|` is one symbol.
+      let j = i + 1;
+      while (j < line.length) {
+        if (line[j] === '\\') {
+          j += 2;
+          continue;
+        }
+        if (line[j] === '|') {
+          break;
+        }
+        j++;
+      }
+      i = j >= line.length ? line.length : j + 1;
       continue;
     }
     if (c === '(' || c === '[' || c === '{') {
@@ -685,7 +752,7 @@ function stepLine(line: string, lineStart: number, st: LineState): LineState {
     }
     i++;
   }
-  return { stack, inString, block };
+  return { stack, inString, block, fancy };
 }
 
 /**
@@ -703,13 +770,13 @@ function stepLine(line: string, lineStart: number, st: LineState): LineState {
 export function reindent(text: string, opts: IndentOptions = {}): string {
   const lines = text.split('\n');
   let out = '';
-  let st: LineState = { stack: [], inString: false, block: 0 };
+  let st: LineState = { stack: [], inString: false, block: 0, fancy: false };
   /** Offset in `out` of the top-level form this line is inside. */
   let from = 0;
   for (let n = 0; n < lines.length; n++) {
     const line = lines[n];
     const lineStart = out.length;
-    const opaque = st.inString || st.block > 0;
+    const opaque = st.inString || st.block > 0 || st.fancy;
     if (st.stack.length === 0 && !opaque) {
       // Between forms: whatever starts here is the next one, and nothing
       // above it can affect how anything inside it is indented.
@@ -798,14 +865,14 @@ export function reindentRange(
   // lets the open stack, `bolOf` and `readDatum` work here unchanged. Below
   // the anchor they are the *running* result's offsets, which is the point.
   let out = text.slice(0, offset[a]);
-  let st: LineState = { stack: [], inString: false, block: 0 };
+  let st: LineState = { stack: [], inString: false, block: 0, fancy: false };
   let from = anchor;
   const planned: (string | undefined)[] = [];
 
   for (let n = a; n <= hi; n++) {
     const line = lines[n];
     const lineStart = out.length;
-    const opaque = st.inString || st.block > 0;
+    const opaque = st.inString || st.block > 0 || st.fancy;
     if (st.stack.length === 0 && !opaque) {
       from = lineStart;
     }
