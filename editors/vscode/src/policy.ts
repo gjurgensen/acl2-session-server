@@ -383,19 +383,34 @@ export function diagnosticMessage(status: string): string {
  *
  * Only the kind is available -- the daemon scrapes the summary's
  * `Warnings: [Uncertified, Theory]` list, not each warning's sentence -- so
- * this is a fixed phrase per kind rather than ACL2's actual text. The common
- * ones get a plain-English line; anything else falls through to ACL2's own
- * bracket label, which is already capitalised (`Skip-proofs`, `Free`). No
- * "ACL2 Warning:" prefix: the icon and the source column carry that.
+ * this is a fixed phrase per kind rather than ACL2's actual text. Each phrase
+ * is a faithful compression of what ACL2 prints for that kind. Anything not
+ * listed falls through to ACL2's own bracket label, which is already
+ * capitalised (`Equiv`, `Guards`) and recognizable -- a kind whose meaning
+ * varies too much to compress into one true line is better left as its label
+ * than given a phrase that is wrong for some of its instances. No "ACL2
+ * Warning:" prefix: the icon and the source column carry that.
  */
 export function warningMessage(kind: string): string {
   switch (kind.toLowerCase()) {
     case 'uncertified':
       return 'Includes an uncertified book';
+    case 'skip-proofs':
+      return 'Includes skipped proofs';
     case 'double-rewrite':
       return 'A rule variable may need double-rewrite';
     case 'theory':
       return 'Theory expression may have no effect';
+    case 'non-rec':
+      return 'Rule unlikely to fire; nonrecursive function in its trigger';
+    case 'free':
+      return 'Free variables limit where this rule applies';
+    case 'subsume':
+      return 'Probably subsumes an existing rule';
+    case 'ignored-variables':
+      return 'Unused formal variable';
+    case 'irrelevant-formals':
+      return 'Irrelevant formal variable';
     default:
       return kind;
   }

@@ -1270,8 +1270,20 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
     'double-rewrite says what to consider');
   check(warningMessage('Theory') === 'Theory expression may have no effect',
     'theory is elaborated');
-  check(warningMessage('Skip-proofs') === 'Skip-proofs',
-    'an unmapped kind falls through to ACL2’s own label');
+  check(warningMessage('Skip-proofs') === 'Includes skipped proofs',
+    'skip-proofs, the sibling of uncertified, is elaborated too');
+  check(warningMessage('Non-rec').startsWith('Rule unlikely to fire'),
+    'non-rec says why the rule may never trigger');
+  check(warningMessage('Free') === 'Free variables limit where this rule applies',
+    'free says what the free variables cost');
+  check(warningMessage('Subsume') === 'Probably subsumes an existing rule',
+    'subsume names the overlap');
+  check(warningMessage('Ignored-variables') === 'Unused formal variable',
+    'ignored-variables is plain English');
+  check(warningMessage('Irrelevant-formals') === 'Irrelevant formal variable',
+    'and so is irrelevant-formals');
+  check(warningMessage('Equiv') === 'Equiv',
+    'a kind whose meaning varies falls through to ACL2’s own label');
 }
 
 // ---- tails are pushed, never polled ----
