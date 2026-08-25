@@ -399,8 +399,9 @@ const envelope = lift('esc', 'strip', 'causes', 'spans', 'hl', 'rat',
         'the measure is the term, not the justification record around it');
   check(/decreasing under<\/td><td><code[^>]*>l&lt;/.test(h),
         'and a relation that is not o< is named, since it was chosen');
-  check(h.includes('introduced \u2014 1 rule') && h.includes('used \u2014 1 rule'),
-        'a theorem counts what it introduced apart from what its proof used');
+  check(h.includes('introduced (1)') && h.includes('used (1)'),
+        'a theorem counts what it introduced apart from what its proof used, ' +
+        'in the (N) style the section headings use');
   check(h.includes('data-fold="g-ev:true-listp-of-dfn-app:introduced"') &&
         h.includes('data-fold="g-ev:true-listp-of-dfn-app:used"'),
         'and the two are separate folds, so opening one does not open the other');

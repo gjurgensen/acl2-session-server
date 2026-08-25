@@ -501,17 +501,18 @@ function eventHtml(e, p, openByDefault) {
   const used = e.rules || [];
 
   let body = d ? nameFacts(d) : '';
+  // The count in parens, like every other section heading -- Events (2),
+  // Rules (5). How many are disabled is not repeated here: the event's own
+  // facts line above already says "N rules, M off", and each disabled rule
+  // carries its badge once the fold is open. (No backticks: template literal.)
   if (runes.length) {
     body += fold(p + 'ev:' + e.name + ':introduced', true,
-      '<span class="meta">introduced \\u2014 ' + runes.length +
-        ' rule' + (runes.length === 1 ? '' : 's') +
-        (off ? ', ' + off + ' disabled' : '') + '</span>',
+      '<span class="meta">introduced (' + runes.length + ')</span>',
       introducedHtml(d));
   }
   if (used.length) {
     body += fold(p + 'ev:' + e.name + ':used', false,
-      '<span class="meta">used \\u2014 ' + used.length +
-        ' rule' + (used.length === 1 ? '' : 's') + '</span>',
+      '<span class="meta">used (' + used.length + ')</span>',
       usedHtml(used));
   }
 
