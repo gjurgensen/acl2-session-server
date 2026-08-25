@@ -721,6 +721,14 @@ pub struct UnitEvent {
     /// Forced assumptions were present.
     #[serde(skip_serializing_if = "is_false")]
     pub forced: bool,
+    /// The names this form *writes*, from the split.
+    ///
+    /// Not the same question as `inner`, which is what ACL2 recorded. A
+    /// standalone `defxdoc` records no event at all -- it writes a table --
+    /// so the only place its topic's name appears is here. Without it a form
+    /// whose whole purpose is documentation looks empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub names: Vec<String>,
     /// Events inside a compound unit (encapsulate, progn, defines ...).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub inner: Vec<InnerEventWire>,
@@ -880,6 +888,13 @@ pub struct RulesBatchReply {
 
 #[derive(Debug, Serialize)]
 pub struct RulesReply {
+    /// This name's xdoc `:short`, when a topic of this name exists.
+    ///
+    /// Independent of `found`: a name can be documented without introducing a
+    /// rule -- a standalone `defxdoc` is exactly that -- so a reader must not
+    /// take one as a precondition for the other.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub short: Option<String>,
     pub found: bool,
     pub name: String,
     /// `:common-lisp-compliant` (guards verified), `:ideal` (logic mode,
@@ -913,6 +928,7 @@ pub fn rules_reply(name: &str, r: Option<&acl2_session::NameRules>) -> RulesRepl
             guard: None,
             statement: None,
             runes: Vec::new(),
+            short: None,
         },
         Some(r) => RulesReply {
             found: true,
@@ -939,6 +955,7 @@ pub fn rules_reply(name: &str, r: Option<&acl2_session::NameRules>) -> RulesRepl
                         .collect(),
                 })
                 .collect(),
+            short: None,
         },
     }
 }
@@ -1022,6 +1039,7 @@ pub fn unit_admitted(book: &str, revision: u64, u: &UnitReport) -> UnitEvent {
         checkpoints: Vec::new(),
         pre_revert: false,
         forced: false,
+        names: u.names.clone(),
         inner: inner_wire(&u.inner),
         inner_total: u.inner_total,
         n_top: 0,
@@ -1079,6 +1097,7 @@ pub fn unit_failure(
         checkpoints,
         pre_revert: f.checkpoints.pre_revert,
         forced: f.checkpoints.forced,
+        names: Vec::new(),
         inner: inner_wire(&f.inner),
         inner_total: f.inner_total,
         n_top: f.checkpoints.n_top,

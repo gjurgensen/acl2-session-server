@@ -2092,3 +2092,77 @@ fn the_protocol_answers_with_the_codes_the_spec_gives() {
 
     d.shutdown();
 }
+
+/// Which names in a form carry documentation, and where a topic with no event
+/// of its own turns up.
+///
+/// Two shapes, and the second is the one that needs the `names` field. A
+/// `define` with a `:short` records an event named after the function, so its
+/// topic attaches to that event. A standalone `defxdoc` records no event at
+/// all -- it writes a table -- so the only place its name appears is what the
+/// split read from the source.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_forms_documentation_is_findable_by_name() {
+    let Some(acl2) = acl2() else {
+        eprintln!("ACL2 not set; skipping");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("acl2-editord-xdoc-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let book_path: PathBuf = dir.join("doc.lisp");
+    let text = "(in-package \"ACL2\")\n\
+                (include-book \"std/util/define\" :dir :system)\n\
+                (defxdoc lone-topic :short \"documented by itself\")\n\
+                (define shown ((x natp)) :returns (y natp) :short \"a define\" (nfix x))\n\
+                (defun quiet (x) x)\n";
+    std::fs::write(&book_path, text).expect("write book");
+
+    let mut d = Daemon::start(&acl2);
+    let opened = d.request("open", json!({ "path": book_path.to_str().unwrap() }));
+    let book = opened["book"].as_str().expect("book id").to_string();
+    d.notify("update", json!({ "book": book, "text": text, "revision": 1 }));
+    let events = d.events_until_settled();
+
+    let unit = |i: usize| -> Value {
+        events
+            .iter()
+            .filter(|(m, _)| m == "unit")
+            .map(|(_, p)| p.clone())
+            .find(|p| p["index"] == i)
+            .unwrap_or_else(|| panic!("no unit {i}"))
+    };
+
+    // The standalone topic is nameable only through the split.
+    let lone = unit(2);
+    let names: Vec<String> = lone["names"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    assert!(names.iter().any(|n| n.eq_ignore_ascii_case("lone-topic")),
+            "a defxdoc names its topic and records no event: {lone}");
+
+    // Asking about a name says whether it is documented, and that answer is
+    // independent of whether it introduced a rule. `lone-topic` introduced
+    // none; `shown` introduced several.
+    let mut ask = |names: Value| -> Vec<Value> {
+        d.request("rules", json!({ "book": book, "names": names }))["rules"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    };
+    // The index is built on demand, so the first ask may go without it; the
+    // second has it. That is the bargain hover already makes.
+    let _ = ask(json!(["shown"]));
+    let got = ask(json!(["lone-topic", "shown", "quiet"]));
+    let short = |n: &str| -> Option<String> {
+        got.iter()
+            .find(|r| r["name"].as_str().is_some_and(|s| s.eq_ignore_ascii_case(n)))
+            .and_then(|r| r["short"].as_str().map(str::to_string))
+    };
+    assert_eq!(short("lone-topic").as_deref(), Some("documented by itself"),
+               "documented without introducing a rule: {got:?}");
+    assert_eq!(short("shown").as_deref(), Some("a define"), "{got:?}");
+    assert_eq!(short("quiet"), None, "an undocumented name says nothing: {got:?}");
+}

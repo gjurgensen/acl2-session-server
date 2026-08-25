@@ -637,13 +637,26 @@ impl Driver {
     /// this runs on the driver thread, which is also the thread a proof runs
     /// on, so each acquisition is a chance to queue behind one.
     fn rules(&mut self, id: &Value, names: &[String]) {
-        let out = {
+        let mut out = {
             let book = self.book.lock().expect("book lock");
             names
                 .iter()
                 .map(|n| wire::rules_reply(n, book.rules_for(n)))
                 .collect::<Vec<_>>()
         };
+        // The xdoc summary rides along, because this is already the request
+        // that asks "what is there to say about the names in this form" and
+        // documentation is one of the answers. Attached *outside* the book
+        // lock and independent of `found`: a name can be documented without
+        // introducing a rule -- a standalone `defxdoc` is exactly that.
+        //
+        // `doc_short` asks for the index to be built when it is missing and
+        // answers `None` meanwhile, so the first form to want it goes without
+        // and the next render has it. That is the same demand-driven bargain
+        // hover makes, and it is why nothing here has to wait.
+        for r in &mut out {
+            r.short = self.doc_short(&r.name);
+        }
         self.out.reply(id, to_value(wire::RulesBatchReply { rules: out }));
     }
 
