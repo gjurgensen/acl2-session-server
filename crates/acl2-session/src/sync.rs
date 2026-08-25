@@ -1503,6 +1503,28 @@ fn is_nil(v: &str) -> bool {
     t.is_empty() || t.eq_ignore_ascii_case("nil")
 }
 
+/// Drop an `acl2::` prefix from a bare classification symbol.
+///
+/// A rule's `:subclass` (`backchain`, `abbreviation`, ...) and `:equiv`
+/// (`equal`, `iff`) are bare symbols in the ACL2 package. In a book whose
+/// current package is not ACL2, `:pr` prints them qualified -- `acl2::abbreviation`
+/// -- and the prefix is noise a reader did not ask for, exactly as it is on an
+/// abort cause or an event kind, both of which already strip it.
+///
+/// Only a bare symbol, and only the `acl2::` package: a term keeps ACL2's
+/// printing verbatim (the standing decision on printed values), so anything
+/// with whitespace or a paren is returned untouched, and a symbol in some
+/// other package keeps its prefix, which there *is* meaningful.
+fn strip_symbol_acl2(v: String) -> String {
+    if v.contains([' ', '\t', '\n', '(', ')']) {
+        return v;
+    }
+    v.strip_prefix("acl2::")
+        .or_else(|| v.strip_prefix("ACL2::"))
+        .map(str::to_string)
+        .unwrap_or(v)
+}
+
 /// The *failure* causes among an event's `abort-causes`, or `None`.
 ///
 /// ACL2 records `revert` -- and, on a progress step, `maybe-revert` -- here
@@ -3941,6 +3963,7 @@ impl Book {
                     fields: fields
                         .into_iter()
                         .filter(|(k, _)| k != ":rune" && k != ":enabled")
+                        .map(|(k, v)| (k, strip_symbol_acl2(v)))
                         .collect(),
                 });
             }
@@ -4517,6 +4540,19 @@ mod tests {
             }
         }
         depth
+    }
+
+    #[test]
+    fn a_bare_subclass_loses_its_acl2_prefix() {
+        let f = super::strip_symbol_acl2;
+        assert_eq!(f("acl2::abbreviation".into()), "abbreviation");
+        assert_eq!(f("ACL2::backchain".into()), "backchain");
+        assert_eq!(f("backchain".into()), "backchain", "already bare");
+        // A user-package equiv keeps its prefix -- it is meaningful there.
+        assert_eq!(f("foo::my-equiv".into()), "foo::my-equiv");
+        // A term is left exactly as ACL2 printed it, prefix and all.
+        assert_eq!(f("(acl2::car x)".into()), "(acl2::car x)");
+        assert_eq!(f("(acl2::true-listp acl2::x)".into()), "(acl2::true-listp acl2::x)");
     }
 
     #[test]

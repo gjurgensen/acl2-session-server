@@ -1236,10 +1236,18 @@ fn inner_names_are_complete_and_the_failing_event_carries_detail() {
                "every inner event is named, newest first");
 
     // The event that failed is at index 0 -- failing is what puts it there --
-    // so it is always inside the bounded detail window.
-    assert!(f.inner[0].abort_causes.is_some(), "the failing event carries its cause");
-    assert!(!f.inner[0].rules.is_empty(), "and its rules");
-    assert_eq!(f.failed_event().map(|e| e.name.as_str()), Some("q4-bogus"));
+    // so it is always inside the bounded detail window, carrying its detail.
+    assert_eq!(f.inner[0].name, "q4-bogus");
+    assert!(!f.inner[0].rules.is_empty(), "the failing event carries its rules");
+    // q4-bogus reverted to induction and failed there, so its only recorded
+    // abort-cause is `revert` -- which is not a failure and is filtered out
+    // (the empty-clause lives in the form's checkpoints, pre_revert). The
+    // event is still identified: it named nothing, so failed_event finds it by
+    // the has_namex fallback rather than by an abort cause.
+    assert!(f.inner[0].abort_causes.is_none(),
+            "a revert-only failure carries no per-event cause: {:?}", f.inner[0].abort_causes);
+    assert_eq!(f.failed_event().map(|e| e.name.as_str()), Some("q4-bogus"),
+               "and is identified all the same");
 
     // Past the window an entry is a name and nothing more. A consumer is told
     // where that starts, so an empty `rules` is never mistaken for "used none".
@@ -1866,6 +1874,45 @@ fn admitting_a_form_scrapes_what_the_world_knows() {
     write(&file, &["(in-package \"ACL2\")"]);
     b.sync(None, D).expect("truncating sync");
     assert!(b.rules_for("sc-app").is_none(), "a rolled-back name is forgotten");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A rule's bare classification symbols lose their `acl2::` prefix.
+///
+/// In a book whose current package is not ACL2, `:pr` prints `:subclass`
+/// and `:basic-ts` package-qualified -- `acl2::abbreviation`,
+/// `acl2::*ts-cons*` -- and the prefix is noise. Terms keep ACL2's printing,
+/// so the definitional `:rhs`/`:lhs` are untouched (and a `defun` whose body
+/// is a plain `cons` is exactly the case ACL2 files under subclass
+/// `abbreviation`, which is what makes this reproduce).
+#[test]
+#[ignore = "needs ACL2"]
+fn a_rules_bare_symbols_drop_the_acl2_prefix() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("pkgstrip");
+    let file = dir.join("r.lisp");
+    write(&file, &["(in-package \"ACL2\")",
+                   "(defpkg \"SCP\" (union-eq '(defun cons) *acl2-exports*))",
+                   "(in-package \"SCP\")",
+                   "(acl2::defun sc-pair (x y) (cons x y))"]);
+    let mut b = Book::open(&acl2, &file).unwrap();
+    let o = b.sync(None, D).expect("sync");
+    assert!(o.failed.is_none(), "{:?}", o.failed.as_ref().map(|f| &f.error_line));
+
+    let f = b.rules_for("sc-pair").expect("the function was scraped");
+    let def = f.runes.iter().find(|r| r.class() == Some(":definition")).unwrap();
+    assert_eq!(def.field(":subclass"), Some("abbreviation"),
+               "the acl2:: prefix is gone from the subclass: {def:?}");
+    let tp = f.runes.iter().find(|r| r.class() == Some(":type-prescription")).unwrap();
+    assert_eq!(tp.field(":basic-ts"), Some("*ts-cons*"),
+               "and from the type-set constant: {tp:?}");
+    // A term is a parenthesised form, so it is never touched by the
+    // bare-symbol strip -- it arrives exactly as ACL2 printed it. (`consp`
+    // here is unqualified only because it is in *acl2-exports*; the point is
+    // that the strip left the term alone.)
+    assert_eq!(tp.field(":corollary"), Some("(consp (sc-pair x y))"),
+               "a term is left verbatim: {tp:?}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
