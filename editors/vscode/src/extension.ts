@@ -340,6 +340,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // before they arrive; refresh once they have, and again whenever the
   // colors the editor paints with change under us.
   setExtensionUri(context.extensionUri);
+  here = context.extensionUri;
   highlighter = new Highlighter(context.extensionPath);
   const reload = () => {
     // The status colours are read from the theme too, and a decoration type
@@ -1429,6 +1430,47 @@ function startsAtOrBefore(u: UnitState, at: Pos): boolean {
   return u.col_start <= at.column;
 }
 
+/**
+ * A message with things to do about it.
+ *
+ * Every failure here is one the extension can name exactly, so every one can
+ * offer the fix rather than the name of a setting to go and find. That is what
+ * the notifications guidance asks for, and it is the same trade "no live
+ * session" made when its instruction became a Start button.
+ */
+function act(message: string, actions: Record<string, () => void>): Thenable<void> {
+  const names = Object.keys(actions);
+  return vscode.window.showErrorMessage(message, ...names).then((pick) => {
+    if (pick) {
+      actions[pick]();
+    }
+  });
+}
+
+/** Where this extension is installed, for the copy of the README beside it. */
+let here: vscode.Uri | undefined;
+
+function openSetting(id: string): void {
+  void vscode.commands.executeCommand('workbench.action.openSettings', id);
+}
+
+/**
+ * The install steps, from the copy that shipped with *this* extension.
+ *
+ * Not a link to the repository: these are version-specific -- a `cargo install`
+ * from a checkout -- so the right copy is the one beside the code actually
+ * running, which also works with no network and cannot rot when files move.
+ */
+function showInstallSteps(): void {
+  if (!here) {
+    return;
+  }
+  const readme = vscode.Uri.joinPath(here, 'README.md');
+  void vscode.commands.executeCommand('markdown.showPreview', readme).then(undefined, () =>
+    vscode.window.showTextDocument(readme)
+  );
+}
+
 function ensureClient(): DaemonClient {
   if (client && client.alive) {
     return client;
@@ -1444,15 +1486,29 @@ function ensureClient(): DaemonClient {
     args.push('--default', def);
   }
   const c = new DaemonClient(cmd, args);
-  c.on('stderr', (s: string) => channel.append(s));
+  // Kept, not just logged. A daemon that refuses to start says why on its way
+  // out -- "no ACL2 to run", with the usage -- and that is the one sentence
+  // worth showing. Without it the reader is told `daemon exited`, which is the
+  // symptom, while the cause sits in a channel nobody has been told to open.
+  let dying = '';
+  c.on('stderr', (s: string) => {
+    channel.append(s);
+    dying = (dying + s).split('\n').filter((l) => l.trim()).slice(-4).join('\n');
+  });
   c.on('daemon-error', (p: { message?: string }) =>
     channel.appendLine(`daemon: ${p?.message ?? 'unknown error'}`)
   );
-  c.on('spawn-error', (e: Error) =>
-    void vscode.window.showErrorMessage(
-      `ACL2: cannot start the daemon (${e.message}) -- set acl2-session.daemonPath`
-    )
-  );
+  // One notification per death: a failure to spawn also ends in `exit`, and
+  // the reader who has just been told the binary is missing does not need to
+  // be told again that it is gone.
+  let told = false;
+  c.on('spawn-error', (e: Error) => {
+    told = true;
+    void act(`ACL2: cannot start the daemon (${e.message})`, {
+      'Set Path\u2026': () => openSetting('acl2-session.daemonPath'),
+      'Install Steps': showInstallSteps,
+    });
+  });
   c.on('exit', () => {
     // A newer client may already have replaced this one; that death is its
     // predecessor's, and none of this belongs to it.
@@ -1471,12 +1527,30 @@ function ensureClient(): DaemonClient {
     for (const s of orphaned) {
       dropBook(s);
     }
-    if (orphaned.length > 0) {
-      void vscode.window.showErrorMessage(
-        'ACL2: the daemon exited and its sessions are gone (see the "ACL2" ' +
-          'output channel). Run "ACL2: Start Live Checking" to begin again.'
-      );
+    if (told) {
+      return;
     }
+    told = true;
+    if (orphaned.length > 0) {
+      void act('ACL2: the daemon exited; its sessions are gone', {
+        'Show Log': () => channel.show(true),
+        Start: () => void startCommand(),
+      });
+      return;
+    }
+    // It died before there was anything to lose, which is what a
+    // misconfiguration looks like: the binary ran and refused. Its own words,
+    // because "no ACL2 to run" is the fix and `daemon exited` is not.
+    const why = dying.split('\n')[0] || 'the daemon exited';
+    void act(`ACL2: ${why}`, {
+      'Show Log': () => channel.show(true),
+      // Offered only when the daemon is complaining about the image, since
+      // that is the one it cannot find for itself and the one this setting
+      // fixes.
+      ...(/acl2|image/i.test(dying)
+        ? { 'Set Image\u2026': () => openSetting('acl2-session.defaultImage') }
+        : {}),
+    });
   });
   c.on('state', onState);
   c.on('unit', onUnit);
