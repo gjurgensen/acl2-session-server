@@ -8,7 +8,9 @@
 //! ```
 //!
 //! `--test-threads=1` is advisable: each test starts its own ACL2, and several
-//! resident images at once is a lot of memory for no benefit.
+//! resident images at once is a lot of memory for no benefit. It is not
+//! *required* -- the suite passes in parallel, and `scratch` enforces the one
+//! thing that has to hold for that to stay true.
 //!
 //! These began as demo binaries shipped from the library crate. They assert and
 //! fail loudly, so they were always tests; keeping them as binaries meant they
@@ -83,7 +85,32 @@ macro_rules! acl2_or_skip {
     };
 }
 
+/// A directory for one test's book, named after it.
+///
+/// **The tag must be unique across the suite**, and that is enforced rather
+/// than asked for. Two tests sharing one meant two tests sharing a directory,
+/// and the `remove_dir_all` below then pulled it out from under the other
+/// one's running ACL2: its `getcwd` failed, and it died on startup with
+/// `Unable to obtain the truename of file ""`. Serially that is invisible,
+/// because the first test is finished before the second calls this; in
+/// parallel it is a failure in whichever test lost the race, reported
+/// somewhere far from the test that caused it.
+///
+/// Two tags were shared, and exactly the two tests that shared them failed.
+/// Enforced here so the next one fails as a plain message at the point of the
+/// mistake instead.
 fn scratch(tag: &str) -> PathBuf {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static USED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    assert!(
+        USED.get_or_init(Default::default)
+            .lock()
+            .expect("scratch tags")
+            .insert(tag.to_string()),
+        "scratch tag {tag:?} is already used by another test; pick a distinct one \
+         (a shared directory is deleted out from under whichever ACL2 is running in it)"
+    );
     let d = std::env::temp_dir().join(format!("acl2-live-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).expect("scratch dir");
@@ -286,7 +313,7 @@ fn sync_bytes_follows_the_buffer_not_the_disk() {
 #[ignore = "needs ACL2"]
 fn retraction_keeps_what_is_asked_and_still_current() {
     let acl2 = acl2_or_skip!();
-    let dir = scratch("retract");
+    let dir = scratch("retract-keeps");
     let book = dir.join("demo.lisp");
     write(&book, &["(in-package \"ACL2\")", ALPHA,
                    "(defthm r1 (equal (alpha nil) nil))",
@@ -399,7 +426,7 @@ fn continue_past_failure_triages_and_recovers() {
 #[ignore = "needs ACL2"]
 fn raised_inner_detail_reaches_every_event() {
     let acl2 = acl2_or_skip!();
-    let dir = scratch("inner-detail");
+    let dir = scratch("inner-detail-raised");
     let book = dir.join("demo.lisp");
     write(&book, &["(in-package \"ACL2\")",
                    "(progn\n\
@@ -1215,7 +1242,7 @@ fn an_interrupted_forms_output_survives() {
 #[ignore = "needs ACL2"]
 fn inner_names_are_complete_and_the_failing_event_carries_detail() {
     let acl2 = acl2_or_skip!();
-    let dir = scratch("inner-detail");
+    let dir = scratch("inner-names");
     let file = dir.join("p.lisp");
     std::fs::write(
         &file,
@@ -1539,7 +1566,7 @@ fn a_renamed_book_orphans_the_session_loudly() {
 #[ignore = "needs ACL2"]
 fn retract_parks_the_frontier_on_request() {
     let acl2 = acl2_or_skip!();
-    let dir = scratch("retract");
+    let dir = scratch("retract-park");
     let file = dir.join("r.lisp");
     // Forms land on lines 1, 3, 5, 7.
     write(&file, &["(in-package \"ACL2\")",
