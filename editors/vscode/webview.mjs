@@ -849,6 +849,26 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
       `${cmd} gates the output document by scheme, not language`);
   }
 
+  // The icon shows the state the click *lands you in*, not the state you are
+  // in: the filled pin pins, the outline pin unpins. Which is the same
+  // convention as the play/pause button on the book -- the triangle both means
+  // "resume" and depicts where resuming leaves you -- so the two buttons agree
+  // even though they never appear together.
+  //
+  // Worth pinning because the other reading is so tempting: an outline pin
+  // shown *while pinned* looks like a state indicator that is simply wrong.
+  // It is not a state indicator.
+  const icon = (c) => pkg.contributes.commands.find((x) => x.command === c)?.icon;
+  check(icon('acl2-session.pinFormView') === '$(pinned)',
+    'the pinning action shows the pinned state it produces');
+  check(icon('acl2-session.unpinFormView') === '$(pin)',
+    'and the unpinning action shows the unpinned state it produces');
+  // Both are 2020-era codicons. `$(unpin)` would be the honest glyph for the
+  // action but was added in 2026, far past this extension's `engines`, and an
+  // unrecognised codicon renders as nothing rather than falling back.
+  check(!/\$\(unpin\)/.test(JSON.stringify(pkg.contributes.commands)),
+    'and neither uses $(unpin), which is newer than the engine we declare');
+
   // One word for it, everywhere a reader sees one.
   for (const c of pkg.contributes.commands) {
     check(!/\b(lock|hold|held)\b/i.test(c.title),

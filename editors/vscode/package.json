@@ -370,13 +370,13 @@
         "command": "acl2-session.pinFormView",
         "category": "ACL2",
         "title": "Pin to This Form",
-        "icon": "$(pin)"
+        "icon": "$(pinned)"
       },
       {
         "command": "acl2-session.unpinFormView",
         "category": "ACL2",
         "title": "Unpin",
-        "icon": "$(pinned)"
+        "icon": "$(pin)"
       },
       {
         "command": "acl2-session.toggleFormViewPin",
