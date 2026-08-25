@@ -2116,7 +2116,7 @@ fn a_forms_documentation_is_findable_by_name() {
                 (include-book \"std/util/define\" :dir :system)\n\
                 (defxdoc lone-topic :short \"documented by itself\")\n\
                 (define shown ((x natp)) :returns (y natp) :short \"a define\" (nfix x))\n\
-                (defun quiet (x) x)\n";
+                (defun undocumented-fn (x) x)\n";
     std::fs::write(&book_path, text).expect("write book");
 
     let mut d = Daemon::start(&acl2);
@@ -2152,10 +2152,11 @@ fn a_forms_documentation_is_findable_by_name() {
             .cloned()
             .unwrap_or_default()
     };
-    // The index is built on demand, so the first ask may go without it; the
-    // second has it. That is the bargain hover already makes.
-    let _ = ask(json!(["shown"]));
-    let got = ask(json!(["lone-topic", "shown", "quiet"]));
+    // The *first* ask, deliberately: the index is built on demand, and
+    // building it on the request that wants it is what makes this answer
+    // complete. Armed for a later tick instead, this returned nothing and a
+    // form's documentation showed up only if the user looked away and back.
+    let got = ask(json!(["lone-topic", "shown", "undocumented-fn"]));
     let short = |n: &str| -> Option<String> {
         got.iter()
             .find(|r| r["name"].as_str().is_some_and(|s| s.eq_ignore_ascii_case(n)))
@@ -2164,5 +2165,22 @@ fn a_forms_documentation_is_findable_by_name() {
     assert_eq!(short("lone-topic").as_deref(), Some("documented by itself"),
                "documented without introducing a rule: {got:?}");
     assert_eq!(short("shown").as_deref(), Some("a define"), "{got:?}");
-    assert_eq!(short("quiet"), None, "an undocumented name says nothing: {got:?}");
+    assert_eq!(short("undocumented-fn"), None, "an undocumented name says nothing: {got:?}");
+
+    // Now the case the index cannot see by watching the include set: a topic
+    // written into the file under the cursor. No dependency moves, so the
+    // dependency baseline that retires the census says nothing has changed --
+    // and the index went on answering from the world as it was when it was
+    // built. What retires it is the topic count the probe reports on every
+    // form.
+    let more = format!("{text}(defxdoc added-later :short \"written just now\")\n");
+    std::fs::write(&book_path, &more).expect("rewrite book");
+    d.notify("update", json!({ "book": book, "text": more, "revision": 2 }));
+    let _ = d.events_until_settled();
+    let after = d.request("rules", json!({ "book": book, "names": ["added-later"] }))["rules"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(after.first().and_then(|r| r["short"].as_str()), Some("written just now"),
+               "documentation written into this file is findable at once: {after:?}");
 }

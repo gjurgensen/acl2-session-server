@@ -251,8 +251,6 @@ pub struct Driver {
     symbols: Option<Vec<CensusEntry>>,
     /// A completion arrived with no census built. Cleared once one is.
     census_wanted: bool,
-    /// A hover arrived with no doc index built. Cleared once one is.
-    docs_wanted: bool,
     /// The certification in flight: whom to answer, and with what `-j`.
     ///
     /// A build is not a submission -- it is a separate process tree running
@@ -269,6 +267,19 @@ pub struct Driver {
     /// that the world has no xdoc, so it is attempted once rather than on
     /// every hover.
     docs: Option<HashMap<String, String>>,
+    /// The world's xdoc topic count when [`Driver::docs`] was built.
+    ///
+    /// The index is a snapshot of a table the session itself writes to, so
+    /// "still current" cannot be inferred from the include set: a `defxdoc`
+    /// in the file under the cursor adds a topic without moving a single
+    /// dependency. The probe on every form reports the running total, and a
+    /// total that no longer matches this is the whole test -- running rather
+    /// than a delta, so a retraction reads as out of date exactly like an
+    /// addition does.
+    docs_at: Option<usize>,
+    /// The topic count the last admitted form reported, or `None` before any
+    /// form has reported one. Compared against [`Driver::docs_at`].
+    xdoc_seen: Option<usize>,
     /// The include count the census was built against. When the world comes
     /// to rest on a different set of books, the table is describing a world
     /// that no longer exists.
@@ -335,7 +346,8 @@ impl Driver {
             census_wanted: false,
             census_deps: None,
             docs: None,
-            docs_wanted: false,
+            docs_at: None,
+            xdoc_seen: None,
             certifying: None,
             file_names: HashMap::new(),
         }
@@ -1092,18 +1104,46 @@ impl Driver {
             };
             self.file_names.insert(fold(&e.name), (e.name.clone(), kind, u.index));
         }
+        // A form that wrote documentation retires the index. Dropped, not
+        // rebuilt: a book of documented `define`s moves this count on nearly
+        // every form, and rebuilding on each would put a walk between every
+        // pair of forms in a sync. Dropping is free, and the rebuild is
+        // demand-driven -- it happens on the next request that wants a
+        // summary, which is a moment the user chose.
+        if let Some(n) = u.event_data.xdoc_topics {
+            self.xdoc_seen = Some(n);
+            if self.docs_at != Some(n) {
+                self.docs = None;
+            }
+        }
     }
 
     /// This name's one-line summary, if the world documents it.
     ///
-    /// Asking is what makes the index wanted; it is built on the next tick,
-    /// so the first hover of a session has no summary and the rest do.
+    /// Builds the index if it is missing, which costs a query: **37 ms over
+    /// 2,069 topics** on `std/top`, measured through this path. That is small
+    /// enough to sit on a request, and paying it here is what makes the
+    /// answer right the first time it is asked -- armed for a later tick
+    /// instead, the request that discovered the want returned nothing, so a
+    /// form's documentation appeared only if the user happened to look away
+    /// and back.
+    ///
+    /// `try_lock`, never a wait: a summary is worth 37 ms of an idle session
+    /// and nothing at all of a busy one. A proof in flight simply means no
+    /// summaries in this answer, and the next request builds it.
     fn doc_short(&mut self, name: &str) -> Option<String> {
-        let Some(docs) = self.docs.as_ref() else {
-            self.docs_wanted = true;
-            return None;
-        };
-        docs.get(&fold(name)).cloned()
+        if self.docs.is_none() {
+            let mut book = self.book.try_lock().ok()?;
+            // Recorded even when the walk finds nothing: a world with no xdoc
+            // answers `Ok(empty)`, which is a real state, and treating it as
+            // built is what keeps it from being attempted on every name of
+            // every request thereafter.
+            let topics = book.doc_index(DESCRIBE).ok()?;
+            drop(book);
+            self.docs = Some(topics.into_iter().map(|t| (fold(&t.name), t.short)).collect());
+            self.docs_at = self.xdoc_seen;
+        }
+        self.docs.as_ref()?.get(&fold(name)).cloned()
     }
 
     /// What this file's own units introduced, if this is one of them.
@@ -1148,29 +1188,10 @@ impl Driver {
         // next completion, which is a moment the user chose.
         if self.symbols.is_some() && self.census_deps != deps {
             self.symbols = None;
-            // Topics arrive with books, so the same signal retires them --
-            // and re-arms the want, since something clearly cares.
+            // Topics arrive with books too, so the same signal retires them.
+            // No want to re-arm: the index is cheap enough to rebuild on the
+            // request that next needs it, in `doc_short`.
             self.docs = None;
-            self.docs_wanted = true;
-        }
-        // Demand-driven, exactly like the census below, and for a reason the
-        // protocol test caught: built eagerly, this submits on the tick right
-        // after the driver settles, so `status` reports the session busy when
-        // nothing the *user* asked for is running. A session that never hovers
-        // should pay nothing, and one that does pays once.
-        if self.docs_wanted && self.docs.is_none() {
-            let r = {
-                let Ok(mut book) = self.book.try_lock() else { return };
-                book.doc_index(DESCRIBE)
-            };
-            // A world with no xdoc answers `Ok(empty)` -- the probe cannot
-            // even be read there -- and that is recorded as built, so it is
-            // attempted once rather than on every tick. `Busy` leaves it
-            // unbuilt for the next one.
-            if let Ok(t) = r {
-                self.docs = Some(t.into_iter().map(|t| (fold(&t.name), t.short)).collect());
-                self.docs_wanted = false;
-            }
         }
         if !self.census_wanted || self.symbols.is_some() {
             return;
