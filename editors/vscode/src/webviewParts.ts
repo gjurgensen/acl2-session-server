@@ -128,11 +128,21 @@ details > summary h3 { display: inline; }
 }
 details[data-fold] > summary { list-style: none; }
 details[data-fold] > summary::-webkit-details-marker { display: none; }
+/* One number for every indent a fold produces.
+ *
+ * A chevron sits in a slot to the left of its label, and everything the fold
+ * contains lines up with the *label* -- which is what a tree looks like, and
+ * what four hand-written indents in this file were each approximating from a
+ * different direction. They had drifted: the chevron's slot was 14px and the
+ * body's indent 20px, so a card's title and its contents missed each other by
+ * two pixels, which is the worst amount to be out by. Tied together they
+ * cannot drift again, and nesting needs no new number. */
+:root { --twist: 14px; }
 details[data-fold] > summary::before {
   font-family: "codicon";
   content: "\\eab6";
   display: inline-block;
-  width: 14px;
+  width: var(--twist);
   font-size: 13px;
   line-height: 1;
   vertical-align: baseline;
@@ -149,13 +159,23 @@ details.event, .event.bare {
   border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
   border-radius: 4px; margin: 6px 0;
 }
-details.event > summary, .event.bare .esum { padding: 5px 8px; }
-.einside { padding: 2px 9px 8px 20px; }
+details.event > summary { padding: 5px 8px; }
+/* An event with nothing under it has no chevron, and still reserves the slot:
+   otherwise its name sits a chevron's width left of every name around it. */
+.event.bare .esum { padding: 5px 8px 5px calc(8px + var(--twist)); }
+.einside { padding: 2px 9px 8px calc(8px + var(--twist)); }
 .ekind { font-size: 11px; opacity: 0.65; margin-right: 6px; }
 .ename { font-weight: 600; }
 /* On its own line: a signature and four facts do not fit beside each other
-   in a pane this narrow, and wrapping them mid-phrase reads worse. */
-.efacts { display: block; margin-top: 2px; }
+   in a pane this narrow, and wrapping them mid-phrase reads worse. Indented
+   because it is a *block* inside the summary, and a \`::before\` only offsets
+   the first inline run -- without this it starts back at the chevron, a slot
+   to the left of the name it is about. */
+.efacts { display: block; margin-top: 2px; padding-left: var(--twist); }
+/* And the same for a fold nested inside one: its body lines up under its own
+   label, not under its own chevron. \`.einside\` says this for itself, having a
+   padding on all four sides. */
+details[data-fold]:not(.event) > *:not(summary) { padding-left: var(--twist); }
 /* A rule that exists but is off. Blue, not red: a disabled rule is a fact
    worth surfacing -- it is the field most likely to explain a proof that did
    not fire -- but it is a state, not a fault, and red reads as something

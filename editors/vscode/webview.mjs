@@ -739,6 +739,46 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   check(pinnedIndex(at(4, 1), units) === undefined, 'and neither is a line with no form on it');
 }
 
+// ---- every fold indent comes from one number ----
+{
+  const { readFileSync } = require('fs');
+  const css = readFileSync(new URL('./src/webviewParts.ts', import.meta.url), 'utf8');
+  // The selector followed by its own brace: several of these names also
+  // appear inside *other* selectors (`.event.bare .esum code,` styles code),
+  // and matching the first occurrence reads the wrong rule.
+  const rule = (sel) => {
+    const at = css.indexOf(sel + ' {');
+    return at === -1 ? null : css.slice(at, css.indexOf('}', at) + 1);
+  };
+
+  // A chevron sits in a slot; everything the fold contains lines up with the
+  // *label* beside that slot, not with the slot. Four places need the same
+  // number to agree on that, and they are only correct together -- which is
+  // exactly the kind of thing that drifts. It had: the slot was 14px and the
+  // body's indent 20px, so a card's title and its contents missed by two
+  // pixels. Two is the worst possible amount: too small to read as
+  // indentation, too large to read as aligned.
+  check(/:root\s*\{\s*--twist:/.test(css), 'the indent is a single declared number');
+  for (const [sel, what] of [
+    ['details[data-fold] > summary::before', "the chevron's slot"],
+    ['.einside', "a fold's body"],
+    ['.efacts', "the facts line inside a summary"],
+    ['.event.bare .esum', "an event with no chevron at all"],
+    ['details[data-fold]:not(.event) > *:not(summary)', "a nested fold's body"],
+  ]) {
+    const r = rule(sel);
+    check(r !== null, `${what} has a rule`);
+    check(r !== null && /var\(--twist\)/.test(r),
+      `${what} is derived from it, not written out`);
+  }
+
+  // The two that must be equal rather than merely related: a fold's body and
+  // the label above it. Both are the summary's padding plus one slot.
+  const pad = (sel) => (rule(sel) || '').match(/calc\(([^)]*\))?[^)]*\)/)?.[0];
+  check(pad('.einside') === pad('.event.bare .esum'),
+    "a fold's body and a chevronless event start at the same column");
+}
+
 // ---- one editor action, in every state the editor can be in ----
 {
   const { readFileSync } = require('fs');
