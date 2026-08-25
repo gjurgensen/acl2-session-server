@@ -421,7 +421,14 @@ function render() {
   }
 }
 
-bindGoals(document, (b, slot) => 'egoal-' + seqOf(b) + '-' + slot);
+bindGoals(
+  document,
+  (b, slot) => 'egoal-' + seqOf(b) + '-' + slot,
+  (seq, slot, waiting) => {
+    const e = evalAt(seq);
+    if (e) { e.goals = e.goals || {}; e.goals[slot] = waiting; }
+  }
+);
 // The folds inside each entry's envelope. The console never scopes them: its
 // transcript is cumulative, so an entry scrolled past keeps whatever the
 // reader left open on it. Its own per-entry details.ev is separate and stays

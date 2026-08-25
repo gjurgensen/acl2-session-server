@@ -217,6 +217,9 @@ export function tokenizeAll(
 
 export class FormView {
   private panel?: vscode.WebviewPanel;
+  /** Whether the page has said it is listening. See {@link FormView.send}. */
+  private ready = false;
+  private queued: unknown[] = [];
   private model?: FormModel;
   private lastRules?: { book: string; index: number; entries: FormNameRules[] };
   /** The serialised model last sent to the page. See `render`. */
@@ -315,10 +318,24 @@ export class FormView {
         this.onShowOutput?.(this.model.book, this.model.index);
         return;
       }
+      if (m.cmd === 'ready') {
+        this.ready = true;
+        const held = this.queued;
+        this.queued = [];
+        for (const q of held) {
+          void this.panel?.webview.postMessage(q);
+        }
+        return;
+      }
     }
     );
     this.panel.onDidDispose(() => {
       this.panel = undefined;
+      this.ready = false;
+      this.queued = [];
+      // The next panel is a fresh page that has been told nothing, so what
+      // this one was last sent is no longer a reason to stay silent.
+      this.postedModel = undefined;
     });
     if (this.model) {
       this.post(this.model);
@@ -375,7 +392,7 @@ export class FormView {
   }
 
   private postRules(r: { book: string; index: number; entries: FormNameRules[] }): void {
-    void this.panel?.webview.postMessage({
+    this.send({
       kind: 'rules',
       book: r.book,
       index: r.index,
@@ -418,7 +435,7 @@ export class FormView {
    * is in the place the reader is already looking.
    */
   note(text: string | undefined): void {
-    void this.panel?.webview.postMessage({ kind: 'note', text });
+    this.send({ kind: 'note', text });
   }
 
   /** Re-send the current model, for when the theme changed under us. */
@@ -435,6 +452,31 @@ export class FormView {
    * the page will look up, so anything that changes the text has to happen
    * before the tokenizer sees it.
    */
+  /**
+   * Post, or hold until the page is listening.
+   *
+   * A webview's script runs asynchronously after its HTML is set, and a
+   * message posted before it registers its listener is dropped with no error
+   * anywhere -- the drop this codebase documents on `Console.ready` and which
+   * `DocView` also handles. The form view was the one that did not, and it had
+   * the worst consequence of the three, because `post` records what it sent:
+   * a dropped model still set `postedModel`, so `render`'s dedup then
+   * suppressed every identical re-post and the view sat on its placeholder
+   * until the cursor moved to a *different* form.
+   *
+   * Reproducible: check a book, close the form-view tab, click the status bar.
+   */
+  private send(message: unknown): void {
+    if (!this.panel) {
+      return;
+    }
+    if (this.ready) {
+      void this.panel.webview.postMessage(message);
+    } else {
+      this.queued.push(message);
+    }
+  }
+
   private post(model: FormModel, key = JSON.stringify(model)): void {
     // What was last actually sent, so `render` can tell a repeat from a
     // change. Recorded here rather than in `render` so the unconditional
@@ -455,7 +497,7 @@ export class FormView {
       u && u.book === model.book && u.index === model.index
         ? u.entries
         : undefined;
-    void this.panel?.webview.postMessage({
+    this.send({
       kind: 'model',
       model: laid,
       entries,
@@ -469,7 +511,7 @@ export class FormView {
   tail(book: string, unit: number | null, elapsedMs: number, text: string): void {
     const s = this.shown();
     if (s && s.book === book && s.index === unit) {
-      void this.panel?.webview.postMessage({ kind: 'tail', elapsedMs, text });
+      this.send({ kind: 'tail', elapsedMs, text });
     }
   }
 
@@ -668,6 +710,10 @@ function reportCols() {
   }
 }
 reportCols();
+// The listener above is installed, so anything held back may come now. A
+// webview's script runs asynchronously after its HTML is set, and a message
+// posted before this point is dropped without a word.
+vscode.postMessage({ cmd: 'ready' });
 // Dragging the pane changes the answer. Debounced, because a drag is a
 // stream of resizes and each reply re-flows and re-tokenizes every term.
 let colsTimer;

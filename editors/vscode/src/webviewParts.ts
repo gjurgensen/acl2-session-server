@@ -606,7 +606,7 @@ function productiveHtml(m, p) {
  * checkpoints mention the return variable and never mention the theorem --
  * without the name a reader goes looking at the function.
  */
-function failureHtml(m, p, on) {
+function failureHtml(m, p, on, goals) {
   let h = '';
   const inner = m.inner || [];
   // The wire marks the failing event with its abort causes. A form with one
@@ -637,7 +637,11 @@ function failureHtml(m, p, on) {
             '" data-on="' + on + '">prover output</button>'
           : '') +
         '</div><pre>' + hl(c.term) + '</pre>' +
-        (on ? '<pre id="' + p + i + '" hidden></pre>' : '') + '</div>';
+        (on
+          ? goals && goals[i] !== undefined
+            ? '<pre id="' + p + i + '">' + esc(goals[i]) + '</pre>'
+            : '<pre id="' + p + i + '" hidden></pre>'
+          : '') + '</div>';
     });
     const shownTop = cps.filter((c) => c.kind === 'top').length;
     const shownSub = cps.filter((c) => c.kind === 'sub').length;
@@ -703,21 +707,31 @@ function warningsHtml(m, p) {
  * the command a goal button posts, and giving no on means no buttons --
  * which is how the form view asks for the drill-down to be left out.
  */
-function envelope(m, p, on) {
+// \`goals\` is what has already been fetched for this envelope's checkpoints,
+// by slot. It has to be rendered from a model rather than written into the DOM
+// once, because every render regenerates these elements: the console re-renders
+// on a tail tick, on another eval's state, and on a theme refresh, and each one
+// wiped the prover output a reader had just asked for. (No backticks in here.)
+function envelope(m, p, on, goals) {
   const failed = !!(m.failed || m.errorLine || m.abortCause ||
                     (m.checkpoints || []).length);
-  return (failed ? failureHtml(m, p, on) : productiveHtml(m, p)) + warningsHtml(m, p);
+  return (failed ? failureHtml(m, p, on, goals) : productiveHtml(m, p)) + warningsHtml(m, p);
 }
 
 // Goal buttons can sit in any number of envelopes on one page, so they are
 // bound once here and dispatch on the command their own markup names.
-function bindGoals(root, slotId) {
+// \`onFetch(seq, slot, text)\` lets a page record the placeholder on its own
+// model as well as in the DOM, so a render arriving before the reply does not
+// put the pre back to empty-and-hidden and leave the button looking dead.
+function bindGoals(root, slotId, onFetch) {
   root.addEventListener('click', (ev) => {
     const b = ev.target.closest && ev.target.closest('button[data-goal]');
     if (!b) { return; }
     const slot = Number(b.dataset.slot);
     const pre = document.getElementById(slotId(b, slot));
-    if (pre) { pre.hidden = false; pre.textContent = '(fetching\\u2026)'; }
+    const waiting = '(fetching\\u2026)';
+    if (pre) { pre.hidden = false; pre.textContent = waiting; }
+    if (onFetch) { onFetch(seqOf(b), slot, waiting); }
     vscode.postMessage({ cmd: b.dataset.on, goal: b.dataset.goal, slot, seq: seqOf(b) });
   });
 }

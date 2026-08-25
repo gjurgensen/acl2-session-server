@@ -557,6 +557,39 @@ check(!pages[1][1].includes('Introduced ('),
   check(!h.includes('Checkpoints'), 'and shows no empty checkpoint section');
 }
 
+// Per-checkpoint prover output has to come from a model, not from the DOM.
+//
+// The console re-renders on a tail tick, on another eval's state, and on a
+// theme refresh, and each render rebuilds these elements. Written straight
+// into the DOM, the text a reader had just asked for was wiped by whichever
+// came first -- and a render landing between the click and the reply left the
+// reply arriving into a pre that was still hidden, so the button looked dead.
+{
+  const cps = [{ goal: "Subgoal *1/2'", term: '(implies (consp x) (natp (f x)))' }];
+  const bare = envelope({ checkpoints: cps, inner: [] }, 'egoal-1-', 'goal');
+  check(bare.includes('<pre id="egoal-1-0" hidden></pre>'),
+        'a checkpoint with nothing fetched renders an empty, hidden slot');
+  check(bare.includes('prover output</button>'), 'and the button that fetches it');
+
+  const filled = envelope({ checkpoints: cps, inner: [] }, 'egoal-1-', 'goal',
+                          { 0: 'Subgoal *1/2\u2019 simplifies to T.' });
+  check(filled.includes('<pre id="egoal-1-0">Subgoal'),
+        'and one already fetched renders its text, not hidden');
+  check(!filled.includes('id="egoal-1-0" hidden'), 'the slot is shown');
+
+  // Book-controlled text reaches this slot -- it is what ACL2 printed under a
+  // goal -- so it is escaped like everything else in these pages.
+  const nasty = envelope({ checkpoints: cps, inner: [] }, 'egoal-1-', 'goal',
+                         { 0: '<script>alert(1)</script>' });
+  check(!nasty.includes('<script>'), 'and is escaped on the way in');
+  check(nasty.includes('&lt;script&gt;'), 'as text');
+
+  // Without the fetch command there are no buttons and no slots at all, which
+  // is the form view's spelling of the same envelope.
+  const noOn = envelope({ checkpoints: cps, inner: [] }, 'goal-');
+  check(!noOn.includes('<pre id="goal-0"'), 'no slots where nothing can fetch');
+}
+
 // Open by default only while there are few enough to read past. The defines
 // in kestrel/c/syntax/validator.lisp records 620 events.
 {
@@ -1214,6 +1247,9 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   // `panel` is private to TypeScript only; at runtime this is the seam that
   // lets the count be taken without an editor.
   fv.panel = { webview: { postMessage: () => { posts++; } } };
+  // As if the page had said so. Without it every post below would be held,
+  // which is the subject of the block after this one.
+  fv.ready = true;
 
   const model = () => ({
     book: 's1', index: 69, total: 77,
@@ -1245,6 +1281,47 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
 
   fv.render(changed);
   check(posts === 3, 'and the guard still holds after it');
+}
+
+// ---- and nothing is sent into a page that is not listening yet ----
+//
+// A webview's script runs asynchronously after its HTML is set, so a message
+// posted before it registers its listener is dropped with no error anywhere.
+// The form view posted straight into the fresh panel *and recorded what it
+// sent*, so the dedup above then suppressed every identical re-post: check a
+// book, close the form-view tab, click the status bar, and the view sat on
+// its placeholder until the cursor moved to a different form.
+{
+  const { FormView } = require('./out/formView.js');
+  const fv = new FormView();
+  const sent = [];
+  fv.panel = { webview: { postMessage: (m) => { sent.push(m); } } };
+
+  const model = {
+    book: 's1', index: 0, total: 1,
+    lineStart: 1, lineEnd: 1, colStart: 1, colEnd: 2,
+    status: 'admitted', skipped: false, checkpoints: [], rules: [],
+  };
+
+  fv.render(model);
+  fv.note('held too');
+  check(sent.length === 0, 'nothing reaches a page that has not said it is listening');
+
+  // What `open`'s `ready` branch does when the page finally speaks.
+  fv.ready = true;
+  const held = fv.queued;
+  fv.queued = [];
+  for (const q of held) fv.panel.webview.postMessage(q);
+  check(sent.length === 2, 'and everything held arrives once it has, in order');
+  check(sent[0].kind === 'model' && sent[1].kind === 'note', 'in the order it was queued');
+
+  // The dedup must not outlive the page it was about. A new panel is a fresh
+  // page that has been told nothing.
+  fv.render(model);
+  check(sent.length === 2, 'the guard still holds while this page is up');
+  fv.postedModel = undefined;
+  fv.render(model);
+  check(sent.length === 3, 'and lets go when the panel does');
 }
 
 if (bad) {
