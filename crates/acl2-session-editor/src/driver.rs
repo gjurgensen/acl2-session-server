@@ -403,7 +403,13 @@ impl Driver {
             "stale_deps",
             &wire::stale_deps(&self.id, self.revision, &stale),
         );
-        let names: Vec<String> = stale.iter().map(|s| s.book.clone()).collect();
+        // Sorted, because this is a set and the comparison is only asking
+        // whether it is the same one. `stale_includes_cached` promises no
+        // order, so an unchanged set arriving permuted read as news and
+        // deferred acting on it by another tick -- every tick, for as long as
+        // the permutation persisted.
+        let mut names: Vec<String> = stale.iter().map(|s| s.book.clone()).collect();
+        names.sort();
         if names != self.stale_seen {
             self.stale_seen = names;
             return Flow::Continue; // seen once; act when it settles
@@ -697,7 +703,7 @@ impl Driver {
         //
         // A local definition also rightly wins over an included one of the
         // same name: it is the text in front of the reader.
-        if let Some(s) = self.site_in(&self.bytes.clone(), name) {
+        if let Some(s) = self.site_in(&self.bytes, name) {
             let unit = self.units.iter().position(|u| s.offset >= u.start && s.offset < u.end);
             return self.out.reply(id, to_value(wire::DefinitionReply {
                 available: true,
@@ -1156,18 +1162,25 @@ impl Driver {
         if !self.census_wanted || self.symbols.is_some() {
             return;
         }
+        // The dependency count comes back under the *same* lock as the walk.
+        // Recorded from after the walk, which is what makes it describe the
+        // world the census actually saw -- but taken again afterwards it was a
+        // second `try_lock`, and a miss left `census_deps` at `None`, which
+        // reads as "the world moved" and threw away the census that had just
+        // cost several seconds. The lock is already held here; asking now
+        // cannot fail and cannot see a different world.
         let r = {
             let Ok(mut book) = self.book.try_lock() else { return };
-            book.census(CENSUS)
+            let c = book.census(CENSUS);
+            let deps = book.dep_count();
+            (c, deps)
         };
-        if let Ok(c) = r
+        if let (Ok(c), deps) = r
             && !c.is_empty()
         {
             self.symbols = Some(c);
             self.census_wanted = false;
-            // Recorded from *after* the walk: the world it describes is the
-            // one that existed when it finished, not when it started.
-            self.census_deps = self.book.try_lock().ok().and_then(|b| b.dep_count());
+            self.census_deps = deps;
         }
     }
 

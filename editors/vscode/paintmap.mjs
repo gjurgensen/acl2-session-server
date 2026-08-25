@@ -147,7 +147,10 @@ check('an empty book paints nothing', paintMap([]), []);
   const { readFileSync } = require('fs');
   for (const bar of BARS.filter((b) => !b.inlineOnly)) {
     for (const theme of ['light', 'dark']) {
-      const svg = readFileSync(`media/${bar.icon}-${theme}.svg`, 'utf8');
+      const svg = readFileSync(
+        new URL(`./media/${bar.icon}-${theme}.svg`, import.meta.url),
+        'utf8'
+      );
       const fill = /fill="#([0-9a-fA-F]{6})"/.exec(svg);
       const alpha = /fill-opacity="([0-9.]+)"/.exec(svg);
       if (!fill || !alpha) {
@@ -167,7 +170,13 @@ check('an empty book paints nothing', paintMap([]), []);
   // And the contributed defaults, which are the same colours as #rrggbbaa.
   // Compared channel by channel with a tolerance of one, because the alpha
   // makes a round trip through a byte and 0.5 has no exact eighth-bit form.
-  const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+  // Resolved from this file, like every sibling harness: read cwd-relative it
+  // worked from `editors/vscode` and nowhere else, so running the suite from
+  // the repository root failed on a missing file rather than on anything it
+  // was checking.
+  const pkg = JSON.parse(
+    readFileSync(new URL('./package.json', import.meta.url), 'utf8')
+  );
   const byId = new Map(pkg.contributes.colors.map((c) => [c.id, c.defaults]));
   const channels = (hex) =>
     [0, 2, 4, 6].map((i) => parseInt(hex.slice(1 + i, 3 + i), 16)).filter((n) => !isNaN(n));

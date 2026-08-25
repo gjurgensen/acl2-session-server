@@ -71,8 +71,12 @@ function fallbackColor(scopes: string[]): string {
 /**
  * Strip comments and trailing commas. Theme files are JSONC, and the parser
  * VSCode uses for them is not on an extension's surface.
+ *
+ * Exported for `webview.mjs`, which is the only way either of the two pure
+ * functions in this module gets checked: everything else here needs a real
+ * VSCode to have an opinion about.
  */
-function stripJsonc(src: string): string {
+export function stripJsonc(src: string): string {
   let out = '';
   let inString = false;
   for (let i = 0; i < src.length; i++) {
@@ -96,6 +100,19 @@ function stripJsonc(src: string): string {
         i++;
       }
       out += '\n';
+    } else if (c === ',') {
+      // A trailing comma, decided here rather than by a pass over the result:
+      // the loop knows whether it is inside a string and a regex over the
+      // finished text does not, so `"a, }"` in a theme's own value had its
+      // comma taken out. Every other step of this parser is string-aware; this
+      // was the one that was not.
+      let j = i + 1;
+      while (j < src.length && /\s/.test(src[j])) {
+        j++;
+      }
+      if (src[j] !== '}' && src[j] !== ']') {
+        out += c;
+      }
     } else if (c === '/' && next === '*') {
       i += 2;
       while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) {
@@ -106,7 +123,7 @@ function stripJsonc(src: string): string {
       out += c;
     }
   }
-  return out.replace(/,(\s*[}\]])/g, '$1');
+  return out;
 }
 
 /** The file behind the active `workbench.colorTheme` label, if we can name it. */
@@ -162,7 +179,7 @@ function readTheme(file: string, depth = 0): ThemeJson | undefined {
 }
 
 /** The shape vscode-textmate wants; its own interface is not exported. */
-interface ThemeSetting {
+export interface ThemeSetting {
   name?: string;
   scope?: string | string[];
   settings: { foreground?: string; fontStyle?: string; background?: string };
@@ -170,6 +187,56 @@ interface ThemeSetting {
 
 function asRules(v: unknown): ThemeSetting[] {
   return Array.isArray(v) ? (v as ThemeSetting[]) : [];
+}
+
+/**
+ * The scopes VSCode's own simple `tokenColorCustomizations` keys stand for.
+ *
+ * `"editor.tokenColorCustomizations": { "comments": "#f00" }` is the spelling
+ * the settings UI offers and the documentation leads with, and it reached
+ * nothing here: only `textMateRules` was read, so a reader who set it saw red
+ * comments in the buffer and theme-coloured ones in the form view -- from the
+ * same grammar, which is the one thing the form view promises.
+ *
+ * The scopes are VSCode's documented set for these keys. Kept deliberately
+ * broad rather than exact: a scope that is too general colours a token the
+ * editor also colours, while one that is missing colours nothing, and of the
+ * two failures the second is the one a reader notices as a discrepancy.
+ */
+const SIMPLE_SCOPES: Record<string, string[]> = {
+  comments: ['comment'],
+  strings: ['string'],
+  keywords: ['keyword', 'storage', 'storage.type'],
+  numbers: ['constant.numeric'],
+  types: ['entity.name.type', 'entity.name.class', 'support.type', 'support.class'],
+  functions: ['entity.name.function', 'support.function'],
+  variables: ['variable', 'entity.name.variable'],
+};
+
+/**
+ * The simple keys of one `tokenColorCustomizations` object, as TextMate rules.
+ *
+ * A value is either a colour or `{ foreground, fontStyle }`, which is what a
+ * `ThemeSetting` already carries -- so this is a translation of the *key*, not
+ * of the value.
+ */
+export function simpleRules(custom: Record<string, unknown>): ThemeSetting[] {
+  const out: ThemeSetting[] = [];
+  for (const [key, scopes] of Object.entries(SIMPLE_SCOPES)) {
+    const v = custom[key];
+    if (v === undefined || v === null) {
+      continue;
+    }
+    const settings =
+      typeof v === 'string'
+        ? { foreground: v }
+        : (v as { foreground?: string; fontStyle?: string });
+    if (!settings.foreground && !settings.fontStyle) {
+      continue;
+    }
+    out.push({ scope: scopes, settings });
+  }
+  return out;
 }
 
 /**
@@ -193,11 +260,17 @@ function themeRules(): ThemeSetting[] | undefined {
     vscode.workspace
       .getConfiguration('editor')
       .get<Record<string, unknown>>('tokenColorCustomizations') ?? {};
-  const scoped = label ? (custom[`[${label}]`] as { textMateRules?: unknown } | undefined) : undefined;
+  const scoped = label
+    ? (custom[`[${label}]`] as Record<string, unknown> | undefined)
+    : undefined;
+  // Simple keys before `textMateRules` at each level, matching VSCode: a rule
+  // written out by scope is the more specific statement and later rules win.
   return [
     ...asRules(theme.tokenColors),
+    ...simpleRules(custom),
     ...asRules(custom['textMateRules']),
-    ...asRules(scoped?.textMateRules),
+    ...(scoped ? simpleRules(scoped) : []),
+    ...asRules(scoped?.['textMateRules']),
   ];
 }
 

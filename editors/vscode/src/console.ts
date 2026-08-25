@@ -77,7 +77,15 @@ export class Console {
     private title: string
   ) {}
 
-  get visible(): boolean {
+  /**
+   * Whether this console has a panel at all -- not whether it is on screen.
+   *
+   * Named `visible` once, which is a different question and one VSCode can
+   * actually answer (`panel.visible`): a console behind another tab exists
+   * and is not visible. Every caller wants existence, so the name moved to
+   * match rather than the other way about.
+   */
+  get exists(): boolean {
     return this.panel !== undefined;
   }
 

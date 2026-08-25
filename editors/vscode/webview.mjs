@@ -693,6 +693,52 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
 }
 
 
+// ---- reading the theme: the two pure functions in highlight.ts ----
+//
+// The form view's promise is that a term in it and the same term in the buffer
+// are coloured identically, from the same grammar. That rests on reading the
+// theme the way VSCode reads it, and neither half of that reading was checked
+// by anything.
+{
+  const { stripJsonc, simpleRules } = require('./out/highlight.js');
+
+  // JSONC, which is what a theme file is. The comment and trailing-comma
+  // stripping has to be string-aware in both directions.
+  // Replaced by its newline rather than removed, so line numbers survive for
+  // anything that reports a parse error by position.
+  check(stripJsonc('{"a": 1} // trailing') === '{"a": 1} \n', 'a line comment goes');
+  check(stripJsonc('{/* a */ "a": 1}') === '{ "a": 1}', 'and a block comment');
+  check(stripJsonc('{"a": 1,}') === '{"a": 1}', 'a trailing comma before }');
+  check(stripJsonc('{"a": [1,2,]}') === '{"a": [1,2]}', 'and before ]');
+  check(stripJsonc('{"a": 1, "b": 2}') === '{"a": 1, "b": 2}', 'a real comma stays');
+  // The one that was wrong: the character loop knew about strings and the
+  // trailing-comma pass did not, so a comma inside a theme's own value was
+  // taken out.
+  check(stripJsonc('{"a": "x, }"}') === '{"a": "x, }"}',
+        'a comma inside a string is content, not punctuation');
+  check(stripJsonc('{"a": "// not a comment"}') === '{"a": "// not a comment"}',
+        'and so is a slash pair');
+  check(stripJsonc('{"a": "q\\" , }"}') === '{"a": "q\\" , }"}',
+        'an escaped quote does not end the string');
+  check(JSON.parse(stripJsonc('{"a": 1, /* c */ "b": [2,],}')).b[0] === 2,
+        'and the result parses');
+
+  // The simple `tokenColorCustomizations` keys, which reached nothing: only
+  // `textMateRules` was read, so a reader who set `comments` in the settings
+  // UI saw one colour in the buffer and another in the form view.
+  const rules = simpleRules({ comments: '#ff0000', keywords: { fontStyle: 'bold' } });
+  check(rules.length === 2, 'a colour and a style each become a rule');
+  const byScope = (s) => rules.find((r) => r.scope.includes(s));
+  check(byScope('comment')?.settings.foreground === '#ff0000',
+        'a bare string is a foreground');
+  check(byScope('keyword')?.settings.fontStyle === 'bold', 'an object is taken as written');
+  check(simpleRules({ textMateRules: [] }).length === 0,
+        'and the key that already worked is not translated twice');
+  check(simpleRules({ comments: undefined, strings: null }).length === 0,
+        'nothing set is no rule');
+  check(simpleRules({}).length === 0, 'and an empty customization is none');
+}
+
 // ---- xdoc markup to HTML: the escaping layer ----
 //
 // The harness `xdoc.ts`'s own header claimed and did not have. It matters

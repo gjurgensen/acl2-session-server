@@ -4974,15 +4974,50 @@ mod tests {
         assert_eq!(super::failure_causes(None), None);
     }
 
-    #[test]
-    fn the_detail_probe_is_balanced() {
+    /// Every probe this crate submits, named once so the two meta-tests below
+    /// cannot cover different subsets of them.
+    ///
+    /// The list is the point. Both checks fail only against a live ACL2, and
+    /// only inside whatever unit the probe was spliced into -- so a probe
+    /// added without being added *here* is exactly as unchecked as it was
+    /// before either test existed. Constructors are exercised over arguments
+    /// that have caused trouble: a package qualifier, a `*`, an arrow, a
+    /// bar-quotable shape.
+    fn every_probe() -> Vec<(&'static str, String)> {
         let names = ["append", "b*", "fty::deffixequiv", "foo->bar", "*const*"];
+        let mut all: Vec<(&'static str, String)> = vec![
+            ("CLEAR_STALE", super::CLEAR_STALE.to_string()),
+            ("CMD_PROBE", super::CMD_PROBE.to_string()),
+            ("DEPS_PROBE", super::DEPS_PROBE.to_string()),
+            ("EVENT_DATA_PROBE", super::EVENT_DATA_PROBE.to_string()),
+            ("CHECKPOINT_PROBE", super::CHECKPOINT_PROBE.to_string()),
+            ("INTERRUPT_PROBE", super::INTERRUPT_PROBE.to_string()),
+            ("CENSUS_PROBE", super::CENSUS_PROBE.to_string()),
+            ("DOC_INDEX_PROBE", super::DOC_INDEX_PROBE.to_string()),
+            ("VALUE_PROBE", crate::session::VALUE_PROBE.to_string()),
+            ("rules_probe/untranslated", super::rules_probe(&names.map(String::from), true)),
+            ("rules_probe/raw", super::rules_probe(&names.map(String::from), false)),
+            ("rules_probe/empty", super::rules_probe(&[], true)),
+            ("doc_topic_probe", super::doc_topic_probe("APPEND")),
+            ("doc_topic_probe/qualified", super::doc_topic_probe("FTY::DEFPROD")),
+        ];
         for name in names {
-            let p = super::detail_probe(name);
-            assert_eq!(paren_balance(&p), 0, "unbalanced probe for {name}: {p}");
+            all.push(("detail_probe", super::detail_probe(name)));
         }
-        let p = super::rules_probe(&names.map(String::from), true);
-        assert_eq!(paren_balance(&p), 0, "unbalanced rules probe: {p}");
+        // The generated inner-events probe, at the bounds its callers use and
+        // at the ones that shape its `loop$`: none, one, and the editor's
+        // effectively unbounded default.
+        for limit in [0, 1, 3, 620, usize::MAX] {
+            all.push(("inner_events_probe", super::inner_events_probe(limit)));
+        }
+        all
+    }
+
+    #[test]
+    fn every_probe_is_balanced() {
+        for (name, p) in every_probe() {
+            assert_eq!(paren_balance(&p), 0, "unbalanced probe {name}: {p}");
+        }
     }
 
     /// `fmt` numbers its arguments with one digit, so `~x10` is not the
@@ -4990,21 +5025,87 @@ mod tests {
     /// probe then reports a field it never printed and drops the one it did,
     /// silently and only against a live ACL2. Ten arguments is the ceiling;
     /// past it, split the `cw`.
+    ///
+    /// `~Y` is the exception, and it is not a two-digit *argument*: `~Yxy`
+    /// takes two of them, printing argument x under the evisc-tuple in
+    /// argument y. `INTERRUPT_PROBE` uses it that way. It is listed rather
+    /// than pattern-matched for, so a different two-letter directive arriving
+    /// later fails here and gets read before it is waved through -- which is
+    /// how this one surfaced, when the check stopped looking at four probes
+    /// and started looking at all of them.
+    /// The check itself, on strings whose answer is known -- because a check
+    /// over probes that all pass says nothing about what it would catch.
+    #[test]
+    fn the_fmt_check_catches_what_it_is_for() {
+        let flags = |p: &str| -> bool {
+            const TWO_ARG: [u8; 1] = *b"Y";
+            let b = p.as_bytes();
+            (0..b.len().saturating_sub(3)).any(|i| {
+                let takes = if TWO_ARG.contains(&b[i + 1]) { 2 } else { 1 };
+                let last = i + 1 + takes + 1;
+                b[i] == b'~'
+                    && b[i + 1].is_ascii_alphabetic()
+                    && last < b.len()
+                    && b[i + 2..=last].iter().all(|c| c.is_ascii_digit())
+            })
+        };
+        assert!(flags("(cw \"~x10~%\" a b)"), "the mistake it exists for");
+        assert!(flags("(cw \"~Y012~%\" a b)"), "and its two-argument spelling");
+        assert!(!flags("(cw \"~x0~%\" a)"), "one digit is the ordinary case");
+        assert!(!flags("(cw \"~Y01~%\" a b)"), "two digits are ordinary for ~Y");
+        assert!(!flags("(cw \"~x0 and 12~%\" a)"), "digits in prose are prose");
+    }
+
     #[test]
     fn no_probe_asks_fmt_for_a_two_digit_argument() {
-        let names = ["append".to_string()];
-        for p in [super::detail_probe("append"), super::rules_probe(&names, true),
-                  super::CMD_PROBE.to_string(), super::DEPS_PROBE.to_string()] {
+        const TWO_ARG: [u8; 1] = *b"Y";
+        for (name, p) in every_probe() {
             let b = p.as_bytes();
             for i in 0..b.len().saturating_sub(3) {
+                // For a two-argument directive the mistake is one digit
+                // further along: `~Y012` is arguments 0 and 1 followed by a
+                // literal `2`, exactly as `~x10` is argument 1 followed by a
+                // literal `0`.
+                // How many digits the directive legitimately takes; one more
+                // than that is the mistake.
+                let takes = if TWO_ARG.contains(&b[i + 1]) { 2 } else { 1 };
+                let last = i + 1 + takes + 1;
                 let bad = b[i] == b'~'
                     && b[i + 1].is_ascii_alphabetic()
-                    && b[i + 2].is_ascii_digit()
-                    && b[i + 3].is_ascii_digit();
-                assert!(!bad, "two-digit fmt argument at {i}: {}",
+                    && last < b.len()
+                    && b[i + 2..=last].iter().all(|c| c.is_ascii_digit());
+                assert!(!bad, "two-digit fmt argument in {name} at {i}: {}",
                         &p[i..(i + 8).min(p.len())]);
             }
         }
+    }
+
+    /// Nine is the most any probe currently asks for, and `rules_probe` is the
+    /// one at it. Named as a fact rather than a limit: the ceiling is ten, and
+    /// a probe that reaches it has no room left, so the next field it wants
+    /// means splitting the `cw` rather than adding an argument.
+    #[test]
+    fn the_probe_closest_to_the_fmt_ceiling_is_where_it_is_expected() {
+        let highest = |p: &str| -> Option<u32> {
+            let b = p.as_bytes();
+            (0..b.len().saturating_sub(2))
+                .filter(|&i| b[i] == b'~' && b[i + 1].is_ascii_alphabetic()
+                             && b[i + 2].is_ascii_digit())
+                .map(|i| (b[i + 2] - b'0') as u32)
+                .max()
+        };
+        let worst = every_probe()
+            .into_iter()
+            .filter_map(|(n, p)| highest(&p).map(|h| (h, n)))
+            .max();
+        let (h, name) = worst.expect("some probe formats something");
+        assert!(h <= 9, "{name} asks for ~x{h}, which fmt cannot number");
+        assert_eq!(
+            (h, name),
+            (8, "rules_probe/untranslated"),
+            "if this moved, the probe nearest the ceiling changed -- check it \
+             still has room before adding a field"
+        );
     }
 
     /// The one place user text reaches generated Lisp. Everything that could
