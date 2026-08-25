@@ -399,6 +399,24 @@ impl SessionControl {
         self.lock().buf.clone()
     }
 
+    /// The unconsumed stream from the *in-flight form's* start.
+    ///
+    /// The same anchor `live_form` and `snapshot` read from, and for a reason
+    /// `peek_all` cannot serve: everything before `form_start` belongs to
+    /// something else. A ping or health handshake that timed out leaves its
+    /// completion marker in the stream unconsumed, and a reader that starts at
+    /// `base` finds that marker *before* the form's own output -- so
+    /// `display_of`, which cuts at the first completion marker it sees, cut the
+    /// interrupted form's permanent record down to approximately nothing.
+    ///
+    /// `max(base)` because the buffer is trimmed as it is consumed and
+    /// `form_start` can fall behind it.
+    fn peek_form(&self) -> Vec<u8> {
+        let g = self.lock();
+        let from = (g.form_start.max(g.base) - g.base) as usize;
+        g.buf[from.min(g.buf.len())..].to_vec()
+    }
+
     /// A bounded copy of the unconsumed tail, plus the total unconsumed
     /// length. For displays that want a tail, not a multi-megabyte clone of
     /// a noisy form's whole stream.
@@ -1101,8 +1119,17 @@ impl Session {
     /// be unreachable -- and a proof interrupted because it was going badly is
     /// exactly the one whose partial output you want. A peek, not a drain:
     /// the bytes stay in the stream.
+    ///
+    /// From the form's own start, not from the stream's. Everything earlier
+    /// belongs to something else, and one kind of "something else" is
+    /// destructive: a ping or health handshake that timed out leaves its
+    /// completion marker unconsumed, and the caller strips this through
+    /// `display_of`, which cuts at the first completion marker it finds. Read
+    /// from `base`, the marker came *first* and the form's log was truncated to
+    /// what preceded it -- nothing. That is the unresponsive-then-recovered
+    /// session whose interrupt log matters most.
     pub fn captured_so_far(&mut self) -> String {
-        crate::split::decode(&self.control.peek_all())
+        crate::split::decode(&self.control.peek_form())
     }
 
     /// Interrupt a running form.
@@ -1277,15 +1304,50 @@ type Stripped = (String, Vec<(String, String)>, Vec<(String, String)>);
 /// sees `<<<PROBE-BEGIN evd>>>` and our planted labels, and then watches them
 /// vanish. Measured: 77 raw lines against the 45 the same form filed.
 pub(crate) fn display_of(raw: &str) -> String {
-    // Stop at this form's completion marker. Everything past it is the prompt
-    // for whatever comes next, which a finished capture never carries because
-    // consumption cuts exactly there -- so without this the live view shows
-    // an `ACL2 !>` that disappears the moment the form is filed.
-    let upto: String = match raw.lines().position(is_completion_marker) {
-        Some(i) => raw.lines().take(i).collect::<Vec<_>>().join("\n"),
-        None => raw.to_string(),
-    };
-    strip_sentinels(&upto).0
+    // Strip first, then drop a trailing prompt -- rather than truncating at a
+    // completion marker, which is what this used to do.
+    //
+    // The truncation was aimed at the right thing: past the form's own marker
+    // is the prompt for whatever comes next, which a finished capture never
+    // carries because consumption cuts exactly there, so without something
+    // here the live view shows an `ACL2 !>` that disappears the moment the
+    // form is filed. But `is_completion_marker` matches *any* generation, on
+    // purpose -- for removal that is right, since a stale marker is our
+    // bookkeeping wherever it surfaces. Using the same predicate to decide
+    // where to *cut* meant one stale marker truncated everything after it: a
+    // ping or health handshake that timed out leaves its marker in the stream
+    // unconsumed, and an interrupted form's permanent record became whatever
+    // preceded it, which is approximately nothing.
+    //
+    // `strip_sentinels` already removes every marker line without truncating
+    // anything, which is precisely the behaviour a finished capture gets. So
+    // the live read now does exactly what the finished one does, and the only
+    // thing left to handle is the prompt at the very end.
+    let mut out = strip_sentinels(raw).0;
+    let tail = out.rfind('\n').map_or(0, |i| i + 1);
+    if is_prompt_fragment(&out[tail..]) {
+        out.truncate(tail);
+        while out.ends_with('\n') || out.ends_with('\r') {
+            out.pop();
+        }
+    }
+    out
+}
+
+/// Whether a line is nothing but an ACL2 prompt.
+///
+/// `ACL2 !>`, `ACL2 !>>` while an `ld` is nested, `FOO !>` in another package.
+/// The package name, then the marker, then nothing: a line with anything else
+/// on it is output that happens to follow a prompt, and is the form's.
+fn is_prompt_fragment(line: &str) -> bool {
+    let t = line.trim();
+    let Some(bang) = t.find("!>") else { return false };
+    let (pkg, rest) = t.split_at(bang);
+    rest.bytes().all(|b| b == b'!' || b == b'>')
+        && pkg
+            .trim_end()
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 /// Remove our own markers, returning what ACL2 printed plus any structured
@@ -1524,6 +1586,39 @@ mod capture_tests {
     fn a_live_read_mid_probe_shows_no_scaffolding() {
         let raw = "ACL2 !>\nProof output here.\n<<<PROBE-BEGIN evd>>>\n(:time 1)";
         assert_eq!(display_of(raw), "Proof output here.");
+    }
+
+    /// The defect this was rewritten for.
+    ///
+    /// A ping or health handshake that times out leaves its completion marker
+    /// in the stream with nobody waiting for it. It belongs to another
+    /// generation, so it is scaffolding wherever it lands -- but the old
+    /// `display_of` used "is this a completion marker" to decide where to
+    /// *cut*, and cut at the first one. Everything after a stale marker was
+    /// discarded, which for an interrupted form is its whole permanent record.
+    #[test]
+    fn a_stale_marker_removes_its_line_and_nothing_else() {
+        let raw = "<<<PROBE-DONE 3>>>\nthe form's own output\nand more of it";
+        assert_eq!(display_of(raw), "the form's own output\nand more of it");
+        // And one arriving in the middle, which is what happens when the
+        // handshake's reply lands after the next form has already begun.
+        let mixed = "output before\n<<<PROBE-DONE 3>>>\noutput after";
+        assert_eq!(display_of(mixed), "output before\noutput after");
+    }
+
+    /// The prompt is what the cut was actually for, and it is now the only
+    /// thing cut: the last line, and only when it is nothing but a prompt.
+    #[test]
+    fn a_trailing_prompt_goes_and_a_line_that_merely_has_one_stays() {
+        assert_eq!(display_of("done\n<<<PROBE-OK 7>>>\nACL2 !>"), "done");
+        assert_eq!(display_of("done\nACL2 !>>"), "done", "a nested prompt too");
+        assert_eq!(display_of("done\nFOO !>"), "done", "and another package's");
+        assert_eq!(
+            display_of("done\nACL2 !> (foo)"),
+            "done\nACL2 !> (foo)",
+            "a line with output on it is the form's, prompt or no prompt"
+        );
+        assert_eq!(display_of("ACL2 !>"), "", "a capture of nothing but a prompt");
     }
 
     #[test]

@@ -2637,3 +2637,86 @@ fn a_failed_certification_reports_its_error_from_a_latin1_log() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Interrupting an *idle* session answers at once, without signalling it.
+///
+/// Both frontends set the abort flag before queuing the command, because a
+/// *blocked* call has to be woken off its condvar rather than waited out. With
+/// nothing in flight there is no such call, so nothing consumes the flag -- and
+/// `Book::interrupt`'s idle arm then pings, whose `wait_for_marker` sees the
+/// flag, clears it and returns `Aborted` before waiting at all. The ping could
+/// only ever report false, so control fell into the escalation the ping exists
+/// to avoid: four SIGINTs at a healthy ACL2, ~6 s, and `ok: false` on the MCP
+/// path -- telling an agent the interrupt failed on a working session.
+///
+/// Asserted as a duration as well as an outcome, because `ok` alone cannot
+/// tell "pinged and answered" from "signalled four times and recovered".
+#[test]
+#[ignore = "needs ACL2"]
+fn interrupting_an_idle_session_does_not_signal_it() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("interrupt-idle");
+    let file = dir.join("i.lisp");
+    std::fs::write(&file, "(in-package \"ACL2\")\n").unwrap();
+    let mut b = Book::open(&acl2, &file).unwrap();
+    b.sync(None, Duration::from_secs(60)).unwrap();
+
+    // Exactly what a frontend does: request the abort, then interrupt.
+    b.control().request_abort();
+    let started = std::time::Instant::now();
+    let r = b.interrupt().expect("interrupt");
+    let took = started.elapsed();
+
+    assert!(r.ok, "an idle, healthy session is interruptible");
+    assert!(r.interrupted.is_none(), "there was nothing to interrupt");
+    assert!(
+        took < Duration::from_secs(3),
+        "the ping answered rather than four rounds of escalation ({took:?})"
+    );
+
+    // And the session is still usable, which four discarded handshakes would
+    // have made a coin flip.
+    let ev = b.eval("(+ 1 1)", Duration::from_secs(30)).unwrap();
+    assert_eq!(ev.value.map(|v| v.text).as_deref(), Some("2"), "the session still answers");
+}
+
+/// An interrupted form's log survives a stale handshake marker in the stream.
+///
+/// A health check with a deadline too short to be answered gives up *before*
+/// ACL2 replies, so its completion marker lands in the stream with nobody
+/// waiting for it. It sits there unconsumed until something drains past it.
+///
+/// The interrupt path then reads the in-flight form's partial output and
+/// strips it through `display_of`, which cuts at the first completion marker
+/// it finds -- so a read anchored at the stream's start found the *stale*
+/// marker before the form's own output and filed a log truncated to what came
+/// before it, which is nothing. This is the unresponsive-then-recovered
+/// session whose interrupt log matters most.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_stale_marker_does_not_truncate_an_interrupted_forms_log() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("interrupt-stale-marker");
+    let file = dir.join("i.lisp");
+    std::fs::write(&file, "(in-package \"ACL2\")\n").unwrap();
+    let mut b = Book::open(&acl2, &file).unwrap();
+    b.sync(None, Duration::from_secs(60)).unwrap();
+
+    // A handshake nobody waits for. One millisecond cannot be answered, so
+    // the marker arrives after `health` has already given up on it.
+    let _ = b.health(Duration::from_millis(1));
+
+    // A form that prints, then is interrupted mid-print.
+    let noisy = "(ld (make-list 60000 :initial-element '(cw \"~x0~%\" (make-list 200))))";
+    let r = b.eval(noisy, Duration::from_millis(400)).unwrap();
+    assert_eq!(r.outcome, acl2_session::Outcome::StillRunning);
+    let handed_out = r.output_ref.clone();
+
+    assert!(b.interrupt().expect("interrupt").ok, "the form must be interruptible");
+
+    let got = b.output(&handed_out, Slice::All).expect("readable after interrupt");
+    assert!(
+        got.total_lines > 0,
+        "the form's own output must survive the stale marker, not be cut at it"
+    );
+}

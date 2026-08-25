@@ -3531,6 +3531,22 @@ impl Book {
     /// first (`control().request_abort()`), which wakes whatever call is
     /// blocked on the session and makes it hand the lock over at once.
     pub fn interrupt(&mut self) -> io::Result<InterruptReport> {
+        // Whoever requested the abort is being answered right now, which is
+        // the same rationale `Session::interrupt` states -- and holding the
+        // book lock is the proof: a call still blocked on the session would
+        // have it, so there is nobody left for the flag to wake.
+        //
+        // Without this, the flag survived to poison the idle path. Both
+        // frontends set it before queuing the command, because a *blocked*
+        // call has to be woken off its condvar rather than waited out; with
+        // nothing in flight there is no such call and nothing consumes it. The
+        // ping below then went into `wait_for_marker`, which sees the flag,
+        // clears it and returns `Aborted` before waiting at all -- so the ping
+        // could only ever report false, and control fell through into the very
+        // escalation the ping exists to avoid. Measured: six seconds, four
+        // SIGINTs at a healthy ACL2, and `ok: false` telling the caller the
+        // interrupt failed on a working session.
+        self.control.clear_abort();
         // A build is a separate process tree, so stopping it is a different
         // act from interrupting the prover -- but a caller asking to stop
         // means both, and leaving a -j build running after "interrupt" said
