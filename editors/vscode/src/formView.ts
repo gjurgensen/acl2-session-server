@@ -485,7 +485,7 @@ export const HTML = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy"
-      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-%%NONCE%%';
                font-src %%CSPSOURCE%%;">
 <style>
 ${SHARED_CSS}
@@ -516,7 +516,7 @@ body { padding: 2px 12px 12px; box-sizing: border-box; }
 </head>
 <body>
 <div id="root"><p class="meta">Put the cursor in a form of a live book.</p></div>
-<script>
+<script nonce="%%NONCE%%">
 const vscode = acquireVsCodeApi();
 ${SHARED_JS}
 let model;

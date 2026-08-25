@@ -12,6 +12,7 @@
 // each page. They are already-evaluated JS and CSS: interpolating them adds
 // no further escaping, so what is written here is what the browser sees.
 
+import { randomBytes } from 'crypto';
 import * as vscode from 'vscode';
 
 /**
@@ -28,14 +29,25 @@ export function setExtensionUri(uri: vscode.Uri): void {
 }
 
 /**
- * Fill in the two things a page cannot know for itself: where the icon font
- * lives, and what this particular webview will accept loading it from.
+ * Fill in the three things a page cannot know for itself: where the icon font
+ * lives, what this particular webview will accept loading it from, and this
+ * render's script nonce.
  *
- * Both are per-webview -- `asWebviewUri` rewrites a file path into the
- * scheme that webview will serve, and `cspSource` is the origin that goes
+ * The first two are per-webview -- `asWebviewUri` rewrites a file path into
+ * the scheme that webview will serve, and `cspSource` is the origin that goes
  * with it -- so neither can be baked into a page's HTML the way the rest of
  * it is. If the font fails to resolve the pages still render; the folds just
  * get no chevron.
+ *
+ * The nonce is per *render*, and is the layer that stands behind the
+ * escaping. No interpolation in these pages is unescaped today -- `esc` is
+ * applied at every one, attributes included -- but the threat is real and
+ * specific: checkpoint terms, event names and xdoc markup are all
+ * *book-controlled* text, the console webview can post `{cmd: 'eval'}`, and
+ * an eval reaches the OS through a ttag. Under `script-src 'unsafe-inline'`
+ * a single future slip in an HTML builder is remote code execution from
+ * opening a hostile book. Under a nonce it is a broken page: the injected
+ * script carries no nonce, so the webview declines to run it.
  */
 export function pageHtml(html: string, webview: vscode.Webview): string {
   const font = extensionUri
@@ -47,7 +59,13 @@ export function pageHtml(html: string, webview: vscode.Webview): string {
         )
         .toString()
     : '';
-  return html.replace(/%%CODICON%%/g, font).replace(/%%CSPSOURCE%%/g, webview.cspSource);
+  // Fresh per render rather than per page: a nonce reused across renders is
+  // one an attacker who saw a previous page already knows.
+  const nonce = randomBytes(16).toString('base64');
+  return html
+    .replace(/%%CODICON%%/g, font)
+    .replace(/%%CSPSOURCE%%/g, webview.cspSource)
+    .replace(/%%NONCE%%/g, nonce);
 }
 
 /** Typography, status chips, code blocks and folds -- the shared look. */

@@ -223,7 +223,7 @@ export function html(title: string): string {
 <head>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy"
-      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-%%NONCE%%';
                font-src %%CSPSOURCE%%;">
 <style>
 ${SHARED_CSS}
@@ -297,7 +297,7 @@ body { margin: 0; display: flex; flex-direction: column; }
       placeholder="Enter evaluates · Up/Down recall"></textarea>
   </div>
 </div>
-<script>
+<script nonce="%%NONCE%%">
 const vscode = acquireVsCodeApi();
 ${SHARED_JS}
 

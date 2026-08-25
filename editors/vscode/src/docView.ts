@@ -87,7 +87,7 @@ export const HTML = `<!DOCTYPE html>
      better claim to it: it is the only one whose body is markup derived from
      a book rather than assembled here. -->
 <meta http-equiv="Content-Security-Policy"
-      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-%%NONCE%%';
                font-src %%CSPSOURCE%%;">
 <style>
 ${SHARED_CSS}
@@ -108,7 +108,7 @@ li { margin: 2px 0; }
 </style></head><body>
 <div class="bar"><button id="back">Back</button><span class="name" id="name"></span></div>
 <div id="body"></div>
-<script>
+<script nonce="%%NONCE%%">
 ${SHARED_JS}
 const vscode = acquireVsCodeApi();
 const back = document.getElementById('back');

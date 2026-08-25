@@ -61,7 +61,7 @@ const pages = [
 
 /** The script a page will actually run. */
 function scriptOf(page) {
-  const m = /<script>([\s\S]*)<\/script>/.exec(page);
+  const m = /<script[^>]*>([\s\S]*)<\/script>/.exec(page);
   return m ? m[1] : undefined;
 }
 
@@ -85,10 +85,39 @@ for (const [name, page] of pages) {
 // derived from a book. A page that ships without a policy loses the layer
 // that stands behind the escaping, and nothing else here would notice --
 // the docs page went without one for as long as it existed.
+//
+// The nonce is that layer, and it is checked in both halves because half of
+// it is worse than neither: a policy naming a nonce with no nonce on the
+// script tag is a page whose script does not run at all, and a nonce on the
+// tag with `'unsafe-inline'` still in the policy runs everything, which is
+// the state this replaced. `pageHtml` fills both placeholders in one pass, so
+// the pairing is what there is to check.
 for (const [name, page] of pages) {
   check(/http-equiv="Content-Security-Policy"/.test(page)
         && /default-src 'none'/.test(page),
         `${name} declares a content security policy`);
+  check(/script-src 'nonce-%%NONCE%%'/.test(page),
+        `${name}'s policy admits scripts by nonce alone`);
+  check(!/script-src[^;"]*'unsafe-inline'/.test(page),
+        `${name} does not also admit every inline script`);
+  check(/<script nonce="%%NONCE%%">/.test(page),
+        `${name}'s own script carries the nonce`);
+}
+
+// And the substitution itself, which is what turns those placeholders into a
+// policy. A page rendered twice must not reuse a nonce: one an attacker saw
+// on an earlier render is one they can write into a later one.
+{
+  const { pageHtml } = require('./out/webviewParts.js');
+  const stub = { asWebviewUri: (u) => u, cspSource: 'vscode-webview:' };
+  const page = pages[0][1];
+  const once = pageHtml(page, stub);
+  const twice = pageHtml(page, stub);
+  const nonceOf = (p) => (/<script nonce="([^"]+)">/.exec(p) ?? [])[1];
+  check(!once.includes('%%NONCE%%'), 'no nonce placeholder survives a render');
+  check(nonceOf(once) !== undefined && once.includes(`script-src 'nonce-${nonceOf(once)}'`),
+        'and the policy names the very nonce the script carries');
+  check(nonceOf(once) !== nonceOf(twice), 'a second render gets a nonce of its own');
 }
 
 const consoleScript = scriptOf(pages[0][1]);
@@ -630,6 +659,92 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
         'above where it came from, since what it *is* comes first');
 }
 
+
+// ---- xdoc markup to HTML: the escaping layer ----
+//
+// The harness `xdoc.ts`'s own header claimed and did not have. It matters
+// more here than anywhere else in the client, and for a reason the module
+// states itself: a topic body is *book-controlled* text rendered into a
+// script-enabled webview. `esc` and `xdocHtml` are what stand between "open
+// somebody's book" and "run somebody's script" -- the nonce above is the
+// second layer, not the first.
+//
+// Escaping is checked by its output, never by reading the source: the claim
+// is that no book text reaches the page as markup, and the way to check a
+// claim about the output is to look at the output.
+{
+  const { xdocHtml, esc } = require('./out/xdoc.js');
+  const html = (src) => xdocHtml(src).html;
+
+  check(esc('<a href="x">&</a>') === '&lt;a href=&quot;x&quot;&gt;&amp;&lt;/a&gt;',
+        'esc handles all four of the characters that matter');
+  // `'` is not among them, which is safe only because every attribute this
+  // module writes is double-quoted. Pinned, so a single-quoted one added
+  // later fails here rather than in the field.
+  check(!/'/.test(esc("won't")) === false && esc("won't") === "won't",
+        "esc leaves ' alone, which every attribute here is written to allow");
+  check(!/ '/.test(html('@(see x)')) && / [a-z-]+="/.test(html('@(see x)')),
+        'and every attribute it emits is double-quoted');
+
+  // Prose. An unknown tag is dropped and its text kept -- that is the
+  // documented behaviour -- so the test is that the *text* arrives inert.
+  check(html('<script>alert(1)</script>') === 'alert(1)',
+        'a script tag is dropped and its body arrives as prose');
+  check(html('a < b > c').includes('a &lt; b &gt; c'),
+        'and comparison operators in prose survive as text');
+  check(!html('<img src=x onerror="alert(1)">').includes('onerror'),
+        'an unknown tag takes its attributes with it');
+
+  // Entities are resolved before escaping so `&lt;` round-trips. That order
+  // is the one that could be got wrong in the dangerous direction: resolve
+  // after escaping and `&amp;lt;script&amp;gt;` becomes a tag.
+  check(html('&lt;script&gt;alert(1)&lt;/script&gt;')
+          === '&lt;script&gt;alert(1)&lt;/script&gt;',
+        'an escaped tag written as entities stays escaped');
+  check(html('a &amp; b') === 'a &amp; b', 'and an ampersand stays one ampersand');
+
+  // Attributes. Two paths write one: `<see topic="...">` from a book, and
+  // `@(see ...)`, whose whole argument is book text.
+  check(html('<see topic="a<b">x</see>').includes('data-topic="a&lt;b"'),
+        'a topic attribute is escaped on its way into the page');
+  {
+    // Single quotes are not the spelling the topic regex reads, so such an
+    // attribute reaches the page as an empty topic and its contents as prose
+    // -- a dead link, never a live tag.
+    const odd = html('<see topic=\'"><script>alert(1)</script>\'>x</see>');
+    check(odd.includes('data-topic=""') && !odd.includes('<script>'),
+          'a topic in the other quotes yields an empty topic, not a tag');
+  }
+  check(!html('@(see "><script>alert(1)</script>)').includes('<script>'),
+        'nor can a see directive');
+  check(html('@(url "><b>)').includes('&quot;&gt;&lt;b&gt;'),
+        'nor a url directive, whose argument is written as text');
+  check(html('@(def "><b>)').includes('&quot;&gt;&lt;b&gt;'),
+        'nor an unresolved directive, which is shown rather than obeyed');
+
+  // Code. Blocks and inline code are lifted out before anything else and
+  // handed to the host separately -- the host colours them with the editor's
+  // grammar -- so both the copy in the page and the copy in `code` matter.
+  const withCode = xdocHtml('@({ <script>alert(1)</script> })');
+  check(withCode.html.includes('&lt;script&gt;') && !withCode.html.includes('<script>'),
+        'a code block reaches the page escaped');
+  check(withCode.code.length === 1 && withCode.code[0].text.includes('<script>'),
+        'and reaches the host as the text it actually is, for the grammar');
+  check(!html("@('<script>alert(1)</script>')").includes('<script>'),
+        'inline code is escaped the same way');
+  check(!html('<v><script>alert(1)</script></v>').includes('<script>'),
+        'and so is its tag spelling');
+  check(!html('@([\\href{javascript:alert(1)}])').includes('<a '),
+        'math is shown as its source rather than rendered');
+
+  // The slot sentinel is U+0001 on the grounds that nothing turns into one.
+  // A book that contains one anyway must not be able to address a slot.
+  const smuggle = xdocHtml('\u00010\u0001 @(\'x\')');
+  check(!smuggle.html.includes('<script>') && smuggle.code.length === 1,
+        'a stray sentinel in book text cannot conjure a slot that is not ours');
+
+  check(html('') === '', 'an empty body renders as nothing');
+}
 
 // ---- a term too big to read is never worked on ----
 {

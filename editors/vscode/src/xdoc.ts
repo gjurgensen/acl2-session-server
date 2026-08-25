@@ -3,7 +3,12 @@
  *
  * Free of `vscode`, like `names.ts` and `protocol.ts`, so `webview.mjs` can
  * check it under plain node -- which matters here more than anywhere else,
- * since this is the module with the most decisions per line.
+ * since this is the module with the most decisions per line, and the one
+ * standing between a book's own markup and a script-enabled webview. What
+ * `webview.mjs` checks is the *output*: the claim is that no book text
+ * reaches the page as markup, and the way to check a claim about output is to
+ * look at output. The page's script nonce is the second layer behind the same
+ * threat; this module is the first.
  *
  * Markup arrives raw because the machinery that would expand it, xdoc's own
  * `preprocess-main`, is not in the world: only `xdoc/base.lisp`, which
