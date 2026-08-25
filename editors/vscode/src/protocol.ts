@@ -144,6 +144,8 @@ export interface SettledEvent {
 interface Pending {
   resolve: (v: unknown) => void;
   reject: (e: Error) => void;
+  /** Cleared on every settle, so a finished request holds no timer. */
+  timer?: ReturnType<typeof setTimeout>;
 }
 
 /**
@@ -180,7 +182,10 @@ export class DaemonClient extends EventEmitter {
     this.proc.stdout.on('data', (b: Buffer) => this.feed(b));
     this.proc.stderr.on('data', (b: Buffer) => this.emit('stderr', b.toString('utf8')));
     this.proc.on('exit', (code, signal) => {
-      for (const p of this.pending.values()) p.reject(new Error('daemon exited'));
+      for (const p of this.pending.values()) {
+        clearTimeout(p.timer);
+        p.reject(new Error('daemon exited'));
+      }
       this.pending.clear();
       this.emit('exit', code, signal);
     });
@@ -205,9 +210,34 @@ export class DaemonClient extends EventEmitter {
     return this.proc.pid;
   }
 
-  request(method: string, params: unknown): Promise<any> {
+  /**
+   * Ask the daemon something.
+   *
+   * `timeoutMs` is opt-in, and deliberately so. Daemon *exit* already rejects
+   * everything in flight, so the case this covers is narrower and nastier: a
+   * daemon that is alive and wedged, where a promise simply never settles. A
+   * provider tolerates that -- a hover that never answers is a hover that
+   * shows nothing -- but a command that awaits one hangs with no message
+   * anywhere, which is what Start did.
+   *
+   * There is no default because a blanket one would be wrong on this wire.
+   * `certify` and a queued `eval` are answered by the driver when the work
+   * finishes, and that is minutes by design; a timeout that cancelled them
+   * would break the two verbs whose whole point is taking a long time. So the
+   * callers that have a deadline say what it is.
+   */
+  request(method: string, params: unknown, timeoutMs?: number): Promise<any> {
     const id = this.nextId++;
-    const p = new Promise<any>((resolve, reject) => this.pending.set(id, { resolve, reject }));
+    const p = new Promise<any>((resolve, reject) => {
+      const entry: Pending = { resolve, reject };
+      if (timeoutMs !== undefined) {
+        entry.timer = setTimeout(() => {
+          this.pending.delete(id);
+          reject(new Error(`the daemon did not answer ${method} within ${timeoutMs / 1000}s`));
+        }, timeoutMs);
+      }
+      this.pending.set(id, entry);
+    });
     this.frame({ jsonrpc: '2.0', id, method, params });
     return p;
   }
@@ -272,6 +302,7 @@ export class DaemonClient extends EventEmitter {
     if (typeof v.id === 'number' && this.pending.has(v.id)) {
       const p = this.pending.get(v.id)!;
       this.pending.delete(v.id);
+      clearTimeout(p.timer);
       if (v.error) {
         p.reject(new Error(v.error.message ?? 'daemon error'));
       } else {

@@ -72,6 +72,21 @@ import {
  */
 const START_SPLIT_WAIT_MS = 30_000;
 
+/**
+ * How long Start waits for the daemon to answer `open`.
+ *
+ * Generous, because an honest `open` genuinely can take a while: it holds the
+ * daemon's protocol thread through the whole ACL2 startup handshake, up to
+ * the customization-file timeout, and a second book's open waits behind the
+ * first one's. Two minutes is well past all of that.
+ *
+ * It exists because the alternative is silence. Daemon exit rejects every
+ * request in flight, but a daemon that is alive and wedged leaves this
+ * promise pending for ever, and Start awaits it -- so the button did nothing,
+ * said nothing, and left nothing in the channel to find.
+ */
+const OPEN_WAIT_MS = 120_000;
+
 const UPDATE_DEBOUNCE_MS = 300;
 
 /**
@@ -1478,7 +1493,7 @@ async function startCommand(initial?: Held): Promise<void> {
   }
   const c = ensureClient();
   try {
-    const r = await c.request('open', { path: doc.fileName });
+    const r = await c.request('open', { path: doc.fileName }, OPEN_WAIT_MS);
     const s: BookSession = {
       id: r.book as string,
       doc,
