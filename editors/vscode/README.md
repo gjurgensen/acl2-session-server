@@ -54,7 +54,7 @@ that mode this *is* the mark.
 The status colours follow the active theme. Each status has a meaning in
 VSCode's own vocabulary — `editorError.foreground` for a failure,
 `editorWarning.foreground` for a conditional one, `editorInfo.foreground` for
-the form being proved — and the extension reads those out of the theme,
+the held target — and the extension reads those out of the theme,
 keeping its own per-status opacity so the column stays quiet. The shipped
 values are VSCode's defaults, so on the default light and dark themes nothing
 moves; on any other theme the column follows it.

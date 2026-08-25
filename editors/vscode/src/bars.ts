@@ -213,9 +213,10 @@ export interface Bar {
 /**
  * The shipped palette: VSCode's own semantic colours.
  *
- * `editorInfo`, `editorWarning` and `editorError`'s foregrounds for running,
- * conditional and red, `charts.green` for admitted, and a neutral grey for
- * pending -- the values the built-in light and dark themes use, so the status
+ * `editorWarning` and `editorError`'s foregrounds for conditional and red,
+ * `charts.green` for admitted, `editorInfo.foreground` for the held target,
+ * and a neutral grey for both pending and running -- the values the built-in
+ * light and dark themes use, so the status
  * column looks native rather than looking like whoever picked it.
  *
  * The alphas are the older choice and are kept: they are what stops the

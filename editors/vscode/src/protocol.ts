@@ -1,7 +1,9 @@
 // Framed JSON-RPC 2.0 over the daemon's stdio -- the acl2-session-editor
-// wire. Hand-rolled rather than vscode-jsonrpc so the extension has zero
-// runtime dependencies; the framing is the same Content-Length wire, so
-// swapping a library in later stays possible.
+// wire. Hand-rolled rather than vscode-jsonrpc, so the wire itself pulls in
+// nothing: the extension's three runtime dependencies are the icon font and
+// the two halves of the TextMate tokenizer, and none of them is here. The
+// framing is the same Content-Length wire, so swapping a library in later
+// stays possible.
 //
 // Kept free of any vscode import on purpose: this module also runs under
 // plain node, which is how smoke.mjs exercises the whole client-side
