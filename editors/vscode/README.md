@@ -128,6 +128,28 @@ The editor title bar shows a "play" icon in the upper right, which starts the
 ACL2 session. This automatically opens the ACL2 form view, which displays structured
 information for the current form under the user's cursor.
 
+### Pinning
+
+**Pin to This Form** holds the views on one form so it can be watched while the
+edit meant to fix it happens somewhere else — hold the failure, change the
+lemma above it, watch the checkpoints move. The button is in the title bar of
+the form view *and* of the ACL2 Output document, since either may be the one
+you are looking at, and **ACL2: Toggle Pin** is in the palette.
+
+It pins **both** views, always together. They are two views of one form — the
+structured summary and the raw log — and pinned to different forms they would
+show one form's checkpoints beside another form's output.
+
+The pin is conservative: it is anchored on the form's first character and
+carried across your edits, and it lets go rather than guess whenever it cannot
+be sure the form is still there. Editing the pinned form is the ordinary case
+and holds fine; deleting it, or rewriting its head, releases the pin and says
+so.
+
+`ctrl+alt+o` **Show Output** re-points the pin at the form under the cursor
+rather than refusing, the same way **Target at Cursor** moves the barrier
+instead of declining while one is held.
+
 ## The console
 
 **ACL2: Show Console** opens a window for evaluating forms.
@@ -384,7 +406,7 @@ excludes, which stays excluded until you move the target.
 | `ctrl+alt+p` | Show Form view |
 | `ctrl+alt+c` | Show Console |
 | `ctrl+alt+e` | Evaluate Selection |
-| `ctrl+alt+o` | Show Output for Form at Cursor |
+| `ctrl+alt+o` | Show Output — and re-point the pin here |
 | `ctrl+alt+g` | Go to Next Attention Point — the reds, then the frontier |
 | `ctrl+alt+r` | Go to Frontier |
 

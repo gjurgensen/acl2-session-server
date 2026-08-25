@@ -664,7 +664,7 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
 // ---- the form view can speak for itself ----
 {
   const page = require('./out/formView.js').HTML;
-  // Letting go of a lock is followed immediately by rendering whatever the
+  // Letting go of a pin is followed immediately by rendering whatever the
   // cursor is in, so the message has to outlive that render or it is never
   // read. These pin the two halves of that: the page keeps a note across a
   // model, and drops it when the form view is held again.
@@ -679,9 +679,9 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   check(/\.notice \{/.test(page), 'and that style is defined');
 }
 
-// ---- a lock follows its form, or lets go ----
+// ---- a pin follows its form, or lets go ----
 {
-  const { keepAnchor, lockedIndex } = require('./out/policy.js');
+  const { keepAnchor, pinnedIndex } = require('./out/policy.js');
   // A form starting at line 10, column 1 (byte) / 0 (UTF-16).
   const anchor = { line: 10, column: 1, character: 0 };
   // An edit, in the editor's coordinates with 1-based lines: what it replaced
@@ -697,8 +697,8 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   check(lineOf(keepAnchor(anchor, [edit(3, 4, 3, 9, 1)])) === 10, 'an edit above of the same height moves nothing');
   check(lineOf(keepAnchor(anchor, [edit(20, 0, 25, 0, 1)])) === 10, 'an edit below moves nothing');
 
-  // Inside the form: the first character has not moved, so the lock holds --
-  // this is the whole point, since editing the locked form is what you do.
+  // Inside the form: the first character has not moved, so the pin holds --
+  // this is the whole point, since editing the pinned form is what you do.
   check(lineOf(keepAnchor(anchor, [edit(10, 8, 10, 12, 1)])) === 10, 'editing within the line, after the form starts, holds');
   check(lineOf(keepAnchor(anchor, [edit(11, 2, 11, 6, 1)])) === 10, 'editing a later line of the form holds');
   check(lineOf(keepAnchor(anchor, [edit(10, 8, 10, 8, 4)])) === 10, 'and so does splitting the form across new lines');
@@ -725,18 +725,18 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   // line apart, and it is what has to match the wire.
   check(keepAnchor(second, [edit(1, 0, 1, 0, 2)]).column === 20, 'the byte column is carried, not recomputed');
 
-  // Resolving: a lock is good only where a form actually starts.
+  // Resolving: a pin is good only where a form actually starts.
   const units = [
     { index: 0, line_start: 1, col_start: 1 },
     { index: 1, line_start: 3, col_start: 1 },
     { index: 2, line_start: 3, col_start: 20 },
   ];
   const at = (line, column) => ({ line, column, character: column - 1 });
-  check(lockedIndex(at(3, 20), units) === 2, 'the second form on a shared line is found by its column');
-  check(lockedIndex(at(3, 1), units) === 1, 'and the first by its own');
-  check(lockedIndex(at(3, 9), units) === undefined,
+  check(pinnedIndex(at(3, 20), units) === 2, 'the second form on a shared line is found by its column');
+  check(pinnedIndex(at(3, 1), units) === 1, 'and the first by its own');
+  check(pinnedIndex(at(3, 9), units) === undefined,
         'a position merely *inside* a form is not that form starting -- let go');
-  check(lockedIndex(at(4, 1), units) === undefined, 'and neither is a line with no form on it');
+  check(pinnedIndex(at(4, 1), units) === undefined, 'and neither is a line with no form on it');
 }
 
 // ---- one editor action, in every state the editor can be in ----
@@ -761,7 +761,7 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
     return Function(`"use strict"; return (${src});`)();
   };
 
-  // Only the editor's own toolbar: the form view's lock and unlock live on the
+  // Only the editor's own toolbar: the form view's pin and unpin live on the
   // webview panel's title bar, which is a different bar with its own slot.
   const editorBar = pkg.contributes.menus['editor/title'].filter((m) =>
     /editorLangId == acl2/.test(m.when)
@@ -807,6 +807,52 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
     check(c.category === 'ACL2', `${c.command} is in the ACL2 category`);
     check(!/^ACL2\s*:/.test(c.title),
       `${c.command}'s title does not repeat the category`);
+  }
+}
+
+// ---- the pin governs both views, and both can take it ----
+{
+  const { readFileSync } = require('fs');
+  const src = readFileSync(new URL('./src/extension.ts', import.meta.url), 'utf8');
+  const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
+
+  // The bug this exists for: the pin was consulted by one of the two
+  // cursor-following views. Both branches sit in the same selection handler,
+  // and only the form view's checked it -- so a pinned session showed one
+  // form's checkpoints beside another form's log, silently.
+  const handler = src.slice(src.indexOf('onDidChangeTextEditorSelection'));
+  const follows = handler.slice(0, handler.indexOf('}),'));
+  for (const call of ['followOutputView', 'followFormView']) {
+    const at = follows.indexOf(call);
+    check(at !== -1, `the selection handler still drives ${call}`);
+    // The guard is on the line above the call, within the same `if`.
+    const guard = follows.slice(Math.max(0, at - 200), at);
+    check(/pinned && pinned\.book === s\.id/.test(guard),
+      `${call} is skipped while pinned`);
+  }
+
+  // Both views offer the action, because either may be the one in front. The
+  // output document is gated by *scheme* and not language: the eval view is
+  // the same class with the same language, and the language is `plaintext`
+  // whenever `highlightOutput` is off -- so a language gate would put the
+  // button on a view that follows nothing, and lose it on a setting.
+  const bar = pkg.contributes.menus['editor/title'];
+  for (const cmd of ['acl2-session.pinFormView', 'acl2-session.unpinFormView']) {
+    const on = bar.filter((m) => m.command === cmd);
+    // The form view is a webview panel, so its gate is the panel id rather
+    // than a language; the output view is a document, so its gate is a scheme.
+    check(on.some((m) => /activeWebviewPanelId == 'acl2SessionFormView'/.test(m.when)),
+      `${cmd} is offered on the form view`);
+    const out = on.filter((m) => /acl2-session-output/.test(m.when));
+    check(out.length === 1, `${cmd} is offered on the output document`);
+    check(out.every((m) => /resourceScheme/.test(m.when) && !/editorLangId/.test(m.when)),
+      `${cmd} gates the output document by scheme, not language`);
+  }
+
+  // One word for it, everywhere a reader sees one.
+  for (const c of pkg.contributes.commands) {
+    check(!/\b(lock|hold|held)\b/i.test(c.title),
+      `${c.command}'s title says pin, not lock or hold (${c.title})`);
   }
 }
 

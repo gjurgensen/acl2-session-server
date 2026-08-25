@@ -28,7 +28,7 @@ import { MAX_TERM } from './policy';
  * Bare, where its siblings are named -- `ACL2 Docs`, `ACL2 Output`, `ACL2
  * Eval`, `ACL2 Console`. This is the one you keep open, so it earns the plain
  * name; and it is the only one whose title carries *state*, since holding it
- * appends `(locked)`. Tabs truncate, and a longer base name would cut off
+ * appends `(pinned)`. Tabs truncate, and a longer base name would cut off
  * exactly the part worth reading.
  */
 const TITLE = 'ACL2';
@@ -227,7 +227,7 @@ export class FormView {
    *
    * Carries the book and unit rather than letting the extension work them
    * out. Clicking a button in here focuses the webview, so there is no
-   * active text editor to find a book from -- the same reason the lock
+   * active text editor to find a book from -- the same reason the pin
    * commands do not go through `forBook`. The form view knows exactly which
    * form it is showing; it should say so.
    */
@@ -400,10 +400,10 @@ export class FormView {
    * In the title because that is where it stays visible: the tab-bar icon
    * shows the state only while the form view's own tab has focus, and a reader
    * watching a form is by definition looking somewhere else. VSCode's own
-   * markdown preview does the same thing, showing a locked preview as
+   * markdown preview does the same thing, showing a pinned preview as
    * `[Preview] file.md`.
    */
-  setLockLabel(label: string | undefined): void {
+  setPinLabel(label: string | undefined): void {
     if (this.panel) {
       this.panel.title = label ? `${TITLE} (${label})` : TITLE;
     }

@@ -353,7 +353,7 @@
       {
         "command": "acl2-session.showOutput",
         "category": "ACL2",
-        "title": "Show Output for Form at Cursor"
+        "title": "Show Output"
       },
       {
         "command": "acl2-session.certify",
@@ -367,21 +367,21 @@
         "title": "Show Documentation for Name at Cursor"
       },
       {
-        "command": "acl2-session.lockFormView",
+        "command": "acl2-session.pinFormView",
         "category": "ACL2",
-        "title": "Hold Form View",
-        "icon": "$(lock)"
+        "title": "Pin to This Form",
+        "icon": "$(pin)"
       },
       {
-        "command": "acl2-session.unlockFormView",
+        "command": "acl2-session.unpinFormView",
         "category": "ACL2",
-        "title": "Release Form View",
-        "icon": "$(unlock)"
+        "title": "Unpin",
+        "icon": "$(pinned)"
       },
       {
-        "command": "acl2-session.toggleFormViewLock",
+        "command": "acl2-session.toggleFormViewPin",
         "category": "ACL2",
-        "title": "Toggle Form View Hold"
+        "title": "Toggle Pin"
       },
       {
         "command": "acl2-session.showFormView",
@@ -453,7 +453,7 @@
         "acl2-session.conditionalWarnings": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "Report **conditional** forms as warnings in the Problems view.\n\nA conditional form was proved, and proved correctly — on top of a claim that was not, because a form above it went in with its proofs skipped. Nothing is wrong with it in isolation, and every form below the first skip is one, so this can be a great many warnings at once. Off by default for that reason; the status column and the wash say the same thing more quietly.\n\nRequires `#acl2-session.problems#`, which reports failed and skipped forms as errors."
+          "markdownDescription": "Report **conditional** forms as warnings in the Problems view.\n\nA conditional form was proved, and proved correctly \u2014 on top of a claim that was not, because a form above it went in with its proofs skipped. Nothing is wrong with it in isolation, and every form below the first skip is one, so this can be a great many warnings at once. Off by default for that reason; the status column and the wash say the same thing more quietly.\n\nRequires `#acl2-session.problems#`, which reports failed and skipped forms as errors."
         },
         "acl2-session.formWarnings": {
           "type": "boolean",
@@ -492,7 +492,7 @@
         "acl2-session.colors": {
           "type": "object",
           "default": {},
-          "markdownDescription": "Override the status colours with concrete values, per status.\n\nMost customisation does not need this: the wash, the inline bar and the overview ruler are theme colours, so `workbench.colorCustomizations` on `acl2Session.bar.*` and `acl2Session.wash.*` already restyles them, follows the active theme, and has high-contrast variants.\n\nThe **gutter bar cannot** be a theme colour: it is drawn as an image, and an extension has no way to read a theme colour back as a value. Setting a colour here is what reaches it — the gutter icon is generated from the value — and the same value then drives the inline bar, the wash and the ruler, so the status column cannot end up disagreeing with itself.\n\nStatuses: `pending`, `running`, `admitted`, `conditional`, `skipped`, `failed`. Any CSS colour: `#fb4934`, `#fb493480`, `rgba(251, 73, 52, 0.65)`.",
+          "markdownDescription": "Override the status colours with concrete values, per status.\n\nMost customisation does not need this: the wash, the inline bar and the overview ruler are theme colours, so `workbench.colorCustomizations` on `acl2Session.bar.*` and `acl2Session.wash.*` already restyles them, follows the active theme, and has high-contrast variants.\n\nThe **gutter bar cannot** be a theme colour: it is drawn as an image, and an extension has no way to read a theme colour back as a value. Setting a colour here is what reaches it \u2014 the gutter icon is generated from the value \u2014 and the same value then drives the inline bar, the wash and the ruler, so the status column cannot end up disagreeing with itself.\n\nStatuses: `pending`, `running`, `admitted`, `conditional`, `skipped`, `failed`. Any CSS colour: `#fb4934`, `#fb493480`, `rgba(251, 73, 52, 0.65)`.",
           "additionalProperties": {
             "type": "object",
             "properties": {
@@ -559,7 +559,7 @@
         },
         "acl2-session.washOpacity": {
           "default": null,
-          "markdownDescription": "How strong the background wash is, in the `wash` decoration mode — 0 to 1.\n\nThe hue follows your theme, so this is the part left to taste: the same tint reads differently over different backgrounds, and a low-contrast theme can swallow what a high-contrast one shouts. Defaults to 0.15 on light themes and 0.1 on dark ones.\n\nA single number applies to both; an object sets each. This adjusts whatever colour won — the theme's, or one from `workbench.colorCustomizations` — but not a wash written out in full under `acl2-session.colors`, which is taken exactly as given.",
+          "markdownDescription": "How strong the background wash is, in the `wash` decoration mode \u2014 0 to 1.\n\nThe hue follows your theme, so this is the part left to taste: the same tint reads differently over different backgrounds, and a low-contrast theme can swallow what a high-contrast one shouts. Defaults to 0.15 on light themes and 0.1 on dark ones.\n\nA single number applies to both; an object sets each. This adjusts whatever colour won \u2014 the theme's, or one from `workbench.colorCustomizations` \u2014 but not a wash written out in full under `acl2-session.colors`, which is taken exactly as given.",
           "anyOf": [
             {
               "type": "number",
@@ -632,24 +632,34 @@
           "group": "1_acl2@2"
         },
         {
-          "command": "acl2-session.lockFormView",
-          "when": "activeWebviewPanelId == 'acl2SessionFormView' && !acl2Session.formViewLocked",
+          "command": "acl2-session.pinFormView",
+          "when": "activeWebviewPanelId == 'acl2SessionFormView' && !acl2Session.formViewPinned",
           "group": "navigation@1"
         },
         {
-          "command": "acl2-session.unlockFormView",
-          "when": "activeWebviewPanelId == 'acl2SessionFormView' && acl2Session.formViewLocked",
+          "command": "acl2-session.unpinFormView",
+          "when": "activeWebviewPanelId == 'acl2SessionFormView' && acl2Session.formViewPinned",
+          "group": "navigation@1"
+        },
+        {
+          "command": "acl2-session.pinFormView",
+          "when": "resourceScheme == acl2-session-output && !acl2Session.formViewPinned",
+          "group": "navigation@1"
+        },
+        {
+          "command": "acl2-session.unpinFormView",
+          "when": "resourceScheme == acl2-session-output && acl2Session.formViewPinned",
           "group": "navigation@1"
         }
       ],
       "commandPalette": [
         {
-          "command": "acl2-session.lockFormView",
-          "when": "!acl2Session.formViewLocked"
+          "command": "acl2-session.pinFormView",
+          "when": "!acl2Session.formViewPinned"
         },
         {
-          "command": "acl2-session.unlockFormView",
-          "when": "acl2Session.formViewLocked"
+          "command": "acl2-session.unpinFormView",
+          "when": "acl2Session.formViewPinned"
         },
         {
           "command": "acl2-session.pause",

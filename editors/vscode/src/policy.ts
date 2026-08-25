@@ -42,16 +42,19 @@
 export const MAX_TERM = 64 * 1024;
 
 /**
- * Holding the form view on one form.
+ * Holding both cursor-following views on one form.
  *
- * The form view follows the cursor. Locking stops it, so a form can be watched
+ * The form view and the output view both follow the cursor, and both obey this
+ * -- they are two views of one form, the structured summary and the raw log,
+ * and held on different forms they would show one form's checkpoints beside
+ * another form's output. Pinning stops them together, so a form can be watched
  * while the edit meant to fix it happens somewhere else -- which is the
  * ordinary way to use it: hold the failure, change the lemma above it, watch
  * the checkpoints move.
  *
- * A possible step beyond this, deliberately not built: **freeze**. Lock holds
- * the form view on a form and lets its contents update as that form is re-proved;
- * freeze would hold the contents too. The two differ only while the locked
+ * A possible step beyond this, deliberately not built: **freeze**. A pin holds
+ * the views on a form and lets their contents update as that form is re-proved;
+ * freeze would hold the contents too. The two differ only while the pinned
  * form is being re-proved, and in that window what a reader wants is "do not
  * take away what I was reading" rather than a snapshot. What freeze would add
  * beyond that is comparing an old result against a new one -- and that needs
@@ -70,7 +73,7 @@ export const MAX_TERM = 64 * 1024;
  * a unit's `line_start`/`col_start`. The editor speaks UTF-16 characters, which
  * is what an edit's range is expressed in. Converting on demand would mean
  * decoding a line that the edit has already changed, so both are carried and
- * both are refreshed together whenever the lock is re-confirmed.
+ * both are refreshed together whenever the pin is re-confirmed.
  */
 export interface Anchor {
   /** 1-based, as the wire counts. */
@@ -114,9 +117,9 @@ function before(l1: number, c1: number, l2: number, c2: number): boolean {
  *
  * That last case is deliberately blunt. Sliding an anchor *along* a line would
  * mean re-measuring bytes on a line whose old text the edit has already
- * replaced, and getting it subtly wrong would leave a lock pointing confidently
- * at the wrong form. Letting go instead costs a rare re-lock and can never lie.
- * It also settles the case nothing else can: deleting the locked form.
+ * replaced, and getting it subtly wrong would leave a pin pointing confidently
+ * at the wrong form. Letting go instead costs a rare re-pin and can never lie.
+ * It also settles the case nothing else can: deleting the pinned form.
  */
 export function keepAnchor(a: Anchor, edits: readonly Edit[]): Anchor | undefined {
   // Every range in one change event is expressed against the document as it
@@ -143,20 +146,20 @@ export function keepAnchor(a: Anchor, edits: readonly Edit[]): Anchor | undefine
 }
 
 /**
- * The unit a lock is on, or `undefined` if the lock can no longer be trusted.
+ * The unit a pin is on, or `undefined` if the pin can no longer be trusted.
  *
  * The rule the whole feature rests on: **the daemon's split is the truth and
- * the anchor is a guess.** A lock holds the position a form *started* at, so a
- * lock that is still good is one whose anchor is still exactly where a form
+ * the anchor is a guess.** A pin holds the position a form *started* at, so a
+ * pin that is still good is one whose anchor is still exactly where a form
  * starts. Anything else -- no form there, or a form starting elsewhere -- means
  * the guess and the split have diverged, and the honest response is to let go
  * rather than show a form nobody asked for.
  *
  * Deliberately stricter than "some form covers this position": a position
- * inside a *different* form covers it just as well, and staying locked has to
+ * inside a *different* form covers it just as well, and staying pinned has to
  * mean the same form.
  */
-export function lockedIndex(
+export function pinnedIndex(
   anchor: Anchor,
   units: readonly { index: number; line_start: number; col_start: number }[]
 ): number | undefined {
@@ -269,7 +272,7 @@ export interface Head {
 /**
  * The index the barrier stands after: `-1` holds before the first form.
  *
- * A target names a *form*, anchored on its first character the way a lock is,
+ * A target names a *form*, anchored on its first character the way a pin is,
  * because that is the point edits move least: typing inside the target form
  * is the ordinary workflow, and anchoring on the form's end would lose the
  * barrier on the first keystroke.

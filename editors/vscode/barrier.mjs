@@ -2,8 +2,8 @@
 //
 // A target names a form, and the only handle on a form that survives editing
 // it is where it starts -- so the barrier is an anchor, tracked exactly as a
-// lock is. What is tested here is the half that differs: what happens when the
-// anchor stops naming a form. A lock lets go, and showing nothing is the safe
+// pin is. What is tested here is the half that differs: what happens when the
+// anchor stops naming a form. A pin lets go, and showing nothing is the safe
 // end of that. Letting go here means "no barrier", which is "check the whole
 // book" -- so it rounds up instead, and every case below is a case about which
 // direction wrong goes in.

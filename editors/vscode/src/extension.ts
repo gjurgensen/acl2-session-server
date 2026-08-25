@@ -21,7 +21,7 @@ import {
   attentionPoints,
   barrierIndex,
   keepAnchor,
-  lockedIndex,
+  pinnedIndex,
   planTail,
   stepBarrier,
   warningKinds,
@@ -98,7 +98,7 @@ interface Pos {
  * it, where a form is still the same form.
  *
  * `anchor` is that form's first character, tracked through edits exactly as a
- * lock's is. `null` holds before the first form -- a barrier above everything,
+ * pin's is. `null` holds before the first form -- a barrier above everything,
  * which no form can anchor. A session with no barrier at all has no `Held` to
  * begin with, and checks the whole book.
  */
@@ -460,6 +460,13 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
     vscode.commands.registerCommand('acl2-session.showOutput', () =>
       forBook(async (s) => {
+        // Re-targets the pin rather than fighting it. Asking for a particular
+        // form's output is as clear a statement of intent as asking to pin
+        // one, so the pin follows -- the same way Target at Cursor moves the
+        // barrier rather than refusing while one is held.
+        if (pinned && pinned.book === s.id) {
+          repin(s);
+        }
         await followOutputView(s, true);
         await outputView.open();
       })
@@ -470,15 +477,15 @@ export function activate(context: vscode.ExtensionContext): void {
     // Neither of these goes through `forBook`: both are invoked from the
     // form view's own title bar, where the focused thing is a webview and there is
     // no active text editor to find a book from.
-    vscode.commands.registerCommand('acl2-session.lockFormView', () => takeLock()),
-    vscode.commands.registerCommand('acl2-session.unlockFormView', () => dropLock()),
+    vscode.commands.registerCommand('acl2-session.pinFormView', () => takePin()),
+    vscode.commands.registerCommand('acl2-session.unpinFormView', () => dropPin()),
     // A third verb for the same pair, because the title bar and everywhere
     // else want different things. The bar shows one of two icons and needs a
     // command per state to swap them; a person reaching for this by name, or
     // one day by key, wants to say the thing they mean once and not care
     // which state it is in.
-    vscode.commands.registerCommand('acl2-session.toggleFormViewLock', () =>
-      locked ? dropLock() : takeLock()
+    vscode.commands.registerCommand('acl2-session.toggleFormViewPin', () =>
+      pinned ? dropPin() : takePin()
     ),
     vscode.commands.registerCommand('acl2-session.showFormView', () =>
       forBook((s) => {
@@ -517,12 +524,12 @@ export function activate(context: vscode.ExtensionContext): void {
         endChar: c.range.end.character,
         newLines: c.text.split('\n').length,
       }));
-      if (locked && locked.book === s.id) {
-        const moved = keepAnchor(locked.anchor, es);
+      if (pinned && pinned.book === s.id) {
+        const moved = keepAnchor(pinned.anchor, es);
         if (moved) {
-          locked = { book: locked.book, anchor: moved };
+          pinned = { book: pinned.book, anchor: moved };
         } else {
-          releaseLock('the form it was held on was edited away');
+          releasePin('the form it was held on was edited away');
         }
       }
       keepBarrier(s, es);
@@ -536,11 +543,16 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!s) {
         return;
       }
-      if (outputView.visible) {
+      // Both cursor-following views obey the same pin, because they are two
+      // views of one form: the structured summary and the raw log. Held on
+      // different forms they would show a form's checkpoints beside another
+      // form's output, which is not a workflow anyone wants and was what this
+      // did -- the pin existed and only the form view honoured it.
+      if (outputView.visible && !(pinned && pinned.book === s.id)) {
         void followOutputView(s, false);
       }
-      // A held form view is exactly the one that does not follow the cursor.
-      if (formView.visible && !(locked && locked.book === s.id)) {
+      // A pinned form view is exactly the one that does not follow the cursor.
+      if (formView.visible && !(pinned && pinned.book === s.id)) {
         void followFormView(s);
       }
     }),
@@ -1218,9 +1230,9 @@ function settleBarrier(s: BookSession): void {
 /**
  * Carry the barrier across an edit.
  *
- * The same machinery the lock uses, and it has to be: a barrier that drifts
+ * The same machinery the pin uses, and it has to be: a barrier that drifts
  * by a line admits or withholds the wrong form, and both are wrong silently.
- * What differs is the answer when the anchor does not survive. A lock lets go,
+ * What differs is the answer when the anchor does not survive. A pin lets go,
  * which is the conservative end of *that* feature -- showing nothing beats
  * showing the wrong form. Letting go here would mean no barrier, which is
  * "check the whole book": the least conservative thing available, and reached
@@ -1590,8 +1602,8 @@ function stopBook(s: BookSession): void {
  */
 function dropBook(s: BookSession): void {
   problems.delete(s.doc.uri);
-  if (locked && locked.book === s.id) {
-    releaseLock('its book was closed');
+  if (pinned && pinned.book === s.id) {
+    releasePin('its book was closed');
   }
   books.delete(s.doc.uri.toString());
   byId.delete(s.id);
@@ -1998,7 +2010,7 @@ function onState(p: StateEvent): void {
   paint(s);
   updateStatusBar(s);
   const shown = formView.shown();
-  if (locked && locked.book === s.id) {
+  if (pinned && pinned.book === s.id) {
     // Re-resolved rather than re-shown: the split has just moved, and the
     // whole question is whether the form we are held on is still there.
     void followFormView(s);
@@ -2451,23 +2463,23 @@ let lastCols = 0;
  * The form the form view is held on, if it is held on one.
  *
  * The anchor is where that form *starts*, which is the only position that can
- * be checked: `lockedIndex` asks the daemon's own split whether a form still
+ * be checked: `pinnedIndex` asks the daemon's own split whether a form still
  * begins exactly there, and lets go when it does not. Holding an index instead
  * would survive nothing -- indices renumber whenever a form is added above --
  * and holding a line alone cannot tell two forms on one line apart.
  */
-let locked: { book: string; anchor: Anchor } | undefined;
+let pinned: { book: string; anchor: Anchor } | undefined;
 
 /** Which form the form view should be showing, and whether it is held there. */
 function formViewTarget(s: BookSession): number | undefined {
-  if (locked && locked.book === s.id) {
-    const at = lockedIndex(locked.anchor, s.lastState?.units ?? []);
+  if (pinned && pinned.book === s.id) {
+    const at = pinnedIndex(pinned.anchor, s.lastState?.units ?? []);
     if (at !== undefined) {
       return at;
     }
     // No form starts where we are pointing any more, so whatever we would
     // show is not what was held.
-    releaseLock('the form it was held on is no longer there');
+    releasePin('the form it was held on is no longer there');
   }
   // The cursor only speaks for this book when it is in this book.
   const editor = vscode.window.activeTextEditor;
@@ -2491,19 +2503,61 @@ function formViewTarget(s: BookSession): number | undefined {
  * start can be checked against the daemon's split, which is what every later
  * decision rests on.
  */
-function takeLock(): void {
+/**
+ * The form a pin would go on, from whichever view is showing one.
+ *
+ * The form view first, then the output view, then the cursor. Three sources
+ * because the pin governs two views and can be taken from either: pinning
+ * from the log with the form view closed has to work, and the button now sits
+ * on both. The cursor is the last resort rather than the first because a view
+ * that is *showing* a form is a more deliberate statement about which form is
+ * meant than wherever the caret happens to rest.
+ */
+function pinTarget(): { s: BookSession; u: UnitState } | undefined {
   const shown = formView.shown();
-  const s = shown && byId.get(shown.book);
-  const u = shown && s?.lastState?.units[shown.index];
+  const fromView =
+    (shown && ([byId.get(shown.book), shown.index] as const)) ??
+    (outputView.shownBook !== null && outputView.shownUnit !== null
+      ? ([byId.get(outputView.shownBook), outputView.shownUnit] as const)
+      : undefined);
+  if (fromView?.[0]) {
+    const u = fromView[0].lastState?.units[fromView[1]];
+    if (u) {
+      return { s: fromView[0], u };
+    }
+  }
+  const editor = vscode.window.activeTextEditor;
+  const s = editor && bookFor(editor.document);
+  const u = s && unitAt(s, cursorTarget());
+  return s && u ? { s, u } : undefined;
+}
+
+/** Move the pin to the cursor's form, for a command that names one. */
+function repin(s: BookSession): void {
+  const u = unitAt(s, cursorTarget());
+  if (u && u.line_start <= s.doc.lineCount) {
+    setPin(s, u);
+  }
+}
+
+function takePin(): void {
+  const found = pinTarget();
+  const s = found?.s;
+  const u = found?.u;
   // The document, not an editor: there may not be one in front, and a
   // `TextDocument` can be read either way.
   if (!s || !u || u.line_start > s.doc.lineCount) {
     void vscode.window.showInformationMessage(
-      'ACL2: the formView is not showing a form to hold it on'
+      'ACL2: there is no form to pin to \u2014 put the cursor on one, or open a form'
     );
     return;
   }
-  locked = {
+  setPin(s, u);
+}
+
+/** Pin both views to this form. */
+function setPin(s: BookSession, u: UnitState): void {
+  pinned = {
     book: s.id,
     anchor: {
       line: u.line_start,
@@ -2511,42 +2565,51 @@ function takeLock(): void {
       character: charOffset(s.doc.lineAt(u.line_start - 1).text, u.col_start),
     },
   };
-  void vscode.commands.executeCommand('setContext', 'acl2Session.formViewLocked', true);
-  formView.setLockLabel('locked');
+  void vscode.commands.executeCommand('setContext', 'acl2Session.formViewPinned', true);
+  formView.setPinLabel('pinned');
   formView.note(undefined);
+  // Both views, together. Pinning from the log has to bring the form view
+  // along and the other way round, or the pin would mean "hold what I am
+  // looking at and leave the other one wherever it was".
   void followFormView(s);
+  if (outputView.visible) {
+    void showUnitOutput(s, u.index);
+  }
 }
 
 /**
  * Let go because the reader said so, and show them what the cursor is in.
  *
- * Separate from `releaseLock`, which is also what a lost form calls: this is
+ * Separate from `releasePin`, which is also what a lost form calls: this is
  * the deliberate one, so it says nothing and hands the form view back to the
  * cursor rather than leaving it on a form nobody is pointing at.
  */
-function dropLock(): void {
-  const was = locked?.book;
-  releaseLock();
+function dropPin(): void {
+  const was = pinned?.book;
+  releasePin();
   const s = was === undefined ? undefined : byId.get(was);
   if (s) {
     void followFormView(s);
+    if (outputView.visible) {
+      void followOutputView(s, false);
+    }
   }
 }
 
 /**
  * Let go, and say so.
  *
- * Never silently: a lock that stopped working without a word is
+ * Never silently: a pin that stopped working without a word is
  * indistinguishable from one that is still holding, which is the failure this
  * whole design is arranged to avoid. `why` is absent when the reader asked.
  */
-function releaseLock(why?: string): void {
-  if (!locked) {
+function releasePin(why?: string): void {
+  if (!pinned) {
     return;
   }
-  locked = undefined;
-  void vscode.commands.executeCommand('setContext', 'acl2Session.formViewLocked', false);
-  formView.setLockLabel(undefined);
+  pinned = undefined;
+  void vscode.commands.executeCommand('setContext', 'acl2Session.formViewPinned', false);
+  formView.setPinLabel(undefined);
   if (why) {
     formView.note(`The formView is no longer held: ${why}.`);
     channel.appendLine(`formView: released -- ${why}`);
