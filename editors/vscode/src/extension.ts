@@ -3003,7 +3003,13 @@ async function followRules(s: BookSession, index: number): Promise<void> {
     return;
   }
   const e = s.unitEvents.get(index);
-  const all = (e?.inner ?? []).map((i) => i.name).filter((n) => n);
+  // The names ACL2 recorded, and the names the form *writes*. Two questions,
+  // and documentation is the case that tells them apart: a standalone
+  // `defxdoc` records no event at all, so asking only about `inner` would
+  // never ask about the one name a form whose purpose is documentation has.
+  const all = [...(e?.inner ?? []).map((i) => i.name), ...(e?.names ?? [])]
+    .filter((n) => n)
+    .filter((n, i, xs) => xs.indexOf(n) === i);
   if (!all.length) {
     return;
   }
@@ -3019,10 +3025,15 @@ async function followRules(s: BookSession, index: number): Promise<void> {
     // back onto a socket the renderer was too busy to drain.
     const batch = await client?.request('rules', { book: s.id, names });
     const replies: RulesReply[] = (batch?.rules as RulesReply[]) ?? [];
+    // Kept when it has rules *or* documentation. Filtering on `found` alone
+    // dropped every name that is documented and introduces nothing, which is
+    // the whole of the standalone case.
     const entries: FormNameRules[] = replies
-      .filter((r): r is RulesReply => !!r && r.found)
+      .filter((r): r is RulesReply => !!r && (r.found || !!r.short))
       .map((r) => ({
         name: r.name,
+        found: r.found,
+        short: r.short,
         symbolClass: r.symbol_class,
         measure: r.measure,
         relation: r.relation,

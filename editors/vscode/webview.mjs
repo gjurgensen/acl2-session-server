@@ -391,7 +391,7 @@ const envelope = lift('esc', 'strip', 'causes', 'spans', 'hl', 'rat',
                       'fmtSecs', 'timeParts', 'proveSecs', 'fmtTime', 'guardNote',
                       'folds', 'foldScope', 'foldScopeIs', 'fold',
                       'factRow', 'nameFacts', 'introducedHtml', 'usedHtml',
-                      'eventHtml', 'productiveHtml', 'failureHtml', 'warningsHtml',
+                      'eventHtml', 'docsHtml', 'productiveHtml', 'failureHtml', 'warningsHtml',
                       'envelope');
 {
   const fn = {
@@ -938,6 +938,58 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   check(pinnedIndex(at(3, 9), units) === undefined,
         'a position merely *inside* a form is not that form starting -- let go');
   check(pinnedIndex(at(4, 1), units) === undefined, 'and neither is a line with no form on it');
+}
+
+// ---- documentation lands on the name it belongs to ----
+{
+  // Through `envelope`, like every other rendering test here: it is the entry
+  // the page actually calls, so this exercises the real path rather than a
+  // function lifted out of the middle of it.
+  const doc = (extra) =>
+    envelope({ checkpoints: [], rules: [], inner: [], ...extra }, 'p:');
+
+  // A name that carries a topic says so where its other facts are, and says it
+  // as prose: everything else in that table is a term, and a short is the one
+  // line on the page a person wrote.
+  const onEvent = doc({
+    inner: [{ name: 'shown', kind: 'define',
+              detail: { name: 'shown', short: 'counts the scopes',
+                        guard: '(natp x)', runes: [] } }],
+  });
+  check(/documented/.test(onEvent), 'a documented name says so');
+  check(/counts the scopes/.test(onEvent), 'and says what');
+  check(onEvent.indexOf('documented') < onEvent.indexOf('guard'),
+    'and it leads, being the only row written by a person');
+
+  const quiet = doc({
+    inner: [{ name: 'quiet', kind: 'defun',
+              detail: { name: 'quiet', guard: '(natp x)', runes: [] } }],
+  });
+  check(!/documented/.test(quiet), 'an undocumented name says nothing at all');
+
+  // A topic belonging to no event of the form. A standalone defxdoc records no
+  // event at all, so it has nothing above to attach to -- and a form view that
+  // only ever decorated events would show it as empty.
+  const lone = doc({ docs: [{ name: 'lone-topic', short: 'documented by itself' }] });
+  check(/lone-topic/.test(lone), 'a form with no events still shows its topic');
+  check(/documented by itself/.test(lone), 'with its summary');
+
+  // ...and it comes last when the form did do something as well.
+  const both = doc({
+    inner: [{ name: 'ev', kind: 'defun' }],
+    docs: [{ name: 'lone-topic', short: 'documented by itself' }],
+  });
+  check(both.indexOf('lone-topic') > both.indexOf('ev'),
+    'documentation comes after what the form did');
+
+  // Nothing documented, nothing said: not an empty heading.
+  check(!/Documented/.test(doc({ inner: [{ name: 'ev' }], docs: [] })),
+    'no topics, no section');
+
+  // The short is xdoc markup, which routinely carries angle brackets, and
+  // this is a page.
+  check(!/<script>/.test(doc({ docs: [{ name: 'x', short: '<script>a</script>' }] })),
+    'a summary cannot carry markup into the page');
 }
 
 // ---- a failure the extension can name, it can also offer to fix ----

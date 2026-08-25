@@ -75,6 +75,14 @@ export interface Envelope {
   checkpoints?: CheckpointEvent[];
   pre_revert?: boolean;
   forced?: boolean;
+  /**
+   * The names this form *writes*, from the split.
+   *
+   * A different question from `inner`, which is what ACL2 recorded. A
+   * standalone `defxdoc` records no event, so this is the only place its
+   * topic's name appears.
+   */
+  names?: string[];
   inner?: InnerEventWire[];
   inner_total?: number;
   n_top?: number;
@@ -373,6 +381,14 @@ export interface RuneWire {
 export interface RulesReply {
   found: boolean;
   name: string;
+  /**
+   * This name's xdoc `:short`, when a topic of this name exists.
+   *
+   * Independent of `found`, which is about *rules*. A standalone `defxdoc`
+   * introduces no rule and is documented, so anything filtering on `found`
+   * before reading this drops exactly the case documentation exists for.
+   */
+  short?: string;
   symbol_class?: string;
   measure?: string;
   relation?: string;

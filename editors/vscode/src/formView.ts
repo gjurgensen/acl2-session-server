@@ -119,6 +119,10 @@ export interface FormRune {
  */
 export interface FormNameRules {
   name: string;
+  /** Whether this name introduced anything. A name may be documented and not. */
+  found?: boolean;
+  /** This name's xdoc summary, when a topic of this name exists. */
+  short?: string;
   symbolClass?: string;
   measure?: string;
   relation?: string;
@@ -621,9 +625,18 @@ window.addEventListener('message', (ev) => {
  */
 function withDetail(m) {
   const inner = m.inner || [];
-  if (!ruleEntries.length || !inner.length) { return m; }
+  if (!ruleEntries.length) { return m; }
   const by = new Map(ruleEntries.map((e) => [String(e.name).toLowerCase(), e]));
-  return { ...m, inner: inner.map((e) => {
+  const named = new Set(inner.map((e) => String(e.name).toLowerCase()));
+  // Documentation belonging to no event of this form. A standalone defxdoc
+  // records no event at all -- it writes a table -- so its topic matches
+  // nothing above and would vanish if this only ever decorated events. It is
+  // the case the whole form-level section exists for, and the reason this no
+  // longer gives up when a form recorded nothing.
+  const docs = ruleEntries.filter(
+    (e) => e.short && !named.has(String(e.name).toLowerCase())
+  );
+  return { ...m, docs, inner: inner.map((e) => {
     const d = by.get(String(e.name).toLowerCase());
     return d ? { ...e, detail: d } : e;
   }) };

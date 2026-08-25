@@ -200,6 +200,9 @@ details.event > summary { padding: 5px 8px; }
    the first inline run -- without this it starts back at the chevron, a slot
    to the left of the name it is about. */
 .efacts { display: block; margin-top: 2px; padding-left: var(--twist); }
+/* An xdoc short: the one thing on this page a person wrote, so it reads as
+   prose rather than as a term -- no monospace, and it wraps. */
+.doc { font-style: italic; opacity: 0.85; margin: 1px 0 3px; }
 /* And the same for a fold nested inside one: its body lines up under its own
    label, not under its own chevron. \`.einside\` says this for itself, having a
    padding on all four sides. */
@@ -439,6 +442,13 @@ function factRow(label, term) {
  */
 function nameFacts(d) {
   let rows = '';
+  // First, and not through the Lisp highlighter: a short is a sentence about
+  // the name, where everything below it is a term. It leads because it is the
+  // only row written by a person -- the rest is what ACL2 made of the form.
+  if (d.short) {
+    rows += '<tr><td class="meta">documented</td><td class="doc">' +
+      esc(d.short) + '</td></tr>';
+  }
   if (d.guard) { rows += factRow('guard', d.guard); }
   if (d.measure) { rows += factRow('measure', d.measure); }
   if (d.relation) { rows += factRow('decreasing under', d.relation); }
@@ -553,6 +563,27 @@ function eventHtml(e, p, openByDefault) {
 }
 
 /**
+ * Topics this form documented that belong to none of its events.
+ *
+ * At the end, and last on purpose: everything above is what the form did, and
+ * this is what it says about itself. A form whose only product is
+ * documentation -- a standalone defxdoc -- has nothing above at all, which is
+ * why this is reachable from both paths.
+ *
+ * The short and not the long. A short is one sentence and reads in place; a
+ * long is a document, and there is a view for those. The name opens it.
+ */
+function docsHtml(m) {
+  const docs = m.docs || [];
+  if (!docs.length) { return ''; }
+  return '<h3>Documented (' + docs.length + ')</h3><ul class="rules">' +
+    docs.map((d) =>
+      '<li><code class="lisp">' + hl(d.name) + '</code>' +
+      '<div class="doc">' + esc(d.short) + '</div></li>').join('') +
+    '</ul>';
+}
+
+/**
  * A form that produced something: its events, in the order the source has
  * them.
  *
@@ -571,7 +602,7 @@ function productiveHtml(m, p) {
     head += '<h3>Value</h3><pre>' + hl(m.value) + '</pre>';
   }
   const inner = (m.inner || []).slice().reverse();
-  if (!inner.length) { return head; }
+  if (!inner.length) { return head + docsHtml(m); }
   const total = m.innerTotal != null && m.innerTotal > inner.length
     ? inner.length + ' shown of ' + m.innerTotal
     : String(inner.length);
@@ -582,6 +613,7 @@ function productiveHtml(m, p) {
   const openByDefault = inner.length <= limit;
   let h = head + '<h3>Events (' + total + ')</h3>';
   h += inner.map((e) => eventHtml(e, p, openByDefault)).join('');
+  h += docsHtml(m);
   const detailed = inner.filter(
     (e) => e.kind || e.time || e.proverSteps != null || (e.rules || []).length || e.detail
   ).length;
