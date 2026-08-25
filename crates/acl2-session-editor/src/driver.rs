@@ -474,7 +474,25 @@ impl Driver {
                 self.settled_at = None;
                 // Hold the target where the retraction puts the world, so the
                 // drive that follows does not immediately re-admit.
-                let kept = keep.checked_sub(1).and_then(|k| self.units.get(k));
+                //
+                // The two ways there is no such unit are opposites and must
+                // not share an answer. `keep == 0` is a request to retract
+                // everything, and holding before the first form is exactly
+                // right. `keep` *past the end* is a stale number -- the client
+                // computed it against a buffer with more forms in it, and the
+                // update that shortened the file has already been applied --
+                // and it means "keep more than there is", i.e. keep all of it.
+                //
+                // Both used to land on `None`, so both held the target at line
+                // 0; the drive that follows resolves line 0 to `keep: 0` and
+                // rolls the whole book back. A stale target is supposed to
+                // cost at most admitting less than you meant to. This cost
+                // every proof in the file, and stayed that way until the next
+                // edit.
+                let kept = match keep.checked_sub(1) {
+                    None => None,
+                    Some(k) => self.units.get(k).or_else(|| self.units.last()),
+                };
                 // The end of the kept form, column included: held at its line
                 // alone, a form sharing that line would be re-admitted at
                 // once and the retraction would appear to bounce off.

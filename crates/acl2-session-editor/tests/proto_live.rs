@@ -1874,3 +1874,62 @@ fn one_books_open_does_not_stall_another_book() {
     d.shutdown();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A `retract` whose `keep` is past the end of the buffer keeps everything.
+///
+/// The client computes `keep` from the state it last painted, and an update
+/// can shorten the file between that computation and the daemon reading it --
+/// deleting the last forms and hitting Retract to Cursor inside the debounce
+/// window is enough. `sync_with`'s doc says what a stale number is allowed to
+/// cost: admitting less than you meant to. Not this. Both "retract everything"
+/// (`keep: 0`) and "keep more than exists" resolved to a target held before
+/// the first form, and the drive that follows reads that as `keep: 0` -- so
+/// every proof in the book was discarded, and stayed discarded until the next
+/// edit.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_retract_past_the_end_of_the_buffer_keeps_everything() {
+    let Some(acl2) = acl2() else {
+        eprintln!("ACL2 not set; skipping");
+        return;
+    };
+    let root = std::env::temp_dir().join(format!("acl2-editord-stale-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("dir");
+    let path = root.join("b.lisp");
+    let text = "(in-package \"ACL2\")\n\
+                (defun f (x) (if (consp x) (f (cdr x)) nil))\n\
+                (defthm f-nil (equal (f nil) nil))\n";
+    std::fs::write(&path, text).unwrap();
+
+    let mut d = Daemon::start(&acl2);
+    let r = d.request("open", json!({ "path": path.to_str().unwrap() }));
+    let book = r["book"].as_str().unwrap().to_string();
+    d.notify("update", json!({ "book": book, "text": text, "revision": 1 }));
+    let first = d.events_until_settled();
+    assert_eq!(statuses(&last_state(&first)), ["admitted", "admitted", "admitted"]);
+
+    // The number a client would hold from a longer buffer. Nothing here has
+    // eight forms; three is all there is.
+    d.notify("retract", json!({ "book": book, "keep": 8 }));
+    let after = d.events_until_settled();
+    assert_eq!(
+        statuses(&last_state(&after)),
+        ["admitted", "admitted", "admitted"],
+        "a keep past the end keeps everything: {:?}",
+        last_state(&after)
+    );
+
+    // And `keep: 0` still means what it says, so the clamp did not swallow
+    // the one case that legitimately holds before the first form.
+    d.notify("retract", json!({ "book": book, "keep": 0 }));
+    let none = d.events_until_settled();
+    let left = statuses(&last_state(&none));
+    assert!(
+        left.iter().all(|s| s != "admitted"),
+        "keep 0 retracts everything: {left:?}"
+    );
+
+    d.shutdown();
+    let _ = std::fs::remove_dir_all(&root);
+}
