@@ -861,6 +861,78 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   check(pinnedIndex(at(4, 1), units) === undefined, 'and neither is a line with no form on it');
 }
 
+// ---- a failure the extension can name, it can also offer to fix ----
+{
+  const { readFileSync } = require('fs');
+  const src = readFileSync(new URL('./src/extension.ts', import.meta.url), 'utf8');
+  const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
+
+  // Three ways to fail before a session exists, and each used to hand back a
+  // sentence with a setting's name in it. The worst was the middle one: with
+  // no image configured the daemon *starts* and then refuses, so the reader
+  // was told `daemon exited` -- the symptom -- while the cause and the fix,
+  // "no ACL2 to run", sat in an output channel nobody had been told to open.
+  const spawn = src.slice(src.indexOf("c.on('spawn-error'"));
+  check(/act\(/.test(spawn.slice(0, 300)), 'a daemon that will not spawn offers actions');
+  check(/Set Path/.test(spawn.slice(0, 300)) && /Install Steps/.test(spawn.slice(0, 300)),
+    'and they are the two that fix it');
+
+  const exit = src.slice(src.indexOf("c.on('exit'"));
+  const body = exit.slice(0, exit.indexOf("c.on('state'"));
+  check(/dying/.test(body), "a daemon that dies before any session says what it said");
+  check(/Set Image/.test(body), 'and offers the setting when the image is what it wanted');
+  check(/Show Log/.test(body), 'with the log a click away either way');
+
+  // One notification per death: a spawn failure ends in an exit too, and being
+  // told twice about one event is the thing the guidance calls out by name.
+  check(/told = true/.test(spawn.slice(0, 200)) && /if \(told\)/.test(body),
+    'and a spawn failure is not announced twice on its way out');
+
+  // The steps come from the copy that shipped with this extension, not a URL:
+  // they are version-specific, they must work with no network, and a link
+  // rots when files move.
+  const steps = src.slice(src.indexOf('function showInstallSteps'));
+  check(/README\.md/.test(steps.slice(0, 400)), 'the install steps are the bundled README');
+  check(!/https?:\/\//.test(steps.slice(0, 400)), 'and not a link to one');
+
+  // Both settings the actions open have to exist, or the button opens Settings
+  // filtered to nothing.
+  for (const id of ['acl2-session.daemonPath', 'acl2-session.defaultImage']) {
+    check(id in pkg.contributes.configuration.properties, `${id} is a real setting`);
+  }
+}
+
+// ---- one writer for the status bar ----
+{
+  const { readFileSync } = require('fs');
+  const src = readFileSync(new URL('./src/extension.ts', import.meta.url), 'utf8');
+  const writes = (prop) =>
+    (src.match(new RegExp(`status\\.${prop}\\s*=`, 'g')) || []).length;
+
+  // The bar is one widget shared by every book and by VSCode itself, so who
+  // may write it has to be decided in one place. It was not: a certification's
+  // clock set the text, tooltip *and* command straight onto the widget from a
+  // timer, so with two books live and one certifying the bar flickered between
+  // the other's counts and the clock twice a second -- and for up to half a
+  // second the interrupt command sat under a tooltip offering something else.
+  //
+  // `setStatus` is that place, and these counts are how a second writer gets
+  // noticed. One text write, and one each of tooltip and command beyond the
+  // defaults set at activation before any book exists.
+  check(writes('text') === 1, `only setStatus writes status.text (found ${writes('text')})`);
+  check(writes('tooltip') === 2, `and status.tooltip (found ${writes('tooltip')})`);
+  check(writes('command') === 2, `and status.command (found ${writes('command')})`);
+
+  // The command travels with the text, because it belongs to what the bar is
+  // showing: a finished certification must not leave its interrupt behind.
+  const set = src.slice(src.indexOf('function setStatus'));
+  const body = set.slice(0, set.indexOf('\nfunction '));
+  check(/if \(command !== undefined\)/.test(body),
+    'setStatus sets the command it was given');
+  check(!/s\.certifying/.test(body),
+    'and nothing outranks the book in front, a certification included');
+}
+
 // ---- every fold indent comes from one number ----
 {
   const { readFileSync } = require('fs');

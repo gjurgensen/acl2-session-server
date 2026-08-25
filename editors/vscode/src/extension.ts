@@ -209,6 +209,8 @@ interface BookSession {
   evalReplies: Map<number, EvalReply>;
   /** A certification is in flight; a second is refused rather than queued. */
   certifying?: boolean;
+  /** When the certification started, so any repaint can draw its clock. */
+  certifyStarted?: number;
 }
 
 let client: DaemonClient | undefined;
@@ -338,6 +340,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // before they arrive; refresh once they have, and again whenever the
   // colors the editor paints with change under us.
   setExtensionUri(context.extensionUri);
+  here = context.extensionUri;
   highlighter = new Highlighter(context.extensionPath);
   const reload = () => {
     // The status colours are read from the theme too, and a decoration type
@@ -1001,16 +1004,12 @@ async function certifyBook(s: BookSession): Promise<void> {
   const jobs = vscode.workspace
     .getConfiguration('acl2-session')
     .get<number>('certifyJobs', 4);
-  const started = Date.now();
-  const tick = setInterval(() => {
-    const secs = Math.floor((Date.now() - started) / 1000);
-    status.text = `$(sync~spin) ACL2 certifying ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
-    // The book named in the tooltip and passed to the command, because the
-    // bar is timing one book and the focus may be on another: resolved
-    // against the active editor, the button interrupted the wrong session.
-    status.tooltip = `ACL2: certifying ${basename(s.doc.fileName)}\nClick to interrupt`;
-    status.command = { command: 'acl2-session.interrupt', title: 'Interrupt', arguments: [s.id] };
-  }, 500);
+  s.certifyStarted = Date.now();
+  // Only to advance the clock. What it *says* is decided by the renderer, and
+  // whether it lands at all by the same ownership rule as everything else --
+  // so certifying one book while reading another leaves the bar on the one
+  // being read.
+  const tick = setInterval(() => updateStatusBar(s), 500);
   try {
     const r: CertifyReply = await client!.request('certify', { book: s.id, jobs });
     if (r.status === 'certified') {
@@ -1035,11 +1034,11 @@ async function certifyBook(s: BookSession): Promise<void> {
   } finally {
     clearInterval(tick);
     s.certifying = false;
-    status.command = 'acl2-session.showFormView';
-    // Reset here as well as through `updateStatusBar`: with no session in
-    // front, nothing repaints, and the interrupt tooltip would stand over a
-    // certification that has finished.
-    status.tooltip = 'ACL2: show the form view';
+    s.certifyStarted = undefined;
+    // Both: `updateStatusBar` repaints this book if it owns the bar, and
+    // `refreshStatusBar` repaints whichever book does if it does not -- the
+    // interrupt command must not outlive the certification either way, and
+    // with the focus elsewhere this book cannot clear it itself.
     updateStatusBar(s);
     refreshStatusBar();
   }
@@ -1431,6 +1430,47 @@ function startsAtOrBefore(u: UnitState, at: Pos): boolean {
   return u.col_start <= at.column;
 }
 
+/**
+ * A message with things to do about it.
+ *
+ * Every failure here is one the extension can name exactly, so every one can
+ * offer the fix rather than the name of a setting to go and find. That is what
+ * the notifications guidance asks for, and it is the same trade "no live
+ * session" made when its instruction became a Start button.
+ */
+function act(message: string, actions: Record<string, () => void>): Thenable<void> {
+  const names = Object.keys(actions);
+  return vscode.window.showErrorMessage(message, ...names).then((pick) => {
+    if (pick) {
+      actions[pick]();
+    }
+  });
+}
+
+/** Where this extension is installed, for the copy of the README beside it. */
+let here: vscode.Uri | undefined;
+
+function openSetting(id: string): void {
+  void vscode.commands.executeCommand('workbench.action.openSettings', id);
+}
+
+/**
+ * The install steps, from the copy that shipped with *this* extension.
+ *
+ * Not a link to the repository: these are version-specific -- a `cargo install`
+ * from a checkout -- so the right copy is the one beside the code actually
+ * running, which also works with no network and cannot rot when files move.
+ */
+function showInstallSteps(): void {
+  if (!here) {
+    return;
+  }
+  const readme = vscode.Uri.joinPath(here, 'README.md');
+  void vscode.commands.executeCommand('markdown.showPreview', readme).then(undefined, () =>
+    vscode.window.showTextDocument(readme)
+  );
+}
+
 function ensureClient(): DaemonClient {
   if (client && client.alive) {
     return client;
@@ -1446,15 +1486,29 @@ function ensureClient(): DaemonClient {
     args.push('--default', def);
   }
   const c = new DaemonClient(cmd, args);
-  c.on('stderr', (s: string) => channel.append(s));
+  // Kept, not just logged. A daemon that refuses to start says why on its way
+  // out -- "no ACL2 to run", with the usage -- and that is the one sentence
+  // worth showing. Without it the reader is told `daemon exited`, which is the
+  // symptom, while the cause sits in a channel nobody has been told to open.
+  let dying = '';
+  c.on('stderr', (s: string) => {
+    channel.append(s);
+    dying = (dying + s).split('\n').filter((l) => l.trim()).slice(-4).join('\n');
+  });
   c.on('daemon-error', (p: { message?: string }) =>
     channel.appendLine(`daemon: ${p?.message ?? 'unknown error'}`)
   );
-  c.on('spawn-error', (e: Error) =>
-    void vscode.window.showErrorMessage(
-      `ACL2: cannot start the daemon (${e.message}) -- set acl2-session.daemonPath`
-    )
-  );
+  // One notification per death: a failure to spawn also ends in `exit`, and
+  // the reader who has just been told the binary is missing does not need to
+  // be told again that it is gone.
+  let told = false;
+  c.on('spawn-error', (e: Error) => {
+    told = true;
+    void act(`ACL2: cannot start the daemon (${e.message})`, {
+      'Set Path\u2026': () => openSetting('acl2-session.daemonPath'),
+      'Install Steps': showInstallSteps,
+    });
+  });
   c.on('exit', () => {
     // A newer client may already have replaced this one; that death is its
     // predecessor's, and none of this belongs to it.
@@ -1473,12 +1527,30 @@ function ensureClient(): DaemonClient {
     for (const s of orphaned) {
       dropBook(s);
     }
-    if (orphaned.length > 0) {
-      void vscode.window.showErrorMessage(
-        'ACL2: the daemon exited and its sessions are gone (see the "ACL2" ' +
-          'output channel). Run "ACL2: Start Live Checking" to begin again.'
-      );
+    if (told) {
+      return;
     }
+    told = true;
+    if (orphaned.length > 0) {
+      void act('ACL2: the daemon exited; its sessions are gone', {
+        'Show Log': () => channel.show(true),
+        Start: () => void startCommand(),
+      });
+      return;
+    }
+    // It died before there was anything to lose, which is what a
+    // misconfiguration looks like: the binary ran and refused. Its own words,
+    // because "no ACL2 to run" is the fix and `daemon exited` is not.
+    const why = dying.split('\n')[0] || 'the daemon exited';
+    void act(`ACL2: ${why}`, {
+      'Show Log': () => channel.show(true),
+      // Offered only when the daemon is complaining about the image, since
+      // that is the one it cannot find for itself and the one this setting
+      // fixes.
+      ...(/acl2|image/i.test(dying)
+        ? { 'Set Image\u2026': () => openSetting('acl2-session.defaultImage') }
+        : {}),
+    });
   });
   c.on('state', onState);
   c.on('unit', onUnit);
@@ -2398,10 +2470,17 @@ function refreshStatusBar(): void {
 /**
  * Whether the bar is this book's to write to.
  *
- * The book in front owns it. With nothing in front that has a session -- a
- * webview focused, a plain text file open -- whichever book the bar already
- * describes keeps it, rather than the bar blanking or being taken by the next
- * event to arrive from anywhere.
+ * The book in front owns it, and nothing outranks that -- a certification
+ * included. It used to: its clock wrote the widget directly, so it was not so
+ * much precedence as a race, and with two books live and one certifying the
+ * bar flickered between the other's counts and the clock twice a second. A
+ * reader looking at one file has no use for another file's activity, and the
+ * one thing they might want -- the interrupt button -- is no use either if it
+ * is only there half the time.
+ *
+ * With nothing in front that has a session -- a webview focused, a plain text
+ * file open -- whichever book the bar already describes keeps it, rather than
+ * the bar blanking or being taken by the next event to arrive from anywhere.
  */
 function ownsStatus(s: BookSession): boolean {
   const active = activeBook();
@@ -2422,12 +2501,23 @@ function ownsStatus(s: BookSession): boolean {
  * A running certification is the one thing that outranks the book in front:
  * the bar is its clock and its interrupt button until it finishes.
  */
-function setStatus(s: BookSession, text: string, tooltip?: string): void {
-  if (s.certifying || !ownsStatus(s)) {
+function setStatus(
+  s: BookSession,
+  text: string,
+  tooltip?: string,
+  command?: string | vscode.Command
+): void {
+  if (!ownsStatus(s)) {
     return;
   }
   statusBook = s.id;
   status.text = text;
+  // The command belongs to whatever the bar is *showing*, so it travels with
+  // the text. Left alone when absent, like the tooltip: the transient writes
+  // change what the bar says without changing what clicking it does.
+  if (command !== undefined) {
+    status.command = command;
+  }
   // Optional, and omitted by the transient writes -- `starting`, a tail's
   // clock, a settle's warning -- which have only ever set the text and leave
   // the standing tooltip to say the rest.
@@ -2437,6 +2527,23 @@ function setStatus(s: BookSession, text: string, tooltip?: string): void {
 }
 
 function updateStatusBar(s: BookSession): void {
+  // A certification is a state of *this book*, drawn by the same renderer as
+  // every other, so that a repaint from any cause -- a tab switch back to it,
+  // a settle, the clock's own timer -- shows the same thing. It used to be
+  // written straight to the widget from a timer, which is what made it race.
+  if (s.certifying) {
+    const secs = Math.floor((Date.now() - (s.certifyStarted ?? Date.now())) / 1000);
+    setStatus(
+      s,
+      `$(sync~spin) ACL2 certifying ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`,
+      `ACL2: certifying ${basename(s.doc.fileName)}\nClick to interrupt`,
+      // The book is named in the argument as well as the tooltip: the bar is
+      // timing one book and the focus may be on another, and resolved against
+      // the active editor this interrupted the wrong session.
+      { command: 'acl2-session.interrupt', title: 'Interrupt', arguments: [s.id] }
+    );
+    return;
+  }
   const units = s.lastState?.units ?? [];
   const total = units.length;
   const green = units.filter((u) => u.status === 'admitted' || u.status === 'conditional').length;
@@ -2479,7 +2586,11 @@ function updateStatusBar(s: BookSession): void {
     `${icon} ACL2 ${at}/${total}`,
     `ACL2: ${basename(s.doc.fileName)} \u2014 ${green}/${total} admitted` +
       (why ? ` \u2014 ${why}` : '') +
-      `\nClick to show the form view`
+      `\nClick to show the form view`,
+    // Named on every ordinary repaint, so a finished certification cannot
+    // leave its interrupt behind: whichever book takes the bar back takes the
+    // command with it.
+    'acl2-session.showFormView'
   );
 }
 
