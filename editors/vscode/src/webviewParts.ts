@@ -145,7 +145,17 @@ details[data-fold] > summary::before {
   width: var(--twist);
   font-size: 13px;
   line-height: 1;
-  vertical-align: baseline;
+  /* Middle, not baseline, and the font's own metrics say why: codicon is
+     unitsPerEm 300 with ascender 300 and descender 0, so its baseline is the
+     *bottom* of the em box and the chevron's ink centre sits 0.498em above
+     it -- about 6.5px here. Text's optical centre is half an x-height up,
+     nearer 3.4px, so a baseline-aligned chevron rides some three pixels high
+     beside the word it belongs to. \`middle\` puts the box's centre at the
+     parent's baseline plus half an x-height, which is where the ink wants to
+     be. The icon font's own stylesheet leaves this at baseline, which is
+     harmless for VSCode because its codicons sit in flex rows that centre
+     them anyway; ours sits in flowing text, where it is not. */
+  vertical-align: middle;
   opacity: 0.75;
 }
 details[data-fold][open] > summary::before { content: "\\eab4"; }

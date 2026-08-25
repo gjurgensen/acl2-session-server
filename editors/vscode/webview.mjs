@@ -772,6 +772,18 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
       `${what} is derived from it, not written out`);
   }
 
+  // Vertically, the chevron must not be baseline-aligned. The codicon font is
+  // unitsPerEm 300 with ascender 300 and descender 0 -- its baseline is the
+  // bottom of the em box -- so a baseline-aligned glyph puts its ink centre
+  // 0.498em above the text baseline, where lowercase text's optical centre is
+  // nearer half an x-height. That is about three pixels of ride at this size,
+  // which reads as the chevron sitting high beside its own word.
+  const chev = rule('details[data-fold] > summary::before');
+  check(/vertical-align:\s*middle/.test(chev),
+    'the chevron is centred on the text, not sat on its baseline');
+  check(!/vertical-align:\s*baseline/.test(chev),
+    'and not left at the icon font\u2019s own default');
+
   // The two that must be equal rather than merely related: a fold's body and
   // the label above it. Both are the summary's padding plus one slot.
   const pad = (sel) => (rule(sel) || '').match(/calc\(([^)]*\))?[^)]*\)/)?.[0];
