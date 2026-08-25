@@ -1617,7 +1617,22 @@ async function startCommand(initial?: Held): Promise<void> {
   }
   const c = ensureClient();
   try {
-    const r = await c.request('open', { path: doc.fileName }, OPEN_WAIT_MS);
+    // A timeout is not a cancellation: the daemon knows nothing about it and
+    // goes on opening. If it then succeeds, the reply is the only word we will
+    // ever get about a book that now exists -- registered, with a driver
+    // thread and a live ACL2 behind it -- and dropping it left that session
+    // orphaned until daemon exit, with a retried Start opening a second one
+    // for the same file beside it. So the late reply closes what it names.
+    const r = await c.request('open', { path: doc.fileName }, OPEN_WAIT_MS, (late) => {
+      const id = (late as { book?: string })?.book;
+      if (!id) {
+        return;
+      }
+      channel.appendLine(
+        `open of ${doc.fileName} finished after it was given up on; closing session ${id}`
+      );
+      void c.request('close', { book: id }).catch(() => undefined);
+    });
     const s: BookSession = {
       id: r.book as string,
       doc,

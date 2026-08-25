@@ -142,6 +142,11 @@ export interface SettledEvent {
 }
 
 interface Pending {
+  /**
+   * Reassigned when a request times out with an `onLate` handler: the caller
+   * has already been rejected, and what arrives later is for disposal rather
+   * than for them.
+   */
   resolve: (v: unknown) => void;
   reject: (e: Error) => void;
   /** Cleared on every settle, so a finished request holds no timer. */
@@ -225,14 +230,42 @@ export class DaemonClient extends EventEmitter {
    * finishes, and that is minutes by design; a timeout that cancelled them
    * would break the two verbs whose whole point is taking a long time. So the
    * callers that have a deadline say what it is.
+   *
+   * `onLate` is what to do with a reply that arrives *after* the deadline,
+   * and it exists because a timeout is not a cancellation: the daemon knows
+   * nothing about it and carries on. For a verb that creates something, the
+   * late reply is the only word the client will ever get about a thing that
+   * now exists on the other side -- an `open` that overran left a registered
+   * book, a driver thread and a live ACL2 that the client never learned of,
+   * until daemon exit. So the pending entry is kept rather than deleted, with
+   * its resolve replaced: the caller is rejected on time, and whatever comes
+   * later is handed to `onLate` to dispose of.
    */
-  request(method: string, params: unknown, timeoutMs?: number): Promise<any> {
+  request(
+    method: string,
+    params: unknown,
+    timeoutMs?: number,
+    onLate?: (result: any) => void
+  ): Promise<any> {
     const id = this.nextId++;
     const p = new Promise<any>((resolve, reject) => {
       const entry: Pending = { resolve, reject };
       if (timeoutMs !== undefined) {
         entry.timer = setTimeout(() => {
-          this.pending.delete(id);
+          const late = this.pending.get(id);
+          if (!late) {
+            return;
+          }
+          if (onLate) {
+            // Kept, so `dispatch` still routes the reply here rather than
+            // dropping it as an id nobody is waiting for. Cleared from the
+            // map by `dispatch` when it lands, or by the exit sweep.
+            late.resolve = (v) => onLate(v);
+            late.reject = () => {};
+            late.timer = undefined;
+          } else {
+            this.pending.delete(id);
+          }
           reject(new Error(`the daemon did not answer ${method} within ${timeoutMs / 1000}s`));
         }, timeoutMs);
       }
