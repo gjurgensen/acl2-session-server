@@ -209,6 +209,8 @@ interface BookSession {
   evalReplies: Map<number, EvalReply>;
   /** A certification is in flight; a second is refused rather than queued. */
   certifying?: boolean;
+  /** When the certification started, so any repaint can draw its clock. */
+  certifyStarted?: number;
 }
 
 let client: DaemonClient | undefined;
@@ -1001,16 +1003,12 @@ async function certifyBook(s: BookSession): Promise<void> {
   const jobs = vscode.workspace
     .getConfiguration('acl2-session')
     .get<number>('certifyJobs', 4);
-  const started = Date.now();
-  const tick = setInterval(() => {
-    const secs = Math.floor((Date.now() - started) / 1000);
-    status.text = `$(sync~spin) ACL2 certifying ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
-    // The book named in the tooltip and passed to the command, because the
-    // bar is timing one book and the focus may be on another: resolved
-    // against the active editor, the button interrupted the wrong session.
-    status.tooltip = `ACL2: certifying ${basename(s.doc.fileName)}\nClick to interrupt`;
-    status.command = { command: 'acl2-session.interrupt', title: 'Interrupt', arguments: [s.id] };
-  }, 500);
+  s.certifyStarted = Date.now();
+  // Only to advance the clock. What it *says* is decided by the renderer, and
+  // whether it lands at all by the same ownership rule as everything else --
+  // so certifying one book while reading another leaves the bar on the one
+  // being read.
+  const tick = setInterval(() => updateStatusBar(s), 500);
   try {
     const r: CertifyReply = await client!.request('certify', { book: s.id, jobs });
     if (r.status === 'certified') {
@@ -1035,11 +1033,11 @@ async function certifyBook(s: BookSession): Promise<void> {
   } finally {
     clearInterval(tick);
     s.certifying = false;
-    status.command = 'acl2-session.showFormView';
-    // Reset here as well as through `updateStatusBar`: with no session in
-    // front, nothing repaints, and the interrupt tooltip would stand over a
-    // certification that has finished.
-    status.tooltip = 'ACL2: show the form view';
+    s.certifyStarted = undefined;
+    // Both: `updateStatusBar` repaints this book if it owns the bar, and
+    // `refreshStatusBar` repaints whichever book does if it does not -- the
+    // interrupt command must not outlive the certification either way, and
+    // with the focus elsewhere this book cannot clear it itself.
     updateStatusBar(s);
     refreshStatusBar();
   }
@@ -2398,10 +2396,17 @@ function refreshStatusBar(): void {
 /**
  * Whether the bar is this book's to write to.
  *
- * The book in front owns it. With nothing in front that has a session -- a
- * webview focused, a plain text file open -- whichever book the bar already
- * describes keeps it, rather than the bar blanking or being taken by the next
- * event to arrive from anywhere.
+ * The book in front owns it, and nothing outranks that -- a certification
+ * included. It used to: its clock wrote the widget directly, so it was not so
+ * much precedence as a race, and with two books live and one certifying the
+ * bar flickered between the other's counts and the clock twice a second. A
+ * reader looking at one file has no use for another file's activity, and the
+ * one thing they might want -- the interrupt button -- is no use either if it
+ * is only there half the time.
+ *
+ * With nothing in front that has a session -- a webview focused, a plain text
+ * file open -- whichever book the bar already describes keeps it, rather than
+ * the bar blanking or being taken by the next event to arrive from anywhere.
  */
 function ownsStatus(s: BookSession): boolean {
   const active = activeBook();
@@ -2422,12 +2427,23 @@ function ownsStatus(s: BookSession): boolean {
  * A running certification is the one thing that outranks the book in front:
  * the bar is its clock and its interrupt button until it finishes.
  */
-function setStatus(s: BookSession, text: string, tooltip?: string): void {
-  if (s.certifying || !ownsStatus(s)) {
+function setStatus(
+  s: BookSession,
+  text: string,
+  tooltip?: string,
+  command?: string | vscode.Command
+): void {
+  if (!ownsStatus(s)) {
     return;
   }
   statusBook = s.id;
   status.text = text;
+  // The command belongs to whatever the bar is *showing*, so it travels with
+  // the text. Left alone when absent, like the tooltip: the transient writes
+  // change what the bar says without changing what clicking it does.
+  if (command !== undefined) {
+    status.command = command;
+  }
   // Optional, and omitted by the transient writes -- `starting`, a tail's
   // clock, a settle's warning -- which have only ever set the text and leave
   // the standing tooltip to say the rest.
@@ -2437,6 +2453,23 @@ function setStatus(s: BookSession, text: string, tooltip?: string): void {
 }
 
 function updateStatusBar(s: BookSession): void {
+  // A certification is a state of *this book*, drawn by the same renderer as
+  // every other, so that a repaint from any cause -- a tab switch back to it,
+  // a settle, the clock's own timer -- shows the same thing. It used to be
+  // written straight to the widget from a timer, which is what made it race.
+  if (s.certifying) {
+    const secs = Math.floor((Date.now() - (s.certifyStarted ?? Date.now())) / 1000);
+    setStatus(
+      s,
+      `$(sync~spin) ACL2 certifying ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`,
+      `ACL2: certifying ${basename(s.doc.fileName)}\nClick to interrupt`,
+      // The book is named in the argument as well as the tooltip: the bar is
+      // timing one book and the focus may be on another, and resolved against
+      // the active editor this interrupted the wrong session.
+      { command: 'acl2-session.interrupt', title: 'Interrupt', arguments: [s.id] }
+    );
+    return;
+  }
   const units = s.lastState?.units ?? [];
   const total = units.length;
   const green = units.filter((u) => u.status === 'admitted' || u.status === 'conditional').length;
@@ -2479,7 +2512,11 @@ function updateStatusBar(s: BookSession): void {
     `${icon} ACL2 ${at}/${total}`,
     `ACL2: ${basename(s.doc.fileName)} \u2014 ${green}/${total} admitted` +
       (why ? ` \u2014 ${why}` : '') +
-      `\nClick to show the form view`
+      `\nClick to show the form view`,
+    // Named on every ordinary repaint, so a finished certification cannot
+    // leave its interrupt behind: whichever book takes the bar back takes the
+    // command with it.
+    'acl2-session.showFormView'
   );
 }
 

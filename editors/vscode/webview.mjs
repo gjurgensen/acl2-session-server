@@ -861,6 +861,37 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   check(pinnedIndex(at(4, 1), units) === undefined, 'and neither is a line with no form on it');
 }
 
+// ---- one writer for the status bar ----
+{
+  const { readFileSync } = require('fs');
+  const src = readFileSync(new URL('./src/extension.ts', import.meta.url), 'utf8');
+  const writes = (prop) =>
+    (src.match(new RegExp(`status\\.${prop}\\s*=`, 'g')) || []).length;
+
+  // The bar is one widget shared by every book and by VSCode itself, so who
+  // may write it has to be decided in one place. It was not: a certification's
+  // clock set the text, tooltip *and* command straight onto the widget from a
+  // timer, so with two books live and one certifying the bar flickered between
+  // the other's counts and the clock twice a second -- and for up to half a
+  // second the interrupt command sat under a tooltip offering something else.
+  //
+  // `setStatus` is that place, and these counts are how a second writer gets
+  // noticed. One text write, and one each of tooltip and command beyond the
+  // defaults set at activation before any book exists.
+  check(writes('text') === 1, `only setStatus writes status.text (found ${writes('text')})`);
+  check(writes('tooltip') === 2, `and status.tooltip (found ${writes('tooltip')})`);
+  check(writes('command') === 2, `and status.command (found ${writes('command')})`);
+
+  // The command travels with the text, because it belongs to what the bar is
+  // showing: a finished certification must not leave its interrupt behind.
+  const set = src.slice(src.indexOf('function setStatus'));
+  const body = set.slice(0, set.indexOf('\nfunction '));
+  check(/if \(command !== undefined\)/.test(body),
+    'setStatus sets the command it was given');
+  check(!/s\.certifying/.test(body),
+    'and nothing outranks the book in front, a certification included');
+}
+
 // ---- every fold indent comes from one number ----
 {
   const { readFileSync } = require('fs');
