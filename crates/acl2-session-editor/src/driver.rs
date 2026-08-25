@@ -460,6 +460,12 @@ impl Driver {
             }
             Cmd::Retract { keep } => {
                 if !self.have_snapshot {
+                    // Still a settle, as `settled_at`'s contract promises: the
+                    // client asked for one and is waiting to hear that the
+                    // retraction happened. Returning silently here left a
+                    // client that awaits the settle after a split error
+                    // waiting for an event that was never going to come.
+                    self.settle("error", Some("buffer does not lex; nothing to retract to".into()));
                     return Flow::Continue;
                 }
                 self.failed_unit = None;

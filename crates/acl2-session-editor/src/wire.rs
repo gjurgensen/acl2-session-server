@@ -426,7 +426,10 @@ pub struct CertifyParams {
 /// and saying which is the difference between a useful report and "it broke".
 #[derive(Debug, Serialize)]
 pub struct CertifyReply {
-    /// `certified` or `failed`.
+    /// `certified` or `failed`. (`still_running` exists in the mapping so a new
+    /// `CertStatus` variant is a compile error rather than a silent `failed`,
+    /// but no call site can produce it: both hold the reply back and keep
+    /// polling while the build is live.)
     pub status: &'static str,
     pub book: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -450,9 +453,13 @@ pub struct CertTailEvent {
 
 pub fn certified(r: &CertReport) -> CertifyReply {
     CertifyReply {
+        // Exhaustive, like the MCP twin it is meant to mirror: the `_` arm
+        // reported a *live* build as failed, and would have gone on doing so
+        // for any variant added later without a word from the compiler.
         status: match r.status {
             CertStatus::Certified => "certified",
-            _ => "failed",
+            CertStatus::Failed => "failed",
+            CertStatus::StillRunning => "still_running",
         },
         book: r.book.display().to_string(),
         failed_books: r.failed_books.iter().map(|p| p.display().to_string()).collect(),
