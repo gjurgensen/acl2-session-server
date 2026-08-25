@@ -68,8 +68,54 @@ const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Clone)]
 pub struct Out(Arc<OutQueue>);
 
+/// When a queued frame may be dropped to make room for a newer one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Discard {
+    /// Never. A reply, a `settled`, a `unit` -- losing one is a client left
+    /// wrong or waiting for ever.
+    Keep,
+    /// Always. A `tail` is the newest slice of a running form's output; a
+    /// client too far behind to have read the last one has no use for it,
+    /// because the next carries the same ground.
+    Stale,
+    /// Only once a later frame with the same key is queued behind it.
+    ///
+    /// For `state`, keyed by book. A `state` is a whole repaint, so an older
+    /// one really is superseded by a newer one -- but only if a newer one
+    /// exists. Dropping unconditionally, as `Stale` does, would let the *last*
+    /// state of a settled book be the one discarded, and nothing that follows
+    /// carries the units: the client would paint a stale gutter for ever with
+    /// no event left to correct it. So the rule is supersession and not
+    /// staleness, and the newest is always kept.
+    Superseded(String),
+}
+
+/// Which queued frame to discard to make room for `incoming`, if any.
+///
+/// A `Stale` one first, since it is droppable on its own terms. Then one the
+/// incoming frame supersedes, which is what a long triage against a stalled
+/// client produces: `state` after `state` for the same book, each a whole
+/// repaint of the last.
+///
+/// `None` means nothing may go, and the caller queues past the limit anyway.
+/// The backlog is then all replies and events that matter: growing is bad,
+/// but lying to the client about what its session did -- or leaving it waiting
+/// for a reply that was thrown away -- is worse.
+fn victim<'a>(
+    mut queued: impl Iterator<Item = &'a Discard> + Clone,
+    incoming: &Discard,
+) -> Option<usize> {
+    queued
+        .clone()
+        .position(|d| *d == Discard::Stale)
+        .or_else(|| match incoming {
+            Discard::Keep => None,
+            other => queued.position(|d| d == other),
+        })
+}
+
 struct OutQueue {
-    frames: Mutex<std::collections::VecDeque<(bool, Vec<u8>)>>,
+    frames: Mutex<std::collections::VecDeque<(Discard, Vec<u8>)>>,
     ready: std::sync::Condvar,
 }
 
@@ -105,38 +151,42 @@ impl Out {
     }
 
     fn send(&self, v: &Value) {
-        self.push(v, false);
+        self.push(v, Discard::Keep);
     }
 
-    /// Queue a frame. `droppable` marks one that may be discarded under
-    /// backlog rather than held.
-    fn push(&self, v: &Value, droppable: bool) {
+    /// Queue a frame. `how` says whether it may be discarded under backlog
+    /// rather than held.
+    fn push(&self, v: &Value, how: Discard) {
         let s = v.to_string();
         let frame = format!("Content-Length: {}\r\n\r\n{s}", s.len()).into_bytes();
         let mut g = self.0.frames.lock().expect("out queue");
-        if g.len() >= OUT_BACKLOG {
-            // Drop the oldest droppable frame to make room. If there is none,
-            // the backlog is all replies and events that matter, so the frame
-            // is queued anyway: growing is bad, but lying to the client about
-            // what its session did is worse.
-            if let Some(i) = g.iter().position(|(d, _)| *d) {
-                g.remove(i);
-            }
+        if g.len() >= OUT_BACKLOG
+            && let Some(i) = victim(g.iter().map(|(d, _)| d), &how)
+        {
+            g.remove(i);
         }
-        g.push_back((droppable, frame));
+        g.push_back((how, frame));
         self.0.ready.notify_one();
     }
 
     pub fn notify(&self, method: &str, params: &impl serde::Serialize) {
-        // A `tail` is the newest slice of a running form's output. If the
-        // client is too far behind to have read the last one, it has no use
-        // for it at all -- the next carries the same ground.
-        let droppable = method == "tail" || method == "cert_tail";
+        let params = serde_json::to_value(params).expect("serialize params");
+        let how = match method {
+            "tail" | "cert_tail" => Discard::Stale,
+            // Only `state` is superseded by its own successor. A `unit` is a
+            // fact about one form and nothing later repeats it; a `settled`
+            // is an answer somebody is waiting for.
+            "state" => match params.get("book").and_then(|b| b.as_str()) {
+                Some(book) => Discard::Superseded(book.to_string()),
+                None => Discard::Keep,
+            },
+            _ => Discard::Keep,
+        };
         self.push(&json!({
             "jsonrpc": "2.0",
             "method": method,
-            "params": serde_json::to_value(params).expect("serialize params"),
-        }), droppable);
+            "params": params,
+        }), how);
     }
 
     /// Wait, briefly, for queued frames to reach the client.
@@ -914,6 +964,56 @@ mod tests {
     fn a_flag_missing_its_value_says_which() {
         assert!(policy_from_args(args(&["--trusted"])).unwrap_err().contains("--trusted"));
         assert!(policy_from_args(args(&["--default"])).unwrap_err().contains("--default"));
+    }
+
+    // ---- what the out queue drops under backlog -----------------------------
+    //
+    // Reached only when the client has stopped reading, which is the condition
+    // the queue exists to survive -- so it is the branch least likely to be
+    // exercised by anything but the incident it was written for. It needs no
+    // client and no process: which frame goes is a function of what is queued.
+
+    fn state(book: &str) -> Discard {
+        Discard::Superseded(book.to_string())
+    }
+
+    #[test]
+    fn a_stale_frame_goes_before_anything_else() {
+        let q = [Discard::Keep, state("b1"), Discard::Stale, state("b1")];
+        assert_eq!(victim(q.iter(), &state("b1")), Some(2), "the tail, not a state");
+    }
+
+    /// The property the whole distinction exists for.
+    ///
+    /// A `state` is a whole repaint, so an older one really is superseded by a
+    /// newer one -- but only if a newer one exists. Dropping unconditionally,
+    /// as `Stale` does, would let the *last* state of a settled book be the one
+    /// discarded, and nothing that follows carries the units: `settled` has a
+    /// reason and a revision and no unit list. The client would paint a stale
+    /// gutter for ever, with no event left to correct it.
+    #[test]
+    fn a_state_goes_only_to_a_newer_state_for_its_own_book() {
+        let q = [state("b1"), Discard::Keep];
+        assert_eq!(victim(q.iter(), &state("b1")), Some(0), "superseded");
+        assert_eq!(victim(q.iter(), &state("b2")), None, "another book supersedes nothing");
+        assert_eq!(victim(q.iter(), &Discard::Keep), None, "nor does a reply");
+    }
+
+    /// Oldest-first among equals, so the queue drains in order and the newest
+    /// repaint is the one that survives.
+    #[test]
+    fn the_oldest_superseded_state_goes_first() {
+        let q = [state("b1"), state("b2"), state("b1")];
+        assert_eq!(victim(q.iter(), &state("b1")), Some(0));
+    }
+
+    /// Nothing may go, so the caller queues past the limit. Growing is bad;
+    /// leaving a client waiting for a reply that was thrown away is worse.
+    #[test]
+    fn a_backlog_of_only_answers_yields_no_victim() {
+        let q = [Discard::Keep, Discard::Keep];
+        assert_eq!(victim(q.iter(), &Discard::Keep), None);
+        assert_eq!(victim(q.iter(), &Discard::Stale), None);
     }
 
     // ---- the frame reader ---------------------------------------------------

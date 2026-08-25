@@ -174,6 +174,18 @@ struct CertifyArgs {
     jobs: Option<usize>,
 }
 
+/// How long `acl2_status` will try for the book lock before answering without
+/// it: `STATUS_LOCK_TRIES` sleeps of `STATUS_LOCK_STEP`, so fifty milliseconds.
+///
+/// Sized to cover contention and nothing else. The lock is held for an instant
+/// between submissions -- worth waiting out, because the answer on the other
+/// side is the real one -- and for minutes by a rollback or a blocked
+/// deadline, which is not. Fifty milliseconds is far past the first and
+/// nowhere near the second, so the tool's "does not wait" stays true in the
+/// sense a caller means it.
+const STATUS_LOCK_TRIES: usize = 10;
+const STATUS_LOCK_STEP: std::time::Duration = std::time::Duration::from_millis(5);
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct StatusArgs {
     session_id: String,
@@ -558,31 +570,63 @@ impl Acl2Mcp {
                             build: build_stamp(&control),
                         })
                     }
-                    // Contended for an instant between submissions: a brief
-                    // wait is bounded and honest.
+                    // Nothing in flight and no build, but the lock is held.
+                    // Usually that is contention for an instant between
+                    // submissions, and a moment's wait gets the real answer --
+                    // but not always: a rollback takes the lock before it
+                    // submits anything, so early in a long one there is a
+                    // window with no snapshot to read and a lock that will not
+                    // be free for minutes. An unbounded `lock()` here made the
+                    // tool whose contract is "does not wait" wait exactly
+                    // then, which is when a caller most wants an answer.
+                    //
+                    // So: bounded. If the lock does not come free, answer from
+                    // the control block, which is not a guess -- `snapshot()`
+                    // being empty is the reader thread's own word that no form
+                    // is in the prover. What holds the lock is bookkeeping.
                     None => {
-                        let mut b = book.lock().map_err(|e| e.to_string())?;
-                        let unit = b.running_unit();
-                        let build = b.build_progress(n).as_ref().map(wire::build_progress);
-                        let p = b.progress(n).map_err(|e| e.to_string())?;
-                        Ok(match p {
-                            Some(p) => wire::ProgressReply {
-                                running: true,
-                                unit_index: unit,
-                                elapsed_ms: p.elapsed.as_millis(),
-                                tail: p.tail,
-                                bytes_so_far: p.bytes_so_far,
-                                build,
-                            },
-                            None => wire::ProgressReply {
+                        let mut held = None;
+                        for _ in 0..STATUS_LOCK_TRIES {
+                            if let Ok(b) = book.try_lock() {
+                                held = Some(b);
+                                break;
+                            }
+                            std::thread::sleep(STATUS_LOCK_STEP);
+                        }
+                        match held {
+                            Some(mut b) => {
+                                let unit = b.running_unit();
+                                let build =
+                                    b.build_progress(n).as_ref().map(wire::build_progress);
+                                let p = b.progress(n).map_err(|e| e.to_string())?;
+                                Ok(match p {
+                                    Some(p) => wire::ProgressReply {
+                                        running: true,
+                                        unit_index: unit,
+                                        elapsed_ms: p.elapsed.as_millis(),
+                                        tail: p.tail,
+                                        bytes_so_far: p.bytes_so_far,
+                                        build,
+                                    },
+                                    None => wire::ProgressReply {
+                                        running: false,
+                                        unit_index: None,
+                                        elapsed_ms: 0,
+                                        tail: String::new(),
+                                        bytes_so_far: 0,
+                                        build,
+                                    },
+                                })
+                            }
+                            None => Ok(wire::ProgressReply {
                                 running: false,
                                 unit_index: None,
                                 elapsed_ms: 0,
                                 tail: String::new(),
                                 bytes_so_far: 0,
-                                build,
-                            },
-                        })
+                                build: build_stamp(&control),
+                            }),
+                        }
                     }
                 },
             }
