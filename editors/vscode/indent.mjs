@@ -228,6 +228,54 @@ plan('and the same line is left alone by a whole-buffer pass',
 plan('Enter after a finished form lands at column zero',
      `(defun f (x) 1)\n`, 1, 0, { blankLines: 'indent' });
 
+// CRLF. `split('\n')` leaves the `\r` on every line, and read as content it
+// makes a blank line non-blank -- so blank lines inside a form were indented,
+// gaining trailing whitespace, and the whole-document edit built from that
+// embedded a bare `\r` which VSCode read as a line break of its own. Every
+// Format Document grew the file.
+{
+  const crlf = (s) => s.replace(/\n/g, '\r\n');
+  const cases = [
+    ['a blank line stays blank', '(defun f (x)\n\n  x)\n', '(defun f (x)\n\n  x)\n'],
+    ['a whitespace-only line is still cleared', '(defun f (x)\n   \nx)\n', '(defun f (x)\n\n  x)\n'],
+    ['and ordinary lines still indent', '(defun f (x)\nx)\n', '(defun f (x)\n  x)\n'],
+  ];
+  for (const [what, src, want] of cases) {
+    const got = reindent(crlf(src));
+    const ok = got === crlf(want);
+    if (!ok) unitBad++;
+    console.log(
+      `${ok ? 'ok' : 'FAIL'}: ${what}, with CRLF` +
+        (ok ? '' : `\n--- got ---\n${JSON.stringify(got)}\n--- want ---\n${JSON.stringify(crlf(want))}`)
+    );
+  }
+  // The terminator is carried through untouched, so the pass cannot convert
+  // a file's line endings behind the reader's back.
+  const mixed = reindent('(defun f (x)\r\nx)\n');
+  const ok = mixed === '(defun f (x)\r\n  x)\n';
+  if (!ok) unitBad++;
+  console.log(`${ok ? 'ok' : 'FAIL'}: each line keeps the terminator it had`);
+}
+
+// A top-level form that does not start in column 0. The keystroke path seeds
+// its column counter from the enclosing form's *offset* where its *line*
+// belongs, so every column on that line came out short by the form's own
+// column -- and only on this shape, which is why it survived.
+{
+  const text = '(defun a (x) x) (defun b (y)\n(g y))\n';
+  const starts = topLevelStarts(text);
+  const lineStart = text.indexOf('\n') + 1;
+  const onType = plannedIndent(text, lineStart, starts);
+  const ranged = reindentRange(text, starts, 1, 1)[0];
+  const want = 18; // `(defun b` opens at column 16; its body is two in.
+  const ok = onType === want && ranged === ' '.repeat(want) + '(g y))';
+  if (!ok) unitBad++;
+  console.log(
+    `${ok ? 'ok' : 'FAIL'}: two forms on a line -- Tab and Format Selection agree` +
+      (ok ? '' : ` (on-type ${onType}, range ${JSON.stringify(ranged)}, want ${want})`)
+  );
+}
+
 // The reader's own escapes. A construct the lexer fails to recognise does not
 // cost one token, it costs the rest of the form: the open-stack desynchronises
 // and every line below is indented against the wrong depth. The grammar and the

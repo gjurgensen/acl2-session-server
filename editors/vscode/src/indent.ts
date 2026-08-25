@@ -507,6 +507,15 @@ export function lookupKey(atom: string): string {
  * The answer is a column, and it is the caller's business to decide whether
  * a line inside a string or a block comment should be moved at all -- see
  * {@link reindent}, which does not.
+ *
+ * `fromLine` is the offset of the *line* `from` sits on, and is not `from`:
+ * it seeds the column counter, so passing the anchor's own offset makes every
+ * delimiter on that line report `column = offset - anchor` -- zero for the
+ * anchor itself -- and every branch that reads a column then computes from a
+ * number that is short by the anchor's real column. It only matters when a
+ * top-level form does not start in column 0, which is exactly the
+ * two-forms-on-one-line case. Callers that supply `open0` are unaffected:
+ * the stack is already built and this seeds nothing.
  */
 export function indentFor(
   text: string,
@@ -782,16 +791,28 @@ export function reindent(text: string, opts: IndentOptions = {}): string {
       // above it can affect how anything inside it is indented.
       from = lineStart;
     }
-    const rest = line.slice(leading(line));
+    // A CRLF document splits on `\n` into lines that still carry their `\r`,
+    // and that `\r` is the terminator rather than content: read as content it
+    // made every blank line non-blank -- `\r` is not `''` -- so blank lines
+    // inside a form were indented, gaining trailing whitespace, and the edit
+    // built from the result embedded a bare `\r` that VSCode then read as a
+    // line break of its own. Every Format Document grew the file.
+    //
+    // Split off and re-attached rather than special-cased, so nothing below
+    // has to think about it and no later rule can forget.
+    const cr = line.endsWith('\r') ? '\r' : '';
+    const body = cr ? line.slice(0, -1) : line;
+    const rest = body.slice(leading(body));
     let emitted: string;
-    if (opaque || keepsOwnColumn(line)) {
-      emitted = line;
+    if (opaque || keepsOwnColumn(body)) {
+      emitted = body;
     } else if (rest.length === 0) {
       emitted = '';
     } else {
       const want = indentFor(out, lineStart, from, from, opts, st.stack);
       emitted = ' '.repeat(Math.max(0, want)) + rest;
     }
+    emitted += cr;
     out += emitted;
     if (n !== lines.length - 1) {
       out += '\n';
@@ -980,5 +1001,12 @@ export function plannedIndent(
   if (insideOpaque(text, from, lineStart)) {
     return undefined;
   }
-  return indentFor(text, lineStart, from, from, opts);
+  // The anchor's *line*, not the anchor. `(defun a (x) x) (defun b (y)` puts
+  // a top-level form at column 16, and seeding the column counter at the form
+  // rather than at its line made every column on that line 16 too small: the
+  // body of `b` was planned at 2 where the whole-buffer pass says 18. On-type
+  // Enter, Tab, and on-type `)` all came through here, so the keystroke path
+  // and Format Selection disagreed about the same text.
+  const fromLine = text.lastIndexOf('\n', from - 1) + 1;
+  return indentFor(text, lineStart, from, fromLine, opts);
 }

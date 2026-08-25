@@ -178,7 +178,15 @@ function indentRangeEdits(doc: vscode.TextDocument, first: number, last: number)
     }
     const a = text.split('\n');
     const b = out.split('\n');
-    const lead = (l: string): number => l.length - l.trimStart().length;
+    // Counted on the line without its `\r`, because that is the line VSCode
+    // will give the edit: `TextLine.text` excludes the terminator, so a lead
+    // measured with the `\r` in it addresses one character past end of line.
+    // On a blank CRLF line -- where `trimStart` eats the `\r` too -- that is
+    // exactly the overrun that let a bare `\r` into the replacement text.
+    const lead = (l: string): number => {
+      const t = l.endsWith('\r') ? l.slice(0, -1) : l;
+      return t.length - t.trimStart().length;
+    };
     const edits: vscode.TextEdit[] = [];
     for (let i = 0; i < a.length; i++) {
       if (a[i] === b[i]) {
