@@ -9,11 +9,19 @@
 //!
 //! # Why this is its own module
 //!
-//! Every probe is a *pair*: a string that decides what ACL2 prints, and a
-//! parser that reads exactly that. The two have to agree precisely, and they
-//! are the only things in the crate that do — so they belong beside each other
-//! rather than four hundred lines apart, which is where `CHECKPOINT_PROBE` and
-//! `parse_checkpoints` had ended up.
+//! A probe is a *pair*: a string that decides what ACL2 prints, and something
+//! that reads exactly that. The two have to agree precisely, and they are the
+//! only things in the crate that do — so they belong beside each other rather
+//! than four hundred lines apart, which is where `CHECKPOINT_PROBE` and
+//! `parse_checkpoints` had ended up. The sections below are one per probe, in
+//! that pairing.
+//!
+//! Not every probe has a parser *here*. Five do — `inner`, `evd`, `ckpt`,
+//! `census`, and the value block — and for the rest the reading is a few lines
+//! inside the `Book` method that asked the question, where it is bound up with
+//! caching the answer or comparing it against a baseline. Those stayed put:
+//! splitting `Book` to chase symmetry is exactly what this seam was chosen to
+//! avoid. Each section says which case it is.
 //!
 //! The seam is real rather than tidy: nothing here touches [`Book`] or the
 //! session. A probe is submitted by the caller and its output arrives as a
@@ -50,7 +58,11 @@ use super::{
 };
 use crate::split::split;
 
-// ---- The forms this crate submits --------------------------------------------
+// ---- Setting up, and asking where we are ---------------------------------------
+//
+// Neither of these has a parser of its own: `CLEAR_STALE` prints nothing,
+// and `CMD_PROBE`'s two values are one-line `PROBE-DATA` markers that a
+// caller reads straight off the `Submission` with `get`.
 
 /// Clear the state ACL2 leaves behind from earlier events.
 ///
@@ -67,6 +79,29 @@ pub(super) const CLEAR_STALE: &str = "(acl2::pprogn \
     (acl2::f-put-global 'acl2::last-event-data acl2::nil acl2::state) \
     (acl2::f-put-global 'acl2::event-data-fal 'acl2::event-data-fal acl2::state) \
     (acl2::value :invisible))";
+
+/// Report the command number and current package, one short marker each.
+///
+/// `cmd` is how every fast path is verified (P3): rollback and eval-undo
+/// check the world landed where the record says. `pkg` records the one thing
+/// `ubu!` cannot restore -- the reader's package is state, not world -- so
+/// rollback re-establishes it explicitly. Both values are short; the one-line
+/// marker protocol is safe for them (see `Submission::data`).
+pub(super) const CMD_PROBE: &str = "(acl2::prog2$ \
+    (acl2::cw \"~%<<<PROBE-DATA cmd ~x0>>>~%<<<PROBE-DATA pkg ~x1>>>~%\
+<<<PROBE-DATA ndeps ~x2>>>~%\" \
+      (acl2::max-absolute-command-number (acl2::w acl2::state)) \
+      (acl2::f-get-global 'acl2::current-package acl2::state) \
+      (acl2::len (acl2::global-val 'acl2::include-book-alist-all \
+        (acl2::w acl2::state)))) \
+    (acl2::value :invisible))";
+
+// ---- What the session was handed, and what it rests on -------------------------
+//
+// Both are read in `Book`, where what they answer is used: the inherited
+// output settings decide whether proofs can be captured at all, and the
+// dependency count is compared against a baseline rather than parsed into
+// anything.
 
 /// Take ownership of the settings that decide what gets *captured*, while
 /// leaving the ones that decide what is *provable* exactly as inherited.
@@ -102,22 +137,6 @@ pub(super) const OWN_OUTPUT: &str = "(acl2::prog2$ \
         (acl2::remove-eq 'acl2::prove (acl2::@ acl2::inhibit-output-lst))) \
       (acl2::value acl2::nil)))";
 
-/// Report the command number and current package, one short marker each.
-///
-/// `cmd` is how every fast path is verified (P3): rollback and eval-undo
-/// check the world landed where the record says. `pkg` records the one thing
-/// `ubu!` cannot restore -- the reader's package is state, not world -- so
-/// rollback re-establishes it explicitly. Both values are short; the one-line
-/// marker protocol is safe for them (see `Submission::data`).
-pub(super) const CMD_PROBE: &str = "(acl2::prog2$ \
-    (acl2::cw \"~%<<<PROBE-DATA cmd ~x0>>>~%<<<PROBE-DATA pkg ~x1>>>~%\
-<<<PROBE-DATA ndeps ~x2>>>~%\" \
-      (acl2::max-absolute-command-number (acl2::w acl2::state)) \
-      (acl2::f-get-global 'acl2::current-package acl2::state) \
-      (acl2::len (acl2::global-val 'acl2::include-book-alist-all \
-        (acl2::w acl2::state)))) \
-    (acl2::value :invisible))";
-
 /// Name every book the world was built from, newest first.
 ///
 /// `include-book-alist-all` rather than `include-book-alist`, and the
@@ -152,212 +171,12 @@ pub(super) const DEPS_PROBE: &str = r#"(acl2::prog2$
       (acl2::cw "<<<PROBE-END deps>>>~%")
       (acl2::value :invisible))))"#;
 
-/// Report what ACL2 recorded about the event just executed.
-///
-/// Must run *before* the `deflabel`: `get-event-data` describes the
-/// immediately preceding event, and planting a label first would make it
-/// describe the label.
-pub(super) const EVENT_DATA_PROBE: &str = r#"(acl2::prog2$
-  (acl2::cw "~%<<<PROBE-BEGIN evd>>>~%steps ~x0~%time ~x1~%"
-    (acl2::get-event-data 'acl2::prover-steps-counted acl2::state)
-    (acl2::get-event-data 'acl2::time acl2::state))
-  (acl2::prog2$
-    (acl2::cw "~*0"
-      (acl2::list "" "warning ~x*~%" "warning ~x*~%" "warning ~x*~%"
-        (acl2::get-event-data 'acl2::warnings acl2::state)))
-  (acl2::prog2$
-    (acl2::cw "~*0"
-      (acl2::list "" "rule ~x*~%" "rule ~x*~%" "rule ~x*~%"
-        (acl2::get-event-data 'acl2::rules acl2::state)))
-    (acl2::prog2$
-      (acl2::cw "~*0"
-        (acl2::list "" "hint ~x*~%" "hint ~x*~%" "hint ~x*~%"
-          (acl2::get-event-data 'acl2::hint-events acl2::state)))
-      (acl2::prog2$
-        (acl2::cw "~*0"
-          (acl2::list "" "splitter ~x*~%" "splitter ~x*~%" "splitter ~x*~%"
-            (acl2::get-event-data 'acl2::splitter-rules acl2::state)))
-        (acl2::prog2$
-          (acl2::cw "<<<PROBE-END evd>>>~%")
-          (acl2::value :invisible)))))))"#;
-
-/// Report the key checkpoints of the most recent failed proof.
-///
-/// Deliberately introduces **nothing** into the ACL2 world: it is one
-/// expression built from `access`, `nth` and `prettyify-clause`, all ACL2
-/// built-ins. An earlier version included
-/// `books/kestrel/utilities/checkpoints`, which was simpler but added fourteen
-/// function definitions -- each carrying definition and type-prescription
-/// runes -- to a world that is supposed to look like a plain interactive
-/// session. Nothing would ever have mentioned those functions, but "would
-/// never" is not a guarantee, and the names were a real collision surface.
-///
-/// Split across several `cw` calls because ACL2's fmt directives index
-/// arguments `~x0` to `~x9` only -- and `~xa` is not an argument reference at
-/// all.
-///
-/// Each slot reports its goal *name* alongside the term, rendered by
-/// `tilde-@-clause-id-phrase` from the gag-info's clause-id -- `Subgoal
-/// *1/2''` exactly as ACL2 prints it, which is exactly what a goal-addressed
-/// output slice takes. Empty when the slot is empty, so the parser can tell
-/// "no name" from "no checkpoint".
-///
-/// A fixed number of slots is read rather than mapping over the stacks,
-/// because `state` is not available inside a `loop$` body and defining a
-/// recursive helper would reintroduce exactly the world modification being
-/// avoided. `nth` past the end returns `nil` and the whole chain degrades to
-/// `NIL`, so out-of-range slots are harmless. The true stack lengths are
-/// reported alongside, so a client can tell when there were more.
-/// Key checkpoints, read from the saved gag-state.
-///
-/// The top-level stack is taken from `abort-info` in preference to
-/// `:top-stack`, which is what ACL2's own printer does
-/// (`history-management.lisp`: `(top-stack (or abort-stack top-stack0))`).
-/// The two differ exactly when a proof reverts to induction: ACL2 then
-/// replaces `:top-stack` with a placeholder whose clause is the literal
-/// symbol `<goal>` and moves the real pre-revert checkpoints into
-/// `abort-info`. Reading `:top-stack` alone therefore reported `<goal>` as
-/// the checkpoint while the actual term sat in the log.
-pub(super) const CHECKPOINT_PROBE: &str = r#"(acl2::let*
-  ((acl2::gs (acl2::f-get-global 'acl2::gag-state-saved acl2::state))
-   (acl2::ai (acl2::access acl2::gag-state acl2::gs :abort-info))
-   (acl2::as (acl2::abort-info-stack acl2::ai))
-   (acl2::tp (acl2::or acl2::as
-                       (acl2::access acl2::gag-state acl2::gs :top-stack)))
-   (acl2::sb (acl2::access acl2::gag-state acl2::gs :sub-stack))
-   (acl2::wr (acl2::w acl2::state)))
-  (acl2::prog2$
-    (acl2::cw "~%<<<PROBE-BEGIN ckpt>>>~%gag ~x0~%ntop ~x1~%nsub ~x2~%forced ~x3~%abort ~x4~%reverted ~x5~%"
-      (acl2::if acl2::gs acl2::t acl2::nil)
-      (acl2::len acl2::tp)
-      (acl2::len acl2::sb)
-      (acl2::access acl2::gag-state acl2::gs :forcep)
-      (acl2::abort-info-cause acl2::ai)
-      (acl2::if acl2::as acl2::t acl2::nil))
-    (acl2::prog2$
-      (acl2::cw "top0 ~x0~%top1 ~x1~%top2 ~x2~%sub0 ~x3~%sub1 ~x4~%sub2 ~x5~%"
-        (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 0 acl2::tp) :clause) acl2::nil acl2::wr)
-        (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 1 acl2::tp) :clause) acl2::nil acl2::wr)
-        (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 2 acl2::tp) :clause) acl2::nil acl2::wr)
-        (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 0 acl2::sb) :clause) acl2::nil acl2::wr)
-        (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 1 acl2::sb) :clause) acl2::nil acl2::wr)
-        (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 2 acl2::sb) :clause) acl2::nil acl2::wr))
-      (acl2::prog2$
-        (acl2::cw "tid0 ~@0~%tid1 ~@1~%tid2 ~@2~%sid0 ~@3~%sid1 ~@4~%sid2 ~@5~%<<<PROBE-END ckpt>>>~%"
-          (acl2::if (acl2::nth 0 acl2::tp)
-            (acl2::tilde-@-clause-id-phrase (acl2::access acl2::gag-info (acl2::nth 0 acl2::tp) :clause-id)) "")
-          (acl2::if (acl2::nth 1 acl2::tp)
-            (acl2::tilde-@-clause-id-phrase (acl2::access acl2::gag-info (acl2::nth 1 acl2::tp) :clause-id)) "")
-          (acl2::if (acl2::nth 2 acl2::tp)
-            (acl2::tilde-@-clause-id-phrase (acl2::access acl2::gag-info (acl2::nth 2 acl2::tp) :clause-id)) "")
-          (acl2::if (acl2::nth 0 acl2::sb)
-            (acl2::tilde-@-clause-id-phrase (acl2::access acl2::gag-info (acl2::nth 0 acl2::sb) :clause-id)) "")
-          (acl2::if (acl2::nth 1 acl2::sb)
-            (acl2::tilde-@-clause-id-phrase (acl2::access acl2::gag-info (acl2::nth 1 acl2::sb) :clause-id)) "")
-          (acl2::if (acl2::nth 2 acl2::sb)
-            (acl2::tilde-@-clause-id-phrase (acl2::access acl2::gag-info (acl2::nth 2 acl2::sb) :clause-id)) ""))
-        (acl2::value :invisible)))))"#;
-
-/// What ACL2 recorded about the form that was just interrupted.
-///
-/// `last-event-data` survives an interrupt on current ACL2: measured,
-/// `(abort-causes interrupt)`, the true elapsed prove time, and the
-/// interrupted event are all present. (An earlier measurement on an older
-/// build recorded the contrary; it no longer holds.) The event form can be
-/// arbitrarily large, so it prints under an evisc tuple -- this is an
-/// envelope, not the record; the record is the partial capture.
-///
-/// The caller trusts this only when `iabort` actually names an interrupt.
-/// Sync units and evals both run `CLEAR_STALE` first, so the record is
-/// normally fresh; the gate stays as belt-and-braces for the paths that do
-/// not clear (a raw submission, a handshake).
-pub(super) const INTERRUPT_PROBE: &str = r#"(acl2::prog2$
-  (acl2::cw "~%<<<PROBE-BEGIN intr>>>~%iabort ~x0~%itime ~x1~%isteps ~x2~%"
-    (acl2::get-event-data 'acl2::abort-causes acl2::state)
-    (acl2::get-event-data 'acl2::time acl2::state)
-    (acl2::get-event-data 'acl2::prover-steps-counted acl2::state))
-  (acl2::prog2$
-    (acl2::cw "ievent ~Y01~%<<<PROBE-END intr>>>~%"
-      (acl2::or (acl2::get-event-data 'acl2::event acl2::state)
-                (acl2::get-event-data 'acl2::form acl2::state))
-      (acl2::evisc-tuple 3 8 acl2::nil acl2::nil))
-    (acl2::value :invisible)))"#;
-
-/// Every name in the world, with its kind and the book that defines it.
-///
-/// **The key is property triples, not event landmarks.**
-/// `access-event-tuple-namex` and friends are unbadged `:logic` functions, so
-/// ACL2 rejects any `loop$` that mentions them, and inlining bottoms out in
-/// more unbadged functions. The world is a list of `(symbol key . value)`
-/// triples, so the name is `(car tr)` and the kind is `(cadr tr)` -- pure
-/// `car`/`cdr`/`eq`, all badged. Four keys carry the names worth having.
-///
-/// Attribution rides the same walk: `include-book-path` global-value triples
-/// are interleaved in the world exactly as `pe` relies on. **Their
-/// orientation is the trap.** The world is newest-first and `global-val`
-/// scans toward *older* entries, so a name is met *before* the marker that
-/// governs it -- the applicable book is the *next* marker in the walk, not
-/// the previous one. Reading it the intuitive way attributes every book's
-/// contents to the book included before it. The interleaving is emitted as
-/// it stands and reassembled in Rust, where it is testable.
-///
-/// `in` over the world, never `from`/`to`: the `loop$` index list
-/// materialisation cost 33 GB and a machine.
-pub(super) const CENSUS_PROBE: &str = r#"(acl2::prog2$
-  (acl2::cw "~%<<<PROBE-BEGIN census>>>~%")
-  (acl2::prog2$
-    (acl2::cw "~*0"
-      (acl2::list "" "~x*~%" "~x*~%" "~x*~%"
-        (loop$ for acl2::tr in (acl2::w acl2::state)
-               when (or (eq (cadr acl2::tr) 'acl2::formals)
-                        (eq (cadr acl2::tr) 'acl2::theorem)
-                        (eq (cadr acl2::tr) 'acl2::macro-args)
-                        (eq (cadr acl2::tr) 'acl2::const)
-                        (and (eq (car acl2::tr) 'acl2::include-book-path)
-                             (eq (cadr acl2::tr) 'acl2::global-value)))
-               collect (if (eq (car acl2::tr) 'acl2::include-book-path)
-                           (cons :path (car (cddr acl2::tr)))
-                         (cons (car acl2::tr) (cadr acl2::tr))))))
-    (acl2::prog2$
-      (acl2::cw "<<<PROBE-END census>>>~%")
-      (acl2::value :invisible))))"#;
-
-/// Every documented topic's name and one-line summary.
-///
-/// Two parallel blocks rather than one stream of pairs, because a `~*` element
-/// is substituted whole and a short is a *string* -- ACL2 rewraps it across
-/// lines, so pairs on one line would need the parser to tell a wrapped short
-/// from the next entry. Two blocks in table order zip without ambiguity, and
-/// `keyed_block` folds each wrapped value back together on its own.
-///
-/// Only `:short`. `:long` is fetched per topic when someone opens it: shorts
-/// are a sentence apiece and worth having resident for hover, longs are not.
-///
-/// **This probe names the XDOC package, so it fails to *read* in a world that
-/// has none** -- which is an ordinary outcome, not a bug: a bare image simply
-/// has no xdoc. The failure is contained because `query` re-probes the command
-/// number after a failed submission, and the caller caches the emptiness so it
-/// is attempted once.
-pub(super) const DOC_INDEX_PROBE: &str = r#"(acl2::let ((acl2::tbl (xdoc::get-xdoc-table (acl2::w acl2::state))))
-  (acl2::prog2$
-    (acl2::cw "~%<<<PROBE-BEGIN docnames>>>~%")
-    (acl2::prog2$
-      (acl2::cw "~*0"
-        (acl2::list "" "n ~x*~%" "n ~x*~%" "n ~x*~%"
-          (loop$ for acl2::x in acl2::tbl
-                 collect (acl2::cdr (acl2::assoc-eq :name acl2::x)))))
-      (acl2::prog2$
-        (acl2::cw "<<<PROBE-END docnames>>>~%<<<PROBE-BEGIN docshorts>>>~%")
-        (acl2::prog2$
-          (acl2::cw "~*0"
-            (acl2::list "" "s ~x*~%" "s ~x*~%" "s ~x*~%"
-              (loop$ for acl2::x in acl2::tbl
-                     collect (acl2::cdr (acl2::assoc-eq :short acl2::x)))))
-          (acl2::prog2$
-            (acl2::cw "<<<PROBE-END docshorts>>>~%")
-            (acl2::value :invisible)))))))"#;
-
-// ---- The ones a caller has to build ------------------------------------------
+// ---- The events inside one form, and their parser ------------------------------
+//
+// `iname` and its siblings print one line per element under a repeated
+// prefix, which is what makes the parse independent of the width ACL2
+// formatted for -- a value may wrap, but only onto lines that do not carry
+// the prefix.
 
 /// Report the events ACL2 recorded *inside* this unit.
 ///
@@ -474,6 +293,474 @@ pub(super) fn inner_events_probe(limit: usize) -> String {
     )
 }
 
+pub(super) fn parse_inner(sub: &crate::session::Submission) -> (Vec<InnerEvent>, usize, Vec<String>) {
+    let Some(body) = sub.block("inner") else { return (Vec::new(), 0, Vec::new()) };
+    let pairs =
+        keyed_block(body, &["iname", "iclq", "ik", "ia", "inx", "it", "is", "irune"]);
+    // Every name, not a sample of them. A `defines` clique introduces far more
+    // than three events, and a list of three that looks complete is worse than
+    // a long one: the reporter found two of a clique's own functions in the
+    // world and absent from this list, with nothing to say it was truncated.
+    let names = items(&pairs, "iname");
+    // Members of any recursion clique these events belong to, flat and
+    // unordered. ACL2 records a `mutual-recursion` as *one* event, so the
+    // other members are nowhere in `iname`; asking the world for
+    // `recursivep` is the only way to learn they exist. Emitted only for
+    // cliques of more than one, so an ordinary book carries an empty stream.
+    // Only the names the events did not already carry: the probe emits a
+    // `recursivep` list for every recursive function, which for the ordinary
+    // singly-recursive one is just its own name back.
+    let clique: Vec<String> =
+        items(&pairs, "iclq").into_iter().filter(|c| !names.contains(c)).collect();
+    // The per-event fields are positional: the probe's loop$ collects visit
+    // the same (limited) prefix of the fal in the same order the names walk
+    // it, and print one line per event, `nil` included. `event-data-fal` is
+    // newest-first and a compound form stops at the event that failed, so
+    // **the failing event is always at index 0** -- the default detail depth
+    // never misses it. Beyond the probed prefix the fields are simply absent,
+    // which is how a consumer tells "no rules" from "rules not read".
+    let kinds = items_positional(&pairs, "ik");
+    let aborts = items_positional(&pairs, "ia");
+    let namexes = items_positional(&pairs, "inx");
+    let times = items_positional(&pairs, "it");
+    let steps = items_positional(&pairs, "is");
+    // Runes arrive index-tagged -- `(3 :rewrite foo)` is event 3's
+    // `(:rewrite foo)` -- so the per-event lists survive one flat stream.
+    // The envelope is ours (index, space, rune, closing paren), so peeling
+    // it is sentinel parsing, not prose parsing.
+    let mut rules: Vec<Vec<String>> = vec![Vec::new(); names.len()];
+    for pair in items(&pairs, "irune") {
+        let Some(bare) = pair.strip_prefix('(').and_then(|p| p.strip_suffix(')')) else {
+            continue;
+        };
+        let Some((idx, rune)) = bare.split_once(' ') else { continue };
+        let Ok(i) = idx.parse::<usize>() else { continue };
+        if let Some(slot) = rules.get_mut(i) {
+            slot.push(format!("({rune})"));
+        }
+    }
+    let mut out = Vec::new();
+    for (i, name) in names.iter().enumerate() {
+        out.push(InnerEvent {
+            name: name.clone(),
+            abort_causes: failure_causes(aborts.get(i).cloned().flatten()),
+            rules: rules.get(i).cloned().unwrap_or_default(),
+            kind: kinds.get(i).cloned().flatten().map(|v| symbol_name_of(&v)),
+            // Printed as yes/no rather than t/nil, because a nil would be
+            // indistinguishable here from the value having gone missing.
+            has_namex: namexes
+                .get(i)
+                .cloned()
+                .flatten()
+                .map(|v| symbol_name_of(&v) == "yes"),
+            time: times.get(i).cloned().flatten(),
+            prover_steps: steps.get(i).cloned().flatten().and_then(|v| v.parse().ok()),
+        });
+    }
+    let total = out.len();
+    (out, total, clique)
+}
+
+/// Just the names a unit's events introduced, without the rest of the parse.
+///
+/// The scrape wants names and nothing else, and runs on every admitted unit;
+/// `parse_inner` builds the whole report and is the caller's business.
+/// Clique members come along because a `mutual-recursion` is one event whose
+/// siblings appear nowhere in `iname` -- and they are exactly the names a
+/// reader will ask about.
+pub(super) fn inner_names(sub: &crate::session::Submission) -> Vec<String> {
+    let Some(body) = sub.block("inner") else { return Vec::new() };
+    // Every key the block carries, not just the two wanted: `keyed_block`
+    // treats an unrecognised line as a continuation of the previous value,
+    // so naming a subset silently glues the other fields onto the names.
+    let pairs =
+        keyed_block(body, &["iname", "iclq", "ik", "ia", "inx", "it", "is", "irune"]);
+    let mut names = items(&pairs, "iname");
+    for c in items(&pairs, "iclq") {
+        if !names.contains(&c) {
+            names.push(c);
+        }
+    }
+    names
+}
+
+// ---- What ACL2 recorded about the event, and its parser ------------------------
+
+/// Report what ACL2 recorded about the event just executed.
+///
+/// Must run *before* the `deflabel`: `get-event-data` describes the
+/// immediately preceding event, and planting a label first would make it
+/// describe the label.
+pub(super) const EVENT_DATA_PROBE: &str = r#"(acl2::prog2$
+  (acl2::cw "~%<<<PROBE-BEGIN evd>>>~%steps ~x0~%time ~x1~%"
+    (acl2::get-event-data 'acl2::prover-steps-counted acl2::state)
+    (acl2::get-event-data 'acl2::time acl2::state))
+  (acl2::prog2$
+    (acl2::cw "~*0"
+      (acl2::list "" "warning ~x*~%" "warning ~x*~%" "warning ~x*~%"
+        (acl2::get-event-data 'acl2::warnings acl2::state)))
+  (acl2::prog2$
+    (acl2::cw "~*0"
+      (acl2::list "" "rule ~x*~%" "rule ~x*~%" "rule ~x*~%"
+        (acl2::get-event-data 'acl2::rules acl2::state)))
+    (acl2::prog2$
+      (acl2::cw "~*0"
+        (acl2::list "" "hint ~x*~%" "hint ~x*~%" "hint ~x*~%"
+          (acl2::get-event-data 'acl2::hint-events acl2::state)))
+      (acl2::prog2$
+        (acl2::cw "~*0"
+          (acl2::list "" "splitter ~x*~%" "splitter ~x*~%" "splitter ~x*~%"
+            (acl2::get-event-data 'acl2::splitter-rules acl2::state)))
+        (acl2::prog2$
+          (acl2::cw "<<<PROBE-END evd>>>~%")
+          (acl2::value :invisible)))))))"#;
+
+pub(super) fn parse_event_data(sub: &crate::session::Submission) -> EventData {
+    let mut e = EventData::default();
+    let Some(body) = sub.block("evd") else { return e };
+    // ACL2 wraps long values at its right margin, so a value runs until the
+    // next known key rather than to end of line.
+    let done = keyed_block(body, &["steps", "warning", "time", "rule", "hint", "splitter"]);
+    let pick = |k: &str| -> Option<String> {
+        done.iter()
+            .find(|(dk, _)| dk == k)
+            .map(|(_, v)| v.trim().to_string())
+            .filter(|v| !is_nil(v))
+    };
+    // `parse::<i64>()`: the sign carries the step-limit signal. See the field.
+    e.prover_steps = pick("steps").and_then(|v| v.parse().ok());
+    e.rules = items(&done, "rule");
+    e.hint_events = items(&done, "hint");
+    e.splitter_rules = items(&done, "splitter");
+    // Warning kinds are strings, so `~x` prints them quoted; the quotes are
+    // notation, not content.
+    e.warnings = items(&done, "warning")
+        .into_iter()
+        .map(|w| unquote(&w).unwrap_or(w))
+        .collect();
+    e.time = pick("time");
+    e
+}
+
+// ---- Where the proof stopped, and its parser -----------------------------------
+
+/// Report the key checkpoints of the most recent failed proof.
+///
+/// Deliberately introduces **nothing** into the ACL2 world: it is one
+/// expression built from `access`, `nth` and `prettyify-clause`, all ACL2
+/// built-ins. An earlier version included
+/// `books/kestrel/utilities/checkpoints`, which was simpler but added fourteen
+/// function definitions -- each carrying definition and type-prescription
+/// runes -- to a world that is supposed to look like a plain interactive
+/// session. Nothing would ever have mentioned those functions, but "would
+/// never" is not a guarantee, and the names were a real collision surface.
+///
+/// Split across several `cw` calls because ACL2's fmt directives index
+/// arguments `~x0` to `~x9` only -- and `~xa` is not an argument reference at
+/// all.
+///
+/// Each slot reports its goal *name* alongside the term, rendered by
+/// `tilde-@-clause-id-phrase` from the gag-info's clause-id -- `Subgoal
+/// *1/2''` exactly as ACL2 prints it, which is exactly what a goal-addressed
+/// output slice takes. Empty when the slot is empty, so the parser can tell
+/// "no name" from "no checkpoint".
+///
+/// A fixed number of slots is read rather than mapping over the stacks,
+/// because `state` is not available inside a `loop$` body and defining a
+/// recursive helper would reintroduce exactly the world modification being
+/// avoided. `nth` past the end returns `nil` and the whole chain degrades to
+/// `NIL`, so out-of-range slots are harmless. The true stack lengths are
+/// reported alongside, so a client can tell when there were more.
+/// Key checkpoints, read from the saved gag-state.
+///
+/// The top-level stack is taken from `abort-info` in preference to
+/// `:top-stack`, which is what ACL2's own printer does
+/// (`history-management.lisp`: `(top-stack (or abort-stack top-stack0))`).
+/// The two differ exactly when a proof reverts to induction: ACL2 then
+/// replaces `:top-stack` with a placeholder whose clause is the literal
+/// symbol `<goal>` and moves the real pre-revert checkpoints into
+/// `abort-info`. Reading `:top-stack` alone therefore reported `<goal>` as
+/// the checkpoint while the actual term sat in the log.
+pub(super) const CHECKPOINT_PROBE: &str = r#"(acl2::let*
+  ((acl2::gs (acl2::f-get-global 'acl2::gag-state-saved acl2::state))
+   (acl2::ai (acl2::access acl2::gag-state acl2::gs :abort-info))
+   (acl2::as (acl2::abort-info-stack acl2::ai))
+   (acl2::tp (acl2::or acl2::as
+                       (acl2::access acl2::gag-state acl2::gs :top-stack)))
+   (acl2::sb (acl2::access acl2::gag-state acl2::gs :sub-stack))
+   (acl2::wr (acl2::w acl2::state)))
+  (acl2::prog2$
+    (acl2::cw "~%<<<PROBE-BEGIN ckpt>>>~%gag ~x0~%ntop ~x1~%nsub ~x2~%forced ~x3~%abort ~x4~%reverted ~x5~%"
+      (acl2::if acl2::gs acl2::t acl2::nil)
+      (acl2::len acl2::tp)
+      (acl2::len acl2::sb)
+      (acl2::access acl2::gag-state acl2::gs :forcep)
+      (acl2::abort-info-cause acl2::ai)
+      (acl2::if acl2::as acl2::t acl2::nil))
+    (acl2::prog2$
+      (acl2::cw "top0 ~x0~%top1 ~x1~%top2 ~x2~%sub0 ~x3~%sub1 ~x4~%sub2 ~x5~%"
+        (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 0 acl2::tp) :clause) acl2::nil acl2::wr)
+        (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 1 acl2::tp) :clause) acl2::nil acl2::wr)
+        (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 2 acl2::tp) :clause) acl2::nil acl2::wr)
+        (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 0 acl2::sb) :clause) acl2::nil acl2::wr)
+        (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 1 acl2::sb) :clause) acl2::nil acl2::wr)
+        (acl2::prettyify-clause (acl2::access acl2::gag-info (acl2::nth 2 acl2::sb) :clause) acl2::nil acl2::wr))
+      (acl2::prog2$
+        (acl2::cw "tid0 ~@0~%tid1 ~@1~%tid2 ~@2~%sid0 ~@3~%sid1 ~@4~%sid2 ~@5~%<<<PROBE-END ckpt>>>~%"
+          (acl2::if (acl2::nth 0 acl2::tp)
+            (acl2::tilde-@-clause-id-phrase (acl2::access acl2::gag-info (acl2::nth 0 acl2::tp) :clause-id)) "")
+          (acl2::if (acl2::nth 1 acl2::tp)
+            (acl2::tilde-@-clause-id-phrase (acl2::access acl2::gag-info (acl2::nth 1 acl2::tp) :clause-id)) "")
+          (acl2::if (acl2::nth 2 acl2::tp)
+            (acl2::tilde-@-clause-id-phrase (acl2::access acl2::gag-info (acl2::nth 2 acl2::tp) :clause-id)) "")
+          (acl2::if (acl2::nth 0 acl2::sb)
+            (acl2::tilde-@-clause-id-phrase (acl2::access acl2::gag-info (acl2::nth 0 acl2::sb) :clause-id)) "")
+          (acl2::if (acl2::nth 1 acl2::sb)
+            (acl2::tilde-@-clause-id-phrase (acl2::access acl2::gag-info (acl2::nth 1 acl2::sb) :clause-id)) "")
+          (acl2::if (acl2::nth 2 acl2::sb)
+            (acl2::tilde-@-clause-id-phrase (acl2::access acl2::gag-info (acl2::nth 2 acl2::sb) :clause-id)) ""))
+        (acl2::value :invisible)))))"#;
+
+pub(super) fn parse_checkpoints(sub: &crate::session::Submission) -> Checkpoints {
+    let mut c = Checkpoints::default();
+    let Some(body) = sub.block("ckpt") else { return c };
+    let keys = ["gag", "ntop", "nsub", "forced", "abort", "reverted",
+                "top0", "top1", "top2", "sub0", "sub1", "sub2",
+                "tid0", "tid1", "tid2", "sid0", "sid1", "sid2"];
+    let pairs = keyed_block(body, &keys);
+    let get = |k: &str| pairs.iter().find(|(pk, _)| pk == k).map(|(_, v)| v.trim().to_string());
+    c.proof_ran = get("gag").is_some_and(|v| !is_nil(&v));
+    c.n_top = get("ntop").and_then(|v| v.parse().ok()).unwrap_or(0);
+    c.n_sub = get("nsub").and_then(|v| v.parse().ok()).unwrap_or(0);
+    c.forced = get("forced").is_some_and(|v| !is_nil(&v));
+    c.abort_cause = get("abort").filter(|v| !is_nil(v));
+    c.pre_revert = get("reverted").is_some_and(|v| !is_nil(&v));
+    // The goal name arrives on one line; collapse any residual whitespace so
+    // it can be handed straight to a goal-addressed output slice.
+    let goal_of = |k: &str| {
+        get(k)
+            .map(|g| g.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|g| !g.is_empty() && !is_nil(g))
+    };
+    // A term that prettyprints as the literal `nil` is dropped here while
+    // `n_top`/`n_sub` still count it -- the counts are authoritative, the
+    // filter is what keeps genuinely empty slots out.
+    for (term_k, id_k) in [("top0", "tid0"), ("top1", "tid1"), ("top2", "tid2")] {
+        if let Some(v) = get(term_k).filter(|v| !is_nil(v)) {
+            c.top.push(Checkpoint { goal: goal_of(id_k), term: v });
+        }
+    }
+    for (term_k, id_k) in [("sub0", "sid0"), ("sub1", "sid1"), ("sub2", "sid2")] {
+        if let Some(v) = get(term_k).filter(|v| !is_nil(v)) {
+            c.sub.push(Checkpoint { goal: goal_of(id_k), term: v });
+        }
+    }
+    c
+}
+
+// ---- What an interrupted form was doing ----------------------------------------
+//
+// Read in `Book::interrupt`, which is the only caller and the only place
+// the answer means anything.
+
+/// What ACL2 recorded about the form that was just interrupted.
+///
+/// `last-event-data` survives an interrupt on current ACL2: measured,
+/// `(abort-causes interrupt)`, the true elapsed prove time, and the
+/// interrupted event are all present. (An earlier measurement on an older
+/// build recorded the contrary; it no longer holds.) The event form can be
+/// arbitrarily large, so it prints under an evisc tuple -- this is an
+/// envelope, not the record; the record is the partial capture.
+///
+/// The caller trusts this only when `iabort` actually names an interrupt.
+/// Sync units and evals both run `CLEAR_STALE` first, so the record is
+/// normally fresh; the gate stays as belt-and-braces for the paths that do
+/// not clear (a raw submission, a handshake).
+pub(super) const INTERRUPT_PROBE: &str = r#"(acl2::prog2$
+  (acl2::cw "~%<<<PROBE-BEGIN intr>>>~%iabort ~x0~%itime ~x1~%isteps ~x2~%"
+    (acl2::get-event-data 'acl2::abort-causes acl2::state)
+    (acl2::get-event-data 'acl2::time acl2::state)
+    (acl2::get-event-data 'acl2::prover-steps-counted acl2::state))
+  (acl2::prog2$
+    (acl2::cw "ievent ~Y01~%<<<PROBE-END intr>>>~%"
+      (acl2::or (acl2::get-event-data 'acl2::event acl2::state)
+                (acl2::get-event-data 'acl2::form acl2::state))
+      (acl2::evisc-tuple 3 8 acl2::nil acl2::nil))
+    (acl2::value :invisible)))"#;
+
+// ---- A form's value ------------------------------------------------------------
+//
+// The probe is `session::VALUE_PROBE`, which lives beside the submission
+// machinery that always appends it; only the parser is here.
+
+/// Read the `value` block, if the probe left one.
+///
+/// The block is `vkind` and then the printed value. `vkind none` is the
+/// probe having applied ACL2's rule and found nothing to show; a missing
+/// block is the probe never having run, which is what a form that signalled
+/// an error looks like under `:ld-error-action :return!`.
+pub(super) fn parse_value(sub: &crate::session::Submission) -> Option<FormValue> {
+    let body = sub.block("value")?;
+    let mut lines = body.lines();
+    let kind = lines.next()?.strip_prefix("vkind ")?.trim().to_string();
+    if kind == "none" {
+        return None;
+    }
+    let text = lines.collect::<Vec<_>>().join("\n").trim().to_string();
+    if text.is_empty() {
+        return None;
+    }
+    Some(FormValue { text, triple: kind == "triple" })
+}
+
+// ---- Every name in the world, and its parser -----------------------------------
+
+/// Every name in the world, with its kind and the book that defines it.
+///
+/// **The key is property triples, not event landmarks.**
+/// `access-event-tuple-namex` and friends are unbadged `:logic` functions, so
+/// ACL2 rejects any `loop$` that mentions them, and inlining bottoms out in
+/// more unbadged functions. The world is a list of `(symbol key . value)`
+/// triples, so the name is `(car tr)` and the kind is `(cadr tr)` -- pure
+/// `car`/`cdr`/`eq`, all badged. Four keys carry the names worth having.
+///
+/// Attribution rides the same walk: `include-book-path` global-value triples
+/// are interleaved in the world exactly as `pe` relies on. **Their
+/// orientation is the trap.** The world is newest-first and `global-val`
+/// scans toward *older* entries, so a name is met *before* the marker that
+/// governs it -- the applicable book is the *next* marker in the walk, not
+/// the previous one. Reading it the intuitive way attributes every book's
+/// contents to the book included before it. The interleaving is emitted as
+/// it stands and reassembled in Rust, where it is testable.
+///
+/// `in` over the world, never `from`/`to`: the `loop$` index list
+/// materialisation cost 33 GB and a machine.
+pub(super) const CENSUS_PROBE: &str = r#"(acl2::prog2$
+  (acl2::cw "~%<<<PROBE-BEGIN census>>>~%")
+  (acl2::prog2$
+    (acl2::cw "~*0"
+      (acl2::list "" "~x*~%" "~x*~%" "~x*~%"
+        (loop$ for acl2::tr in (acl2::w acl2::state)
+               when (or (eq (cadr acl2::tr) 'acl2::formals)
+                        (eq (cadr acl2::tr) 'acl2::theorem)
+                        (eq (cadr acl2::tr) 'acl2::macro-args)
+                        (eq (cadr acl2::tr) 'acl2::const)
+                        (and (eq (car acl2::tr) 'acl2::include-book-path)
+                             (eq (cadr acl2::tr) 'acl2::global-value)))
+               collect (if (eq (car acl2::tr) 'acl2::include-book-path)
+                           (cons :path (car (cddr acl2::tr)))
+                         (cons (car acl2::tr) (cadr acl2::tr))))))
+    (acl2::prog2$
+      (acl2::cw "<<<PROBE-END census>>>~%")
+      (acl2::value :invisible))))"#;
+
+/// Rebuild the census from the printed interleaving.
+///
+/// Newest-first, so names are collected until the marker that governs them
+/// arrives; see [`CENSUS_PROBE`] on why that is the way round it is. Names
+/// still pending at the end belong to no book -- ACL2's own world, and this
+/// file's own forms.
+pub(super) fn parse_census(body: &str) -> Vec<CensusEntry> {
+    let mut out = Vec::new();
+    let mut pending: Vec<(String, NameKind)> = Vec::new();
+    for e in census_entries(body) {
+        let inner = e.trim().trim_start_matches('(').trim_end_matches(')').trim().to_string();
+        let lower = inner.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix(":path") {
+            // `(:path)` is nil; `(:path :system . "x.lisp")` and
+            // `(:path . "/abs/x.lisp")` are the two shapes `resolve_dep`
+            // already knows, restored to the form it expects.
+            let raw = inner[":path".len()..].trim();
+            let book = if rest.trim().is_empty() {
+                None
+            } else if let Some(abs) = raw.strip_prefix('.') {
+                Some(abs.trim().to_string())
+            } else {
+                Some(format!("({raw})"))
+            };
+            for (name, kind) in pending.drain(..) {
+                out.push(CensusEntry { name, kind, book: book.clone() });
+            }
+        } else if let Some((name, kind)) = inner.rsplit_once(" . ")
+            && let Some(kind) = census_kind(kind)
+        {
+            pending.push((name.trim().to_string(), kind));
+        }
+    }
+    out.extend(pending.into_iter().map(|(name, kind)| CensusEntry { name, kind, book: None }));
+    out
+}
+
+/// Split a printed census into one string per entry.
+///
+/// `~*` puts each entry on its own line, so an entry starts at a line
+/// beginning with `(` in column zero and anything indented continues it.
+/// That rule, rather than a marker prefix, because a wrapped continuation
+/// could otherwise be mistaken for a new entry whose name happened to match.
+fn census_entries(body: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in body.lines() {
+        if line.starts_with('(') {
+            out.push(line.trim_end().to_string());
+        } else if let Some(last) = out.last_mut() {
+            last.push(' ');
+            last.push_str(line.trim());
+        }
+    }
+    out
+}
+
+fn census_kind(k: &str) -> Option<NameKind> {
+    match k.trim().to_ascii_lowercase().as_str() {
+        "formals" => Some(NameKind::Function),
+        "macro-args" => Some(NameKind::Macro),
+        "theorem" => Some(NameKind::Theorem),
+        "const" => Some(NameKind::Constant),
+        _ => None,
+    }
+}
+
+// ---- The documentation index, and one topic from it ----------------------------
+//
+// Both are read where they are asked for. The index is a pair of parallel
+// lists and the topic is a block of fields, and neither survives being
+// separated from the question that wanted it.
+
+/// Every documented topic's name and one-line summary.
+///
+/// Two parallel blocks rather than one stream of pairs, because a `~*` element
+/// is substituted whole and a short is a *string* -- ACL2 rewraps it across
+/// lines, so pairs on one line would need the parser to tell a wrapped short
+/// from the next entry. Two blocks in table order zip without ambiguity, and
+/// `keyed_block` folds each wrapped value back together on its own.
+///
+/// Only `:short`. `:long` is fetched per topic when someone opens it: shorts
+/// are a sentence apiece and worth having resident for hover, longs are not.
+///
+/// **This probe names the XDOC package, so it fails to *read* in a world that
+/// has none** -- which is an ordinary outcome, not a bug: a bare image simply
+/// has no xdoc. The failure is contained because `query` re-probes the command
+/// number after a failed submission, and the caller caches the emptiness so it
+/// is attempted once.
+pub(super) const DOC_INDEX_PROBE: &str = r#"(acl2::let ((acl2::tbl (xdoc::get-xdoc-table (acl2::w acl2::state))))
+  (acl2::prog2$
+    (acl2::cw "~%<<<PROBE-BEGIN docnames>>>~%")
+    (acl2::prog2$
+      (acl2::cw "~*0"
+        (acl2::list "" "n ~x*~%" "n ~x*~%" "n ~x*~%"
+          (loop$ for acl2::x in acl2::tbl
+                 collect (acl2::cdr (acl2::assoc-eq :name acl2::x)))))
+      (acl2::prog2$
+        (acl2::cw "<<<PROBE-END docnames>>>~%<<<PROBE-BEGIN docshorts>>>~%")
+        (acl2::prog2$
+          (acl2::cw "~*0"
+            (acl2::list "" "s ~x*~%" "s ~x*~%" "s ~x*~%"
+              (loop$ for acl2::x in acl2::tbl
+                     collect (acl2::cdr (acl2::assoc-eq :short acl2::x)))))
+          (acl2::prog2$
+            (acl2::cw "<<<PROBE-END docshorts>>>~%")
+            (acl2::value :invisible)))))))"#;
+
 /// One topic's full documentation, transported verbatim.
 ///
 /// **`princ$`, not `cw`, and that is not a style choice.** Real xdoc markup
@@ -504,6 +791,12 @@ pub(super) fn doc_topic_probe(upcased: &str) -> String {
          (acl2::value :invisible)))"
     )
 }
+
+// ---- What one name is, and what a form introduced ------------------------------
+//
+// `detail_probe` answers a hover and `rules_probe` feeds the scrape; both
+// are read in `Book`, where the answers are cached against the unit that
+// produced them.
 
 /// Ask the world about one name.
 ///
@@ -643,248 +936,11 @@ pub(super) fn rules_probe(names: &[String], untranslated: bool) -> String {
     out
 }
 
-// ---- Reading what they printed -----------------------------------------------
-
-pub(super) fn parse_inner(sub: &crate::session::Submission) -> (Vec<InnerEvent>, usize, Vec<String>) {
-    let Some(body) = sub.block("inner") else { return (Vec::new(), 0, Vec::new()) };
-    let pairs =
-        keyed_block(body, &["iname", "iclq", "ik", "ia", "inx", "it", "is", "irune"]);
-    // Every name, not a sample of them. A `defines` clique introduces far more
-    // than three events, and a list of three that looks complete is worse than
-    // a long one: the reporter found two of a clique's own functions in the
-    // world and absent from this list, with nothing to say it was truncated.
-    let names = items(&pairs, "iname");
-    // Members of any recursion clique these events belong to, flat and
-    // unordered. ACL2 records a `mutual-recursion` as *one* event, so the
-    // other members are nowhere in `iname`; asking the world for
-    // `recursivep` is the only way to learn they exist. Emitted only for
-    // cliques of more than one, so an ordinary book carries an empty stream.
-    // Only the names the events did not already carry: the probe emits a
-    // `recursivep` list for every recursive function, which for the ordinary
-    // singly-recursive one is just its own name back.
-    let clique: Vec<String> =
-        items(&pairs, "iclq").into_iter().filter(|c| !names.contains(c)).collect();
-    // The per-event fields are positional: the probe's loop$ collects visit
-    // the same (limited) prefix of the fal in the same order the names walk
-    // it, and print one line per event, `nil` included. `event-data-fal` is
-    // newest-first and a compound form stops at the event that failed, so
-    // **the failing event is always at index 0** -- the default detail depth
-    // never misses it. Beyond the probed prefix the fields are simply absent,
-    // which is how a consumer tells "no rules" from "rules not read".
-    let kinds = items_positional(&pairs, "ik");
-    let aborts = items_positional(&pairs, "ia");
-    let namexes = items_positional(&pairs, "inx");
-    let times = items_positional(&pairs, "it");
-    let steps = items_positional(&pairs, "is");
-    // Runes arrive index-tagged -- `(3 :rewrite foo)` is event 3's
-    // `(:rewrite foo)` -- so the per-event lists survive one flat stream.
-    // The envelope is ours (index, space, rune, closing paren), so peeling
-    // it is sentinel parsing, not prose parsing.
-    let mut rules: Vec<Vec<String>> = vec![Vec::new(); names.len()];
-    for pair in items(&pairs, "irune") {
-        let Some(bare) = pair.strip_prefix('(').and_then(|p| p.strip_suffix(')')) else {
-            continue;
-        };
-        let Some((idx, rune)) = bare.split_once(' ') else { continue };
-        let Ok(i) = idx.parse::<usize>() else { continue };
-        if let Some(slot) = rules.get_mut(i) {
-            slot.push(format!("({rune})"));
-        }
-    }
-    let mut out = Vec::new();
-    for (i, name) in names.iter().enumerate() {
-        out.push(InnerEvent {
-            name: name.clone(),
-            abort_causes: failure_causes(aborts.get(i).cloned().flatten()),
-            rules: rules.get(i).cloned().unwrap_or_default(),
-            kind: kinds.get(i).cloned().flatten().map(|v| symbol_name_of(&v)),
-            // Printed as yes/no rather than t/nil, because a nil would be
-            // indistinguishable here from the value having gone missing.
-            has_namex: namexes
-                .get(i)
-                .cloned()
-                .flatten()
-                .map(|v| symbol_name_of(&v) == "yes"),
-            time: times.get(i).cloned().flatten(),
-            prover_steps: steps.get(i).cloned().flatten().and_then(|v| v.parse().ok()),
-        });
-    }
-    let total = out.len();
-    (out, total, clique)
-}
-
-/// Just the names a unit's events introduced, without the rest of the parse.
-///
-/// The scrape wants names and nothing else, and runs on every admitted unit;
-/// `parse_inner` builds the whole report and is the caller's business.
-/// Clique members come along because a `mutual-recursion` is one event whose
-/// siblings appear nowhere in `iname` -- and they are exactly the names a
-/// reader will ask about.
-pub(super) fn inner_names(sub: &crate::session::Submission) -> Vec<String> {
-    let Some(body) = sub.block("inner") else { return Vec::new() };
-    // Every key the block carries, not just the two wanted: `keyed_block`
-    // treats an unrecognised line as a continuation of the previous value,
-    // so naming a subset silently glues the other fields onto the names.
-    let pairs =
-        keyed_block(body, &["iname", "iclq", "ik", "ia", "inx", "it", "is", "irune"]);
-    let mut names = items(&pairs, "iname");
-    for c in items(&pairs, "iclq") {
-        if !names.contains(&c) {
-            names.push(c);
-        }
-    }
-    names
-}
-
-pub(super) fn parse_checkpoints(sub: &crate::session::Submission) -> Checkpoints {
-    let mut c = Checkpoints::default();
-    let Some(body) = sub.block("ckpt") else { return c };
-    let keys = ["gag", "ntop", "nsub", "forced", "abort", "reverted",
-                "top0", "top1", "top2", "sub0", "sub1", "sub2",
-                "tid0", "tid1", "tid2", "sid0", "sid1", "sid2"];
-    let pairs = keyed_block(body, &keys);
-    let get = |k: &str| pairs.iter().find(|(pk, _)| pk == k).map(|(_, v)| v.trim().to_string());
-    c.proof_ran = get("gag").is_some_and(|v| !is_nil(&v));
-    c.n_top = get("ntop").and_then(|v| v.parse().ok()).unwrap_or(0);
-    c.n_sub = get("nsub").and_then(|v| v.parse().ok()).unwrap_or(0);
-    c.forced = get("forced").is_some_and(|v| !is_nil(&v));
-    c.abort_cause = get("abort").filter(|v| !is_nil(v));
-    c.pre_revert = get("reverted").is_some_and(|v| !is_nil(&v));
-    // The goal name arrives on one line; collapse any residual whitespace so
-    // it can be handed straight to a goal-addressed output slice.
-    let goal_of = |k: &str| {
-        get(k)
-            .map(|g| g.split_whitespace().collect::<Vec<_>>().join(" "))
-            .filter(|g| !g.is_empty() && !is_nil(g))
-    };
-    // A term that prettyprints as the literal `nil` is dropped here while
-    // `n_top`/`n_sub` still count it -- the counts are authoritative, the
-    // filter is what keeps genuinely empty slots out.
-    for (term_k, id_k) in [("top0", "tid0"), ("top1", "tid1"), ("top2", "tid2")] {
-        if let Some(v) = get(term_k).filter(|v| !is_nil(v)) {
-            c.top.push(Checkpoint { goal: goal_of(id_k), term: v });
-        }
-    }
-    for (term_k, id_k) in [("sub0", "sid0"), ("sub1", "sid1"), ("sub2", "sid2")] {
-        if let Some(v) = get(term_k).filter(|v| !is_nil(v)) {
-            c.sub.push(Checkpoint { goal: goal_of(id_k), term: v });
-        }
-    }
-    c
-}
-
-pub(super) fn parse_event_data(sub: &crate::session::Submission) -> EventData {
-    let mut e = EventData::default();
-    let Some(body) = sub.block("evd") else { return e };
-    // ACL2 wraps long values at its right margin, so a value runs until the
-    // next known key rather than to end of line.
-    let done = keyed_block(body, &["steps", "warning", "time", "rule", "hint", "splitter"]);
-    let pick = |k: &str| -> Option<String> {
-        done.iter()
-            .find(|(dk, _)| dk == k)
-            .map(|(_, v)| v.trim().to_string())
-            .filter(|v| !is_nil(v))
-    };
-    // `parse::<i64>()`: the sign carries the step-limit signal. See the field.
-    e.prover_steps = pick("steps").and_then(|v| v.parse().ok());
-    e.rules = items(&done, "rule");
-    e.hint_events = items(&done, "hint");
-    e.splitter_rules = items(&done, "splitter");
-    // Warning kinds are strings, so `~x` prints them quoted; the quotes are
-    // notation, not content.
-    e.warnings = items(&done, "warning")
-        .into_iter()
-        .map(|w| unquote(&w).unwrap_or(w))
-        .collect();
-    e.time = pick("time");
-    e
-}
-
-/// Read the `value` block, if the probe left one.
-///
-/// The block is `vkind` and then the printed value. `vkind none` is the
-/// probe having applied ACL2's rule and found nothing to show; a missing
-/// block is the probe never having run, which is what a form that signalled
-/// an error looks like under `:ld-error-action :return!`.
-pub(super) fn parse_value(sub: &crate::session::Submission) -> Option<FormValue> {
-    let body = sub.block("value")?;
-    let mut lines = body.lines();
-    let kind = lines.next()?.strip_prefix("vkind ")?.trim().to_string();
-    if kind == "none" {
-        return None;
-    }
-    let text = lines.collect::<Vec<_>>().join("\n").trim().to_string();
-    if text.is_empty() {
-        return None;
-    }
-    Some(FormValue { text, triple: kind == "triple" })
-}
-
-/// Rebuild the census from the printed interleaving.
-///
-/// Newest-first, so names are collected until the marker that governs them
-/// arrives; see [`CENSUS_PROBE`] on why that is the way round it is. Names
-/// still pending at the end belong to no book -- ACL2's own world, and this
-/// file's own forms.
-pub(super) fn parse_census(body: &str) -> Vec<CensusEntry> {
-    let mut out = Vec::new();
-    let mut pending: Vec<(String, NameKind)> = Vec::new();
-    for e in census_entries(body) {
-        let inner = e.trim().trim_start_matches('(').trim_end_matches(')').trim().to_string();
-        let lower = inner.to_ascii_lowercase();
-        if let Some(rest) = lower.strip_prefix(":path") {
-            // `(:path)` is nil; `(:path :system . "x.lisp")` and
-            // `(:path . "/abs/x.lisp")` are the two shapes `resolve_dep`
-            // already knows, restored to the form it expects.
-            let raw = inner[":path".len()..].trim();
-            let book = if rest.trim().is_empty() {
-                None
-            } else if let Some(abs) = raw.strip_prefix('.') {
-                Some(abs.trim().to_string())
-            } else {
-                Some(format!("({raw})"))
-            };
-            for (name, kind) in pending.drain(..) {
-                out.push(CensusEntry { name, kind, book: book.clone() });
-            }
-        } else if let Some((name, kind)) = inner.rsplit_once(" . ")
-            && let Some(kind) = census_kind(kind)
-        {
-            pending.push((name.trim().to_string(), kind));
-        }
-    }
-    out.extend(pending.into_iter().map(|(name, kind)| CensusEntry { name, kind, book: None }));
-    out
-}
-
-/// Split a printed census into one string per entry.
-///
-/// `~*` puts each entry on its own line, so an entry starts at a line
-/// beginning with `(` in column zero and anything indented continues it.
-/// That rule, rather than a marker prefix, because a wrapped continuation
-/// could otherwise be mistaken for a new entry whose name happened to match.
-fn census_entries(body: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for line in body.lines() {
-        if line.starts_with('(') {
-            out.push(line.trim_end().to_string());
-        } else if let Some(last) = out.last_mut() {
-            last.push(' ');
-            last.push_str(line.trim());
-        }
-    }
-    out
-}
-
-fn census_kind(k: &str) -> Option<NameKind> {
-    match k.trim().to_ascii_lowercase().as_str() {
-        "formals" => Some(NameKind::Function),
-        "macro-args" => Some(NameKind::Macro),
-        "theorem" => Some(NameKind::Theorem),
-        "const" => Some(NameKind::Constant),
-        _ => None,
-    }
-}
+// ---- ACL2's prose, in the one place it is read ---------------------------------
+//
+// The exception that proves P2. An error message is not structured
+// anywhere -- `get-event-data` records causes, not sentences -- so this is
+// a parse of what the prover printed, and it is deliberately the only one.
 
 /// The `ACL2 Error` message, with ACL2's line wrapping undone.
 ///
@@ -921,7 +977,10 @@ pub(crate) fn error_message(output: &str) -> Option<String> {
     Some(msg)
 }
 
-// ---- The text these are made of ----------------------------------------------
+// ---- The text all of the above is made of --------------------------------------
+//
+// Shared because the probes print in one format on purpose: keyed blocks
+// that tolerate wrapping, and one-line markers for values that cannot.
 
 /// Split a `key value` block into pairs, tolerating values that ACL2 wrapped
 /// across lines.
@@ -1124,7 +1183,6 @@ pub(super) fn sexp_field(text: &str) -> Option<(String, String)> {
     }
     Some((key, parts.get(1).cloned().unwrap_or_default()))
 }
-
 // ---- the probes, checked mechanically ----------------------------------
 //
 // Both checks below run over `every_probe`, and the list is here rather than
