@@ -691,8 +691,10 @@ impl Session {
         drop(cmd);
         drop(slave);
 
-        let tmpdir = std::env::temp_dir().join(format!("acl2-session-{}", child.id()));
-        std::fs::create_dir_all(&tmpdir)?;
+        // Every form submitted to ACL2 passes through a file here, so the
+        // directory is the session's transcript on disk and is created private
+        // -- see `private_dir`.
+        let tmpdir = crate::output::private_dir(&format!("acl2-session-{}", child.id()))?;
         // Absolute: it is interpolated into ACL2 source, where a relative path
         // would be resolved against whatever cbd happened to be.
         let cwd = std::fs::canonicalize(book_dir).unwrap_or_else(|_| book_dir.to_path_buf());

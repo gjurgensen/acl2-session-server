@@ -13,6 +13,74 @@
 //!
 //! Transport-neutral on purpose: an editor is a plausible second client, so
 //! nothing here knows about MCP.
+//!
+//! # The four principles
+//!
+//! Comments through this crate cite these by number -- "per P3", "this is P2
+//! applied to startup" -- because they are the reasons behind the hardest
+//! code, and repeating a reason at every site it governs would bury it. They
+//! are stated once, here, so a citation always has something to point at.
+//!
+//! **P1. Structure, don't summarize. Project, don't decide.** Everything
+//! returned is a lossless projection of ACL2's own state, and the complete
+//! transcript stays retrievable behind a handle. Nothing is withheld; things
+//! are *deferred*. So a reply that omits a 6 MB induction scheme still says
+//! how long it was and where to read it, and a surface that cannot answer
+//! says so rather than guessing -- `describe` returning "ask me again" is not
+//! the same answer as "no such name", and the two must never render alike.
+//!
+//! **P2. Read state, don't scrape text.** ACL2's printed output is a
+//! *rendering* of structured state; read the state. Control flow never turns
+//! on ACL2's prose. That is why submissions are bracketed by sentinels we
+//! chose rather than by watching for a prompt -- ACL2 prints nested prompts
+//! while an `ld` runs, so a prompt scan stops partway through startup and
+//! every later form reports the previous one's tail (`session.rs`). Facts come
+//! from `get-event-data` and `gag-state` through probes, and the probes print
+//! under keys we picked.
+//!
+//! Two sanctioned exceptions, both narrow. Progress on a form still *running*
+//! is read from the stream, because the structured state is locked inside a
+//! busy process until it finishes. And [`induction`] parses prose outright,
+//! because ACL2 computes the scheme inside a printing function and records it
+//! nowhere -- which is exactly why that module is best-effort, total, and not
+//! exposed as a fact about a form.
+//!
+//! **P3. Fast paths are verified against a recorded invariant; failure
+//! degrades to replay.** Undo is a performance optimization, never a
+//! correctness dependency. `ubu!` is fast where replaying two hundred forms
+//! is minutes -- so rollback uses it, records
+//! `max-absolute-command-number` before and checks it after, and rebuilds from
+//! nothing if the check does not pass. A *failed* check does not mean the
+//! world is wrong, only that it cannot be confirmed right, and those get the
+//! same treatment: a wrong prefix is a silent failure that makes a client
+//! report success about something not on disk.
+//!
+//! **P4. The file is the source of truth.** The session's world is a cache of
+//! a prefix of a real file, never a parallel universe. The client never says
+//! what changed; the diff is re-derived from content hashes, so a reindent
+//! costs nothing and an edit above the frontier rolls back to it. A book whose
+//! own source changed under the session invalidates the form that included it,
+//! for the same reason. ([`Book::sync_bytes`](sync::Book::sync_bytes) lets the
+//! snapshot be an editor's unsaved buffer; the path then anchors only what
+//! content does not decide.)
+//!
+//! # Two invariants worth knowing before reading `sync`
+//!
+//! **The prefix invariant.** The world is always the result of admitting file
+//! forms `1..N` in order, in a plain session started in the book's directory,
+//! for some `N`. Not "some set of forms that happen to be admitted" -- a
+//! prefix, and one a person could reproduce by hand. Every operation preserves
+//! it or rebuilds until it holds. It is what makes a frontier meaningful and
+//! what lets a rollback be a number.
+//!
+//! **One budget per call.** A deadline bounds the *call*, not each submission
+//! inside it: units, rollbacks and probes all draw down one
+//! [`Budget`]. Otherwise a call with twenty submissions could
+//! take twenty deadlines while reporting that it honoured one. Session startup
+//! during a rebuild sits outside it, under its own fixed deadlines -- a hung
+//! customization file was never this call's proof work. Running out is not a
+//! failure: the session then holds a valid shorter prefix plus one form in
+//! flight, which is the ordinary shape of an expiry, and `resume` finishes it.
 
 pub mod cert;
 pub mod image;

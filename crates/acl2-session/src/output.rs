@@ -143,6 +143,76 @@ pub struct OutputStore {
     index: HashMap<String, Entry>,
 }
 
+/// A directory only this user can read, that nobody else created.
+///
+/// Both of this crate's scratch directories live under the system temp
+/// directory, which on a shared machine is world-writable and whose contents
+/// are guessable: `acl2-session-{pid}` holds every form submitted to ACL2 and
+/// `acl2-session-out-{pid}-{n}` holds every log. `create_dir_all` succeeds on
+/// a directory that already exists, so another user who pre-created one -- or
+/// planted a symlink at that name -- would have had every form and every proof
+/// read into their own directory, with nothing here noticing.
+///
+/// Two changes close it, and the second is the one that matters:
+///
+/// - mode `0700` at creation, so the contents are the user's alone. Set in the
+///   `mkdir` rather than afterwards, since a `chmod` after the fact leaves a
+///   window where the directory exists world-readable.
+/// - `create_dir`, not `create_dir_all`: a non-recursive `mkdir` fails with
+///   `EEXIST` for anything already at that name, a symlink included. So a
+///   pre-created directory is refused rather than used, and the property is
+///   *we only ever write into a directory we made*, which holds even against
+///   a name the attacker guessed exactly.
+///
+/// A collision with our own leftovers is possible -- pids are reused -- so a
+/// taken name is retried with a suffix rather than treated as an attack. What
+/// is never done is writing into it.
+///
+/// `$XDG_RUNTIME_DIR` is preferred when it is *usable*: the login session's own
+/// directory, already private and already cleaned up at logout. The variable
+/// is set in plenty of places the directory is not writable, so this falls
+/// back to the system temp directory rather than refusing to open a session.
+pub(crate) fn private_dir(prefix: &str) -> io::Result<PathBuf> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    // `$XDG_RUNTIME_DIR` first, then the system temp directory. Tried in turn
+    // rather than chosen up front: the variable is often set where the
+    // directory is not usable -- a container, a sandbox, a service account
+    // whose runtime dir was never made -- and refusing to open a session over
+    // that would be a worse failure than falling back to the place we used
+    // before. Only a *usable* root is preferred, not merely a named one.
+    let roots = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .into_iter()
+        .chain(std::iter::once(std::env::temp_dir()));
+    let mut last = None;
+    for root in roots {
+        for n in 0..64 {
+            let dir =
+                root.join(if n == 0 { prefix.to_string() } else { format!("{prefix}-{n}") });
+            match builder.create(&dir) {
+                Ok(()) => return Ok(dir),
+                // Taken -- by our own leftovers, since pids are reused, or by
+                // somebody else. Which it is does not matter: the name is not
+                // ours, so it is stepped over rather than written into.
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                // The root itself is no good. Try the next one.
+                Err(e) => {
+                    last = Some(e);
+                    break;
+                }
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| {
+        io::Error::new(io::ErrorKind::AlreadyExists, format!("no free scratch directory for {prefix}"))
+    }))
+}
+
 impl OutputStore {
     /// A store of its own, sharing nothing with any other.
     ///
@@ -162,8 +232,7 @@ impl OutputStore {
             std::process::id(),
             N.fetch_add(1, Ordering::SeqCst)
         );
-        let dir = std::env::temp_dir().join(format!("acl2-session-out-{session}"));
-        std::fs::create_dir_all(&dir)?;
+        let dir = private_dir(&format!("acl2-session-out-{session}"))?;
         Ok(OutputStore { dir, session, next: 0, index: HashMap::new() })
     }
 
@@ -326,6 +395,69 @@ pub fn slice_text(body: &str, slice: Slice) -> String {
 impl Drop for OutputStore {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// The scratch directory's own guarantees.
+///
+/// Worth testing rather than reading, because the property is about what
+/// happens when something is *already there* -- the case that never occurs in
+/// ordinary use and is the whole point of the change.
+#[cfg(test)]
+mod dir_tests {
+    use super::private_dir;
+
+    #[test]
+    fn a_fresh_directory_is_the_users_alone() {
+        let d = private_dir("acl2-session-test-mode").expect("dir");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&d).expect("stat").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "nobody else may read what a session submits");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The property that closes the attack: a name already taken is never
+    /// written into. `create_dir_all` used to succeed on someone else's
+    /// directory -- or through their symlink -- and every form and every proof
+    /// went there.
+    #[test]
+    fn a_name_already_taken_is_never_reused() {
+        let first = private_dir("acl2-session-test-taken").expect("first");
+        let second = private_dir("acl2-session-test-taken").expect("second");
+        assert_ne!(first, second, "the taken name was stepped over, not adopted");
+        let _ = std::fs::remove_dir_all(&first);
+        let _ = std::fs::remove_dir_all(&second);
+    }
+
+    /// A symlink counts as taken. This is the shape of the attack: a
+    /// world-writable temp directory and a guessable name, so another user
+    /// plants a link and reads everything written through it.
+    #[test]
+    #[cfg(unix)]
+    fn a_symlink_at_the_name_is_stepped_over_not_followed() {
+        // Wherever `private_dir` would actually land: the same fallback, run
+        // by making one and taking its parent, so this test follows the
+        // function rather than re-deriving its choice.
+        let probe = private_dir("acl2-session-test-where").expect("probe");
+        let root = probe.parent().expect("a parent").to_path_buf();
+        let _ = std::fs::remove_dir_all(&probe);
+        let elsewhere = root.join("acl2-session-test-elsewhere");
+        let _ = std::fs::remove_dir_all(&elsewhere);
+        std::fs::create_dir_all(&elsewhere).expect("target");
+        let planted = root.join("acl2-session-test-link");
+        let _ = std::fs::remove_file(&planted);
+        std::os::unix::fs::symlink(&elsewhere, &planted).expect("symlink");
+
+        let got = private_dir("acl2-session-test-link").expect("dir");
+        assert_ne!(got, planted, "the link was not adopted");
+        assert!(!got.starts_with(&elsewhere), "and nothing lands behind it");
+
+        let _ = std::fs::remove_dir_all(&got);
+        let _ = std::fs::remove_file(&planted);
+        let _ = std::fs::remove_dir_all(&elsewhere);
     }
 }
 
