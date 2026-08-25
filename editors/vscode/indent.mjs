@@ -32,7 +32,7 @@ import { freshOrDie } from './fresh.mjs';
 freshOrDie();
 
 const require = createRequire(import.meta.url);
-const { reindent, topLevelStarts, insideOpaque, plannedIndent, enclosingStart } =
+const { reindent, reindentRange, topLevelStarts, insideOpaque, plannedIndent, enclosingStart } =
   require('./out/indent.js');
 
 // `ACL2_BOOKS`, the same spelling `source-grammar.mjs` reads, then a
@@ -228,6 +228,70 @@ plan('and the same line is left alone by a whole-buffer pass',
 plan('Enter after a finished form lands at column zero',
      `(defun f (x) 1)\n`, 1, 0, { blankLines: 'indent' });
 
+// Formatting part of a buffer. The rule is `reindent`'s -- top down, against
+// the running result -- and the reason it has to be is that a line's target
+// depends on the columns of the lines above it, which this call is in the
+// middle of changing. Planning each line against the text as found is the
+// bug these pin: it plans a child at the column its parent has *now*, then
+// moves the parent out from under it.
+function ranged(what, source, first, last, want, opts) {
+  const text = source.replace(/^\n/, '');
+  const got = reindentRange(text, topLevelStarts(text), first, last, opts);
+  const ok = JSON.stringify(got) === JSON.stringify(want);
+  if (!ok) unitBad++;
+  console.log(
+    `${ok ? 'ok' : 'FAIL'}: ${what}` +
+      (ok ? '' : `\n--- got ---\n${JSON.stringify(got)}\n--- want ---\n${JSON.stringify(want)}`)
+  );
+}
+
+// The demonstration case. `(+ x` moves from column 0 to column 2, so `1`
+// belongs under `x` at column 5 -- and the per-line plan said 3, because it
+// measured against the `(+` that was about to move.
+ranged('a child follows its parent to where the parent is going', `
+  (defun f (x)
+(+ x
+1))
+`, 0, 2, ['(defun f (x)', '  (+ x', '     1))']);
+
+// The invariant, and the strongest thing here: over the whole buffer this
+// must be `reindent`, line for line. If the two ever disagree, Format
+// Document and Format Selection have started formatting differently.
+{
+  const text = `(in-package "ACL2")
+
+(defun f (x)
+(let ((y (g x
+(h x))))
+(+ y
+1)))
+`;
+  const want = reindent(text).split('\n');
+  const got = reindentRange(text, topLevelStarts(text), 0, want.length - 1);
+  // Blank lines are the one deliberate difference: a whole-buffer pass clears
+  // their trailing whitespace, a range pass leaves them alone (`blankLines`).
+  const ok = got.every((l, i) => l === undefined || l === want[i]);
+  if (!ok) unitBad++;
+  console.log(`${ok ? 'ok' : 'FAIL'}: over the whole buffer it agrees with reindent line for line`);
+}
+
+// Lines above the range are not the call's to change, and are what the range
+// is measured against: selecting only the body of a wrongly-indented form
+// must align it under the form as it actually sits, not as it ought to.
+ranged('a selection measures against the lines above it, unfixed', `
+    (defun f (x)
+(+ x 1))
+`, 1, 1, ['      (+ x 1))']);
+
+// The three answers that are not ours, exactly as `plannedIndent` gives them.
+ranged('a lone-semicolon comment, a blank line and a string line are left alone', `
+(defxdoc top
+; left margin on purpose
+
+  :long "one
+two")
+`, 1, 5, [undefined, undefined, '  :long "one', undefined, undefined]);
+
 {
   const starts = [0, 100, 250];
   const cases = [[0, 0], [99, 0], [100, 100], [249, 100], [250, 250], [9999, 250]];
@@ -300,6 +364,22 @@ for (const path of targets) {
     } else {
       const key = orig.trim().split(/\s+/)[0].slice(0, 24);
       disagreements.set(key, (disagreements.get(key) || 0) + 1);
+    }
+  }
+
+  // Format Selection and Format Document must be the same formatter. Over the
+  // whole buffer the range pass is `reindent` by construction -- but by
+  // construction is what the range path used to be too, and it planned every
+  // line against columns it was about to change. Held here against 271 real
+  // books rather than the unit case alone.
+  const ranged = reindentRange(text, starts, 0, a.length - 1);
+  for (let i = 0; i < ranged.length; i++) {
+    // Blank lines are the one deliberate difference: a whole-buffer pass
+    // clears their trailing whitespace, a range pass leaves them alone.
+    if (ranged[i] !== undefined && ranged[i] !== b[i]) {
+      console.log(`RANGE ${path}:${i + 1} range pass differs from reindent`);
+      bad++;
+      break;
     }
   }
 

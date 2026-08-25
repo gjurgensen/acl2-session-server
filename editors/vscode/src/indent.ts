@@ -733,6 +733,110 @@ export function reindent(text: string, opts: IndentOptions = {}): string {
   }
   return out;
 }
+/**
+ * Lines `first` through `last`, each re-indented against the ones above it.
+ *
+ * The same rule {@link reindent} follows, over part of a buffer: top down,
+ * and against the *running* result. Asking {@link plannedIndent} once per
+ * line instead -- which is what this used to be -- plans every line against
+ * the text as it was found, so a line whose parent is about to move is
+ * planned at the column the parent has now. A `defun` whose first line is
+ * over-indented by two gets its second line planned at column 12 where the
+ * answer after the fix is 10, and the whole form lands internally
+ * misaligned. It converges if you invoke it again, which is not a defence:
+ * `editor.formatOnPaste` is on by default, so the commonest way to reach
+ * this is a paste, and a paste happens once.
+ *
+ * Lines above the range are not this call's to change, so they are carried
+ * verbatim -- and it is their real columns the range is measured against,
+ * which is the difference between formatting a selection and formatting the
+ * document.
+ *
+ * The walk starts at the top-level form enclosing the first line, the anchor
+ * {@link plannedIndent} uses and for the reason {@link topLevelStarts}
+ * exists: a book has forms five thousand lines long, and nothing above one
+ * can affect a column inside it. That makes this cheaper than the per-line
+ * loop it replaces, not dearer -- one scan of the enclosing form rather than
+ * one per line of the range.
+ *
+ * Returns one entry per line in the range: the line as it should read, or
+ * `undefined` for the three lines that are not ours -- blank, a lone `;`
+ * comment keeping its own column, and one inside a string or block comment.
+ * `undefined` rather than the line unchanged, so a caller can tell "leave it
+ * alone" from "it is already right" and skip producing an edit at all.
+ */
+export function reindentRange(
+  text: string,
+  starts: number[],
+  first: number,
+  last: number,
+  opts: IndentOptions = {}
+): (string | undefined)[] {
+  const lines = text.split('\n');
+  const lo = Math.max(0, first);
+  const hi = Math.min(lines.length - 1, last);
+  if (hi < lo) {
+    return [];
+  }
+  const offset: number[] = new Array(hi + 1);
+  for (let n = 0, at = 0; n <= hi; n++) {
+    offset[n] = at;
+    at += lines[n].length + 1;
+  }
+
+  const anchor = enclosingStart(starts, offset[lo]);
+  // The line the anchor sits on. `enclosingStart` never answers past the
+  // offset it was asked about, so this walks down, never up, and lands on a
+  // line whose start is at or before the anchor.
+  let a = lo;
+  while (a > 0 && offset[a] > anchor) {
+    a--;
+  }
+
+  // Absolute offsets throughout: the text above the walk is carried verbatim
+  // so that a position in `out` means what it means in `text`, which is what
+  // lets the open stack, `bolOf` and `readDatum` work here unchanged. Below
+  // the anchor they are the *running* result's offsets, which is the point.
+  let out = text.slice(0, offset[a]);
+  let st: LineState = { stack: [], inString: false, block: 0 };
+  let from = anchor;
+  const planned: (string | undefined)[] = [];
+
+  for (let n = a; n <= hi; n++) {
+    const line = lines[n];
+    const lineStart = out.length;
+    const opaque = st.inString || st.block > 0;
+    if (st.stack.length === 0 && !opaque) {
+      from = lineStart;
+    }
+    let emitted = line;
+    if (n >= lo) {
+      const blank = !line.trim();
+      if (opaque || keepsOwnColumn(line) || (blank && (opts.blankLines ?? DEFAULTS.blankLines) === 'empty')) {
+        planned.push(undefined);
+      } else {
+        const want = indentFor(out, lineStart, from, from, opts, st.stack);
+        emitted = ' '.repeat(Math.max(0, want)) + line.slice(leading(line));
+        planned.push(emitted);
+      }
+    }
+    out += emitted;
+    if (n !== lines.length - 1) {
+      out += '\n';
+    }
+    // The anchor's own line is stepped from the anchor rather than from its
+    // start: `topLevelStarts` promises the anchor is not inside a string or a
+    // comment, and promises nothing at all about the text to its left. Blanked
+    // rather than sliced, because `stepLine` reads a delimiter's column off
+    // its index in the string it is given -- slicing would put every open
+    // paren on that line at the wrong column, which is `openStack`'s reason
+    // for taking a `lineStart` of its own. Spaces are inert to the lexer.
+    const skip = n === a ? anchor - lineStart : 0;
+    st = stepLine(skip > 0 ? ' '.repeat(skip) + emitted.slice(skip) : emitted, lineStart, st);
+  }
+  return planned;
+}
+
 
 /**
  * Whether `limit` sits inside a string or a block comment.

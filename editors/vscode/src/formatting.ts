@@ -93,7 +93,7 @@
 // can be measured against the books; this is the glue that carries it.
 
 import * as vscode from 'vscode';
-import { IndentOptions, plannedIndent, reindent, topLevelStarts } from './indent';
+import { IndentOptions, plannedIndent, reindent, reindentRange, topLevelStarts } from './indent';
 
 /**
  * The document as the rules need to see it, remembered per version.
@@ -194,12 +194,36 @@ function indentRangeEdits(doc: vscode.TextDocument, first: number, last: number)
     }
     return edits;
   }
+  // Part of the document: still top down and still against the running
+  // result, which is the part that used to be missing. Asking
+  // `indentLineEdit` per line planned every one of them against the snapshot
+  // as found, so a line whose parent was about to move was planned at the
+  // column the parent had before the fix -- and the edits were then applied
+  // together, landing the form internally misaligned. It converged on a
+  // second invocation, which is no comfort when the commonest way to get
+  // here is `formatOnPaste` and a paste happens once.
+  const { text, starts } = snapshotOf(doc);
   const edits: vscode.TextEdit[] = [];
-  for (let i = first; i <= last; i++) {
-    const e = indentLineEdit(doc, i);
-    if (e) {
-      edits.push(e);
+  const planned = reindentRange(text, starts, first, last);
+  for (let i = 0; i < planned.length; i++) {
+    const want = planned[i];
+    if (want === undefined) {
+      continue;
     }
+    const line = doc.lineAt(first + i);
+    const have = line.firstNonWhitespaceCharacterIndex;
+    const lead = want.length - want.trimStart().length;
+    if (lead === have && !line.text.slice(0, have).includes('\t')) {
+      continue;
+    }
+    edits.push(
+      vscode.TextEdit.replace(
+        new vscode.Range(line.range.start, line.range.start.translate(0, have)),
+        // Spaces regardless of `insertSpaces`, for the reason
+        // `indentLineEdit` gives.
+        want.slice(0, lead)
+      )
+    );
   }
   return edits;
 }
