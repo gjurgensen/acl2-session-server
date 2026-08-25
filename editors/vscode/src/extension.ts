@@ -32,6 +32,7 @@ import {
   DaemonClient,
   EvalReply,
   EvalStateEvent,
+  StaleDepsEvent,
   SettledEvent,
   StateEvent,
   TailEvent,
@@ -192,7 +193,6 @@ interface BookSession {
    * event can say *why* it has not come back -- a form queued behind a long
    * proof and one that is grinding look the same from here otherwise.
    */
-  evalProgress?: vscode.Progress<{ message?: string }>;
   /**
    * Console seqs sent to this book and not yet answered, oldest first. The
    * daemon runs evals in the order it received them and says only *that* one
@@ -209,6 +209,14 @@ interface BookSession {
   evalReplies: Map<number, EvalReply>;
   /** A certification is in flight; a second is refused rather than queued. */
   certifying?: boolean;
+  /**
+   * The stale dependencies last mentioned in the channel, joined.
+   *
+   * The daemon re-sends `stale_deps` on every tick until they stop being
+   * stale, so without this one recertification of a widely-included book
+   * writes a line a second for as long as it takes.
+   */
+  staleSaid?: string;
   /** When the certification started, so any repaint can draw its clock. */
   certifyStarted?: number;
 }
@@ -285,6 +293,16 @@ export function activate(context: vscode.ExtensionContext): void {
     'No form under the cursor has been checked yet.'
   );
   evalView = new OutputView(EVAL_SCHEME, 'ACL2 Eval', 'Nothing evaluated yet.');
+  // Webview tabs take an icon; the output views cannot, since they are text
+  // documents and VSCode takes an editor tab's icon from the file icon theme.
+  //
+  // Before the views that read it. Assigned after `DocView` was constructed,
+  // `docs.iconPath` took the value `windowIcon` had then -- `undefined` --
+  // and kept it, so the Docs tab alone showed the generic webview icon.
+  windowIcon = {
+    light: vscode.Uri.joinPath(context.extensionUri, 'media', 'window-light.svg'),
+    dark: vscode.Uri.joinPath(context.extensionUri, 'media', 'window-dark.svg'),
+  };
   docs = new DocView();
   docs.iconPath = windowIcon;
   docs.onTopic = (name) => {
@@ -301,12 +319,6 @@ export function activate(context: vscode.ExtensionContext): void {
     if (s && prev) {
       void openTopic(s, prev.name, true);
     }
-  };
-  // Webview tabs take an icon; the output views cannot, since they are text
-  // documents and VSCode takes an editor tab's icon from the file icon theme.
-  windowIcon = {
-    light: vscode.Uri.joinPath(context.extensionUri, 'media', 'window-light.svg'),
-    dark: vscode.Uri.joinPath(context.extensionUri, 'media', 'window-dark.svg'),
   };
   formView = new FormView();
   formView.iconPath = windowIcon;
@@ -1153,7 +1165,17 @@ async function openTopic(s: BookSession, name: string, keepOpen: boolean): Promi
       // and this is the one path that puts it in the page as markup rather
       // than as a link's text.
       const safe = esc(why);
-      docs.show({ name, html: `<p>${safe}.</p>`, code: [], canGoBack: docHistory.length > 0 });
+      // Pushed like any other topic, because `onBack` pops twice -- the
+      // current entry, then the one to return to -- and that only works if
+      // what is on screen is on the stack. An error page that showed itself
+      // without pushing made Back pop the topic the reader came *from* as if
+      // it were current, find nothing beneath it, and do nothing: stuck on
+      // the error page with the previous topic gone from the history.
+      //
+      // `> 1` for the same reason `paintDocs` uses it: the entry on screen is
+      // one of the entries counted.
+      docHistory.push({ book: s.id, name });
+      docs.show({ name, html: `<p>${safe}.</p>`, code: [], canGoBack: docHistory.length > 1 });
     } else {
       void vscode.window.showInformationMessage(`ACL2: ${why}`);
     }
@@ -1557,6 +1579,7 @@ function ensureClient(): DaemonClient {
   c.on('tail', onTail);
   c.on('settled', onSettled);
   c.on('eval_state', onEvalState);
+  c.on('stale_deps', onStaleDeps);
   client = c;
   return c;
 }
@@ -1920,21 +1943,48 @@ async function showEvalResult(
   }
 }
 
-function onEvalState(p: EvalStateEvent): void {
+/**
+ * A dependency changed under the session, and the session is about to
+ * re-prove because of it.
+ *
+ * The one notification that explains a spontaneous multi-second re-check, and
+ * nothing listened for it: a reader saw a green book go grey and start again
+ * with no reason given. The daemon reports on the first sighting and acts on
+ * the second, so this arrives *before* the churn.
+ *
+ * The channel rather than a toast. It is an explanation for something the
+ * reader will notice on their own, not a decision they have to make, and
+ * recertifying a library people work on can make it arrive repeatedly.
+ *
+ * Deduped on the names, because the daemon re-sends on every tick until the
+ * dependency stops being stale -- the same comparison its own `stale_seen`
+ * makes, for the same reason.
+ */
+function onStaleDeps(p: StaleDepsEvent): void {
   const s = byId.get(p.book);
   if (!s) {
     return;
   }
-  if (s.evalProgress) {
-    const running = s.lastState?.units.find((u) => u.status === 'running');
-    s.evalProgress.report({
-      message:
-        p.state === 'queued'
-          ? running
-            ? `queued behind form ${running.index + 1}`
-            : 'queued'
-          : 'running',
-    });
+  const names = p.stale.map((d) => d.name).join(', ');
+  if (names === s.staleSaid) {
+    return;
+  }
+  s.staleSaid = names;
+  if (!names) {
+    return;
+  }
+  const missing = p.stale.filter((d) => d.missing).map((d) => d.name);
+  channel.appendLine(
+    `${basename(s.doc.fileName)}: ${
+      missing.length === p.stale.length ? 'included book gone' : 'included book changed'
+    } (${names}) -- the form that includes it will be re-checked`
+  );
+}
+
+function onEvalState(p: EvalStateEvent): void {
+  const s = byId.get(p.book);
+  if (!s) {
+    return;
   }
   // The console shows its own entry as queued the moment it is typed, so
   // only the transition to running is news -- and it is always the oldest

@@ -367,6 +367,30 @@ export interface RulesReply {
   runes: RuneWire[];
 }
 
+/**
+ * A book this file includes whose source changed under the session.
+ *
+ * The daemon reports on the first sighting and acts on the second, so this
+ * arrives before anything happens and then again on every tick until the
+ * dependency stops being stale -- a handler has to dedup, the way the driver's
+ * own `stale_seen` does.
+ */
+export interface StaleDepWire {
+  /** The book as ACL2 names it. */
+  name: string;
+  path: string;
+  /** The unit of *this* file that included it, when one did. */
+  unit?: number;
+  /** Gone rather than merely different. */
+  missing?: boolean;
+}
+
+export interface StaleDepsEvent {
+  book: string;
+  revision: number;
+  stale: StaleDepWire[];
+}
+
 export interface InductionWire {
   /** The pool name: `*1`, or `*1.1` for an induction beneath one. */
   goal?: string;
