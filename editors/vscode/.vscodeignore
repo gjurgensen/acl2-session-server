@@ -1,0 +1,34 @@
+# What stays out of the .vsix. Same syntax as .gitignore, opposite default:
+# `vsce` packages everything not listed here, so without this file the shipped
+# extension carries its own source, its ten test harnesses, a captured ACL2
+# log and an icon-drawing script -- none of which a reader installs.
+#
+# What ships is `out/` (package.json's `main`), `media/`, `syntaxes/`, the two
+# configuration JSONs, the README and the licence. Everything else is how the
+# extension is *built*, which is what a repository is for.
+
+# The sources. `out/` is what runs; shipping `src/` doubles the download to
+# no end, and the sourcemaps that point at it are three times the size again.
+src/**
+out/**/*.js.map
+tsconfig.json
+
+# The harnesses, and the corpus fixture one of them reads.
+*.mjs
+test/**
+
+# Icon-drawing, run by hand when the icon changes.
+tools/**
+
+# Build and repository furniture.
+.vscode/**
+.gitignore
+.vscodeignore
+node_modules/.bin/**
+package-lock.json
+
+# `@vscode/codicons` ships its whole design source -- SVGs, previews, a
+# handlebars template. The extension loads exactly one file from it, the
+# font that `pageHtml` resolves for the webviews' fold chevrons.
+node_modules/@vscode/codicons/**
+!node_modules/@vscode/codicons/dist/codicon.ttf
