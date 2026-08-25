@@ -373,7 +373,8 @@ Repackage and reinstall to pick up later changes.
 Checking**, which opens the form view too — there is no moment where you want
 the session but not the place its failures explain themselves. The form view
 opens without taking the cursor. Clicking the status bar brings it back if you
-close it.
+close it — that item is an icon and a count, `$(check) ACL2 40/40`, with the
+rest of what it knows in its tooltip.
 
 That button is the editor's **only** title-bar action, which is what VSCode's
 own guidance asks for, so it carries all three states: a green &#9654; to

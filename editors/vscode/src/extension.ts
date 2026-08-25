@@ -643,7 +643,7 @@ export async function deactivate(): Promise<void> {
 function report(e: unknown): void {
   const msg = e instanceof Error ? e.message : String(e);
   channel.appendLine(`error: ${msg}`);
-  void vscode.window.showErrorMessage(`acl2-session: ${msg}`);
+  void vscode.window.showErrorMessage(`ACL2: ${msg}`);
 }
 
 /**
@@ -990,11 +990,11 @@ async function includeTargetAt(
  */
 async function certifyBook(s: BookSession): Promise<void> {
   if (s.certifying) {
-    void vscode.window.showInformationMessage('acl2-session: already certifying this book');
+    void vscode.window.showInformationMessage('ACL2: already certifying this book');
     return;
   }
   if (s.doc.isDirty && !(await s.doc.save())) {
-    void vscode.window.showWarningMessage('acl2-session: could not save before certifying');
+    void vscode.window.showWarningMessage('ACL2: could not save before certifying');
     return;
   }
   s.certifying = true;
@@ -1004,10 +1004,11 @@ async function certifyBook(s: BookSession): Promise<void> {
   const started = Date.now();
   const tick = setInterval(() => {
     const secs = Math.floor((Date.now() - started) / 1000);
-    status.text = `$(sync~spin) ACL2: certifying ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
-    status.tooltip = `ACL2: click to interrupt certifying ${basename(s.doc.fileName)}`;
-    // With the book named, so the button interrupts what the bar is timing
-    // rather than whatever file happens to be focused when it is clicked.
+    status.text = `$(sync~spin) ACL2 certifying ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
+    // The book named in the tooltip and passed to the command, because the
+    // bar is timing one book and the focus may be on another: resolved
+    // against the active editor, the button interrupted the wrong session.
+    status.tooltip = `ACL2: certifying ${basename(s.doc.fileName)}\nClick to interrupt`;
     status.command = { command: 'acl2-session.interrupt', title: 'Interrupt', arguments: [s.id] };
   }, 500);
   try {
@@ -1035,6 +1036,10 @@ async function certifyBook(s: BookSession): Promise<void> {
     clearInterval(tick);
     s.certifying = false;
     status.command = 'acl2-session.showFormView';
+    // Reset here as well as through `updateStatusBar`: with no session in
+    // front, nothing repaints, and the interrupt tooltip would stand over a
+    // certification that has finished.
+    status.tooltip = 'ACL2: show the form view';
     updateStatusBar(s);
     refreshStatusBar();
   }
@@ -1115,7 +1120,7 @@ async function showDocs(s: BookSession): Promise<void> {
   const range = editor && editor.document.getWordRangeAtPosition(editor.selection.active);
   const name = range ? editor!.document.getText(range) : '';
   if (!name) {
-    void vscode.window.showInformationMessage('acl2-session: put the cursor on a name first');
+    void vscode.window.showInformationMessage('ACL2: put the cursor on a name first');
     return;
   }
   await openTopic(s, name, false);
@@ -1151,7 +1156,7 @@ async function openTopic(s: BookSession, name: string, keepOpen: boolean): Promi
       const safe = esc(why);
       docs.show({ name, html: `<p>${safe}.</p>`, code: [], canGoBack: docHistory.length > 0 });
     } else {
-      void vscode.window.showInformationMessage(`acl2-session: ${why}`);
+      void vscode.window.showInformationMessage(`ACL2: ${why}`);
     }
     return;
   }
@@ -1318,9 +1323,16 @@ function forBook(f: (s: BookSession) => unknown): void {
   const editor = vscode.window.activeTextEditor;
   const s = editor && bookFor(editor.document);
   if (!s) {
-    void vscode.window.showInformationMessage(
-      'acl2-session: no live session for this file (run "ACL2: Start Live Checking")'
-    );
+    // A button rather than an instruction. The old message spelled out the
+    // command to run, which is longer to read than the thing is to do, and
+    // the notifications guidance asks for an action wherever there is one.
+    void vscode.window
+      .showInformationMessage('ACL2: no live session for this file', 'Start')
+      .then((pick) => {
+        if (pick === 'Start') {
+          void startCommand();
+        }
+      });
     return;
   }
   void f(s);
@@ -1440,7 +1452,7 @@ function ensureClient(): DaemonClient {
   );
   c.on('spawn-error', (e: Error) =>
     void vscode.window.showErrorMessage(
-      `acl2-session: cannot start the daemon (${e.message}) -- set acl2-session.daemonPath`
+      `ACL2: cannot start the daemon (${e.message}) -- set acl2-session.daemonPath`
     )
   );
   c.on('exit', () => {
@@ -1463,7 +1475,7 @@ function ensureClient(): DaemonClient {
     }
     if (orphaned.length > 0) {
       void vscode.window.showErrorMessage(
-        'acl2-session: the daemon exited and its sessions are gone (see the "ACL2" ' +
+        'ACL2: the daemon exited and its sessions are gone (see the "ACL2" ' +
           'output channel). Run "ACL2: Start Live Checking" to begin again.'
       );
     }
@@ -1487,7 +1499,7 @@ async function startCommand(initial?: Held): Promise<void> {
   if (!editor || editor.document.uri.scheme !== 'file') {
     // By contract: an untitled buffer has no directory, hence no
     // session; save once so the book has a home, then live in the buffer.
-    void vscode.window.showErrorMessage('acl2-session: save the book once, then start');
+    void vscode.window.showErrorMessage('ACL2: save the book once, then start');
     return;
   }
   const doc = editor.document;
@@ -1534,7 +1546,7 @@ async function startCommand(initial?: Held): Promise<void> {
     outlineKeys.delete(s.id);
     renewSymbols();
     status.show();
-    setStatus(s, '$(sync~spin) ACL2: starting');
+    setStatus(s, '$(sync~spin) ACL2 starting');
     channel.appendLine(`opened ${doc.fileName} as ${s.id} under ${r.image}`);
     void noteProveOverride(r.prove_output_overridden as string | undefined);
     sendUpdate(s);
@@ -1829,12 +1841,10 @@ async function showEvalResult(
   vscode.window.setStatusBarMessage(`ACL2 eval: ${verdict} (${secs}s)`, 5000);
   if (r.world_change === 'dirty') {
     // The eval introduced events and undoing them did not verify, so the
-    // prefix invariant is gone. The daemon already re-reconciles; saying so
-    // is what keeps the rebuild from looking like a spontaneous re-prove.
-    void vscode.window.showWarningMessage(
-      'acl2-session: that form changed the world and the rollback did not verify — ' +
-        'the session will rebuild by replay.'
-    );
+    // prefix invariant is gone. The daemon re-reconciles on its own; what the
+    // reader needs is the reason their session is about to churn, not the
+    // mechanism, which nothing here asks them to act on.
+    void vscode.window.showWarningMessage('ACL2: rollback did not verify; rebuilding');
   }
 }
 
@@ -1977,7 +1987,7 @@ function gotoAttention(s: BookSession): void {
   }
   const units = s.lastState?.units;
   if (!units) {
-    void vscode.window.showInformationMessage('acl2-session: nothing to jump to yet');
+    void vscode.window.showInformationMessage('ACL2: nothing to jump to yet');
     return;
   }
   const points = attentionPoints(units).map((p) => {
@@ -2138,7 +2148,7 @@ function onTail(p: TailEvent): void {
   const secs = Math.round(p.elapsed_ms / 1000);
   setStatus(
     s,
-    `$(sync~spin) ACL2: proving ${p.unit === null ? '' : `${p.unit + 1}/${s.lastState?.units.length ?? '?'} `}(${secs}s)`
+    `$(sync~spin) ACL2 ${p.unit === null ? '' : `${p.unit + 1}/${s.lastState?.units.length ?? '?'} `}(${secs}s)`
   );
 }
 
@@ -2163,7 +2173,7 @@ function onSettled(p: SettledEvent): void {
     renewSymbols();
   }
   if (p.reason === 'split_error' || p.reason === 'error') {
-    setStatus(s, `$(warning) ACL2: ${p.reason}`);
+    setStatus(s, `$(warning) ACL2 ${p.reason}`);
     if (p.message) {
       channel.appendLine(`${p.reason}: ${p.message}`);
     }
@@ -2412,13 +2422,18 @@ function ownsStatus(s: BookSession): boolean {
  * A running certification is the one thing that outranks the book in front:
  * the bar is its clock and its interrupt button until it finishes.
  */
-function setStatus(s: BookSession, text: string): void {
+function setStatus(s: BookSession, text: string, tooltip?: string): void {
   if (s.certifying || !ownsStatus(s)) {
     return;
   }
   statusBook = s.id;
-  status.tooltip = `ACL2: ${basename(s.doc.fileName)} \u2014 show the form view`;
   status.text = text;
+  // Optional, and omitted by the transient writes -- `starting`, a tail's
+  // clock, a settle's warning -- which have only ever set the text and leave
+  // the standing tooltip to say the rest.
+  if (tooltip !== undefined) {
+    status.tooltip = tooltip;
+  }
 }
 
 function updateStatusBar(s: BookSession): void {
@@ -2427,19 +2442,42 @@ function updateStatusBar(s: BookSession): void {
   const green = units.filter((u) => u.status === 'admitted' || u.status === 'conditional').length;
   const reds = units.filter((u) => u.status === 'skipped' || u.status === 'failed').length;
   const running = units.find((u) => u.status === 'running');
-  if (s.paused) {
-    // Ahead of the counts because it explains them: a paused book stops where
-    // it stops, and a bare "12/40 admitted" would read as a run still coming.
-    setStatus(s, `$(debug-pause) ACL2: paused \u2014 ${green}/${total} admitted`);
-  } else if (running) {
-    setStatus(s, `$(sync~spin) ACL2: proving ${running.index + 1}/${total}`);
-  } else if (s.lastSettle === 'interrupted') {
-    setStatus(s, `$(circle-slash) ACL2: interrupted \u2014 ${green}/${total} admitted`);
-  } else if (reds > 0) {
-    setStatus(s, `$(error) ACL2: ${green}/${total} admitted, ${reds} red`);
-  } else {
-    setStatus(s, `$(check) ACL2: ${green}/${total} admitted`);
-  }
+  // An icon and a count, and nothing the icon already says. The status bar is
+  // shared with every other extension and its guidance asks for short labels;
+  // ours were the longest thing in it, spending words on what the tick, the
+  // spinner and the pause bars were each conveying anyway.
+  //
+  // What the icon cannot carry goes to the tooltip, which is where a reader
+  // who wants the detail looks and where nobody else has to read it. Nothing
+  // is lost, only moved off a shared strip.
+  const icon = s.paused
+    ? '$(debug-pause)'
+    : running
+      ? '$(sync~spin)'
+      : s.lastSettle === 'interrupted'
+        ? '$(circle-slash)'
+        : reds > 0
+          ? '$(error)'
+          : '$(check)';
+  const at = running ? running.index + 1 : green;
+  const why = s.paused
+    ? 'paused'
+    : running
+      ? 'proving'
+      : s.lastSettle === 'interrupted'
+        ? 'interrupted'
+        : reds > 0
+          ? `${reds} red`
+          : 'all admitted';
+  // The file is named because the bar is one widget over many books: with two
+  // sessions live, `12/40` alone does not say whose. It goes in the tooltip
+  // rather than the strip, where the detail belongs.
+  setStatus(
+    s,
+    `${icon} ACL2 ${at}/${total}`,
+    `ACL2: ${basename(s.doc.fileName)} \u2014 ${green}/${total} admitted \u2014 ${why}` +
+      `\nClick to show the form view`
+  );
 }
 
 // ---- Output view and form view --------------------------------------------------

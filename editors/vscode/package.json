@@ -448,17 +448,17 @@
         "acl2-session.problems": {
           "type": "boolean",
           "default": true,
-          "description": "Report failed and skipped forms in the Problems view. VSCode draws a squiggle along with each one and gives no way to have the entry without it, so this is both. Turning it off in the 'minimal' decoration mode leaves a failed form marked by nothing at all, scrollbar included -- that mode's only mark for a failure is this."
+          "markdownDescription": "Report failed and skipped forms in the Problems view.\n\nVSCode draws a squiggle along with each entry and offers no way to have one without the other, so this is both. In the `minimal` decoration mode it is a failure's only mark, scrollbar included."
         },
         "acl2-session.conditionalWarnings": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "Report **conditional** forms as warnings in the Problems view.\n\nA conditional form was proved, and proved correctly \u2014 on top of a claim that was not, because a form above it went in with its proofs skipped. Nothing is wrong with it in isolation, and every form below the first skip is one, so this can be a great many warnings at once. Off by default for that reason; the status column and the wash say the same thing more quietly.\n\nRequires `#acl2-session.problems#`, which reports failed and skipped forms as errors."
+          "markdownDescription": "Report **conditional** forms as warnings in the Problems view.\n\nA conditional form was proved correctly, but on top of a claim that was not \u2014 a form above it went in with its proofs skipped. Off by default because everything below a skipped form is conditional, so this can be a great many rows."
         },
         "acl2-session.formWarnings": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Report ACL2's own warnings \u2014 `Double-rewrite`, `Use`, `Subsume` \u2014 in the Problems view.\n\nThe kind is all there is: ACL2 records the *set* a form emitted, so five double-rewrite warnings look like one, and what the warning actually says lives only in that form's output. How many forms carry one varies enormously by book \u2014 measured at 1% of forms in `arithmetic-light/mod.lisp` and 40% in `std/lists/sets.lisp` \u2014 and VSCode gives no way to have the Problems entry without the squiggle, so turn this off if your book is one of the latter."
+          "markdownDescription": "Report ACL2's own warnings \u2014 `Double-rewrite`, `Use`, `Subsume` \u2014 in the Problems view.\n\nThe kind is all there is: ACL2 records the *set* a form emitted, so five double-rewrite warnings look like one, and what any of them says is in that form's output. How many forms carry one varies from 1% to 40% by book; turn this off if yours is at the high end."
         },
         "acl2-session.highlightOutput": {
           "type": "boolean",
@@ -481,7 +481,7 @@
           "type": "number",
           "default": 60,
           "minimum": 20,
-          "description": "Width, in characters, that terms in a hover are laid out to. A fixed number rather than a measurement: VSCode tells an extension nothing about the size of a hover, and a tooltip is not a webview, so nothing can measure it. Matches the form view's default so a term reads the same in both."
+          "markdownDescription": "Width, in characters, that terms in a hover are laid out to. A fixed number because VSCode tells an extension nothing about a hover's size and a tooltip cannot measure itself. Matches the form view's default, so a term reads the same in both."
         },
         "acl2-session.certifyJobs": {
           "type": "integer",
@@ -492,7 +492,7 @@
         "acl2-session.colors": {
           "type": "object",
           "default": {},
-          "markdownDescription": "Override the status colours with concrete values, per status.\n\nMost customisation does not need this: the wash, the inline bar and the overview ruler are theme colours, so `workbench.colorCustomizations` on `acl2Session.bar.*` and `acl2Session.wash.*` already restyles them, follows the active theme, and has high-contrast variants.\n\nThe **gutter bar cannot** be a theme colour: it is drawn as an image, and an extension has no way to read a theme colour back as a value. Setting a colour here is what reaches it \u2014 the gutter icon is generated from the value \u2014 and the same value then drives the inline bar, the wash and the ruler, so the status column cannot end up disagreeing with itself.\n\nStatuses: `pending`, `running`, `admitted`, `conditional`, `skipped`, `failed`. Any CSS colour: `#fb4934`, `#fb493480`, `rgba(251, 73, 52, 0.65)`.",
+          "markdownDescription": "Override a status colour. Each status takes `bar` and `wash`, and each of those a string or `{ light, dark }` \u2014 any CSS colour, including `color-mix` over a theme variable. The gutter bar is the exception: it is an image, so only a literal reaches it.\n\nSee the extension README for the four sources and their precedence.",
           "additionalProperties": {
             "type": "object",
             "properties": {
@@ -559,7 +559,7 @@
         },
         "acl2-session.washOpacity": {
           "default": null,
-          "markdownDescription": "How strong the background wash is, in the `wash` decoration mode \u2014 0 to 1.\n\nThe hue follows your theme, so this is the part left to taste: the same tint reads differently over different backgrounds, and a low-contrast theme can swallow what a high-contrast one shouts. Defaults to 0.15 on light themes and 0.1 on dark ones.\n\nA single number applies to both; an object sets each. This adjusts whatever colour won \u2014 the theme's, or one from `workbench.colorCustomizations` \u2014 but not a wash written out in full under `acl2-session.colors`, which is taken exactly as given.",
+          "markdownDescription": "How strong the background washes are: a number, or `{ light, dark }`. Worth touching because how far a tint reads depends on the background under it. Adjusts whichever colour won, except one written out in full under `acl2-session.colors`.",
           "anyOf": [
             {
               "type": "number",
@@ -600,7 +600,7 @@
         "acl2-session.tabIndents": {
           "type": "boolean",
           "default": true,
-          "description": "Make Tab re-indent the current line, the way it does in Emacs, when the cursor is in an ACL2 file with nothing selected. On by default: it is the reflex every ACL2 author arrives with, and it is the repair for a line no formatter is asked about -- one opened by Vim's `o`, or by any command rather than by typing. What it costs is inserting a literal tab at the cursor, in files whose indentation is computed and written in spaces regardless. Turn it off to get VSCode's Tab back; indenting stays available as \"ACL2: Indent Line or Selection\"."
+          "markdownDescription": "Make Tab re-indent the current line, the way it does in Emacs, when the cursor is in an ACL2 file with nothing selected. On by default; it is also the repair for a line no formatter is asked about, such as one opened by Vim's `o`.\n\nWhat it costs is a literal tab at the cursor. Turn it off to get VSCode's Tab back \u2014 indenting stays available as **ACL2: Indent Line or Selection**."
         }
       }
     },
