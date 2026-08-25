@@ -218,8 +218,6 @@ interface BookSession {
    * writes a line a second for as long as it takes.
    */
   staleSaid?: string;
-  /** When the certification started, so any repaint can draw its clock. */
-  certifyStarted?: number;
 }
 
 let client: DaemonClient | undefined;
@@ -1002,7 +1000,11 @@ async function includeTargetAt(
  * VSCode-conventional behaviour for a build command anyway.
  *
  * The session is untouched -- `cert.pl` is a separate process tree, so
- * checking carries on and queries keep answering while it runs.
+ * checking carries on and queries keep answering while it runs. The build is
+ * followed in a progress notification (`certifyWithProgress`), not the status
+ * bar: a certification can take minutes and outlive the focus that started
+ * it, and the notification survives a tab switch and a dismissal where the
+ * status bar's single slot did not.
  */
 async function certifyBook(s: BookSession): Promise<void> {
   if (s.certifying) {
@@ -1017,44 +1019,88 @@ async function certifyBook(s: BookSession): Promise<void> {
   const jobs = vscode.workspace
     .getConfiguration('acl2-session')
     .get<number>('certifyJobs', 4);
-  s.certifyStarted = Date.now();
-  // Only to advance the clock. What it *says* is decided by the renderer, and
-  // whether it lands at all by the same ownership rule as everything else --
-  // so certifying one book while reading another leaves the bar on the one
-  // being read.
-  const tick = setInterval(() => updateStatusBar(s), 500);
   try {
-    const r: CertifyReply = await client!.request('certify', { book: s.id, jobs });
-    if (r.status === 'certified') {
-      void vscode.window.showInformationMessage(
-        `ACL2: certified in ${(r.elapsed_ms / 1000).toFixed(1)}s`
-      );
-    } else {
-      // The blamed book is usually a dependency rather than this one, and
-      // saying which is the difference between a report and "it broke".
-      const blamed = (r.failed_books ?? [])[0];
-      const where = blamed && !blamed.endsWith(basename(s.doc.fileName)) ? ` in ${basename(blamed)}` : '';
-      const pick = await vscode.window.showErrorMessage(
-        `ACL2: certification failed${where}${r.error_line ? `: ${r.error_line}` : ''}`,
-        'Show Log'
-      );
-      if (pick === 'Show Log' && r.output_ref) {
-        await showCertLog(s, r.output_ref, r.output_lines);
+    await certifyWithProgress({
+      label: basename(s.doc.fileName),
+      start: () => client!.request('certify', { book: s.id, jobs }) as Promise<CertifyReply>,
+      cancel: () => void client?.request('interrupt', { book: s.id }).catch(report),
+      showLog: (ref, lines) => showCertLog(s, ref, lines),
+    });
+  } finally {
+    s.certifying = false;
+  }
+}
+
+/**
+ * Follow one certification in a cancellable progress notification.
+ *
+ * The whole certification UI, current book and (later) dependency alike: the
+ * toast is up for the duration -- so its presence answers "is it running" --
+ * carries an elapsed clock ticked once a second, and its Cancel button
+ * interrupts the build. Dismissing the toast does not cancel; the running
+ * notification stays in the bell, clock and Cancel intact.
+ *
+ * `start` fires the certify request and resolves with its reply; `cancel`
+ * interrupts the build behind it. An interrupt makes `start` reject, so the
+ * user's own Cancel is told apart from a real fault by the `cancelled` flag
+ * -- reporting "interrupted" as an error is the one wrong thing to do here.
+ */
+function certifyWithProgress(opts: {
+  label: string;
+  start: () => Promise<CertifyReply>;
+  cancel: () => void;
+  showLog: (ref: string, lines: number) => Promise<void>;
+}): Thenable<void> {
+  return vscode.window.withProgress(
+    {
+      location: vscode.ProgressLocation.Notification,
+      cancellable: true,
+      title: `Certifying ${opts.label}`,
+    },
+    async (progress, token) => {
+      const started = Date.now();
+      const tick = setInterval(() => {
+        const secs = Math.floor((Date.now() - started) / 1000);
+        progress.report({ message: `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}` });
+      }, 1000);
+      let cancelled = false;
+      token.onCancellationRequested(() => {
+        cancelled = true;
+        opts.cancel();
+      });
+      try {
+        const r = await opts.start();
+        if (r.status === 'certified') {
+          void vscode.window.showInformationMessage(
+            `ACL2: certified ${opts.label} in ${(r.elapsed_ms / 1000).toFixed(1)}s`
+          );
+        } else {
+          // The blamed book is usually a dependency rather than this one, and
+          // saying which is the difference between a report and "it broke".
+          const blamed = (r.failed_books ?? [])[0];
+          const where = blamed && basename(blamed) !== opts.label ? ` in ${basename(blamed)}` : '';
+          const pick = await vscode.window.showErrorMessage(
+            `ACL2: certification of ${opts.label} failed${where}` +
+              (r.error_line ? `: ${r.error_line}` : ''),
+            'Show Log'
+          );
+          if (pick === 'Show Log' && r.output_ref) {
+            await opts.showLog(r.output_ref, r.output_lines);
+          }
+        }
+      } catch (e) {
+        if (cancelled) {
+          void vscode.window.showInformationMessage(
+            `ACL2: certification of ${opts.label} cancelled`
+          );
+        } else {
+          report(e);
+        }
+      } finally {
+        clearInterval(tick);
       }
     }
-  } catch (e) {
-    report(e);
-  } finally {
-    clearInterval(tick);
-    s.certifying = false;
-    s.certifyStarted = undefined;
-    // Both: `updateStatusBar` repaints this book if it owns the bar, and
-    // `refreshStatusBar` repaints whichever book does if it does not -- the
-    // interrupt command must not outlive the certification either way, and
-    // with the focus elsewhere this book cannot clear it itself.
-    updateStatusBar(s);
-    refreshStatusBar();
-  }
+  );
 }
 
 function basename(p: string): string {
@@ -2577,23 +2623,9 @@ function setStatus(
 }
 
 function updateStatusBar(s: BookSession): void {
-  // A certification is a state of *this book*, drawn by the same renderer as
-  // every other, so that a repaint from any cause -- a tab switch back to it,
-  // a settle, the clock's own timer -- shows the same thing. It used to be
-  // written straight to the widget from a timer, which is what made it race.
-  if (s.certifying) {
-    const secs = Math.floor((Date.now() - (s.certifyStarted ?? Date.now())) / 1000);
-    setStatus(
-      s,
-      `$(sync~spin) ACL2 certifying ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`,
-      `ACL2: certifying ${basename(s.doc.fileName)}\nClick to interrupt`,
-      // The book is named in the argument as well as the tooltip: the bar is
-      // timing one book and the focus may be on another, and resolved against
-      // the active editor this interrupted the wrong session.
-      { command: 'acl2-session.interrupt', title: 'Interrupt', arguments: [s.id] }
-    );
-    return;
-  }
+  // Certification no longer appears here -- it has its own progress
+  // notification (`certifyWithProgress`). The status bar is the book's proof
+  // status and nothing else, which is why a running build leaves it alone.
   const units = s.lastState?.units ?? [];
   const total = units.length;
   const green = units.filter((u) => u.status === 'admitted' || u.status === 'conditional').length;
