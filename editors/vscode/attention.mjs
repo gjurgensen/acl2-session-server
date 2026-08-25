@@ -13,6 +13,12 @@
 
 import { createRequire } from 'module';
 
+import { freshOrDie } from './fresh.mjs';
+
+// Before the first require: this harness tests the compiled module, so a
+// stale out/ makes it report on code that is not the code.
+freshOrDie();
+
 const require = createRequire(import.meta.url);
 const { attentionPoints } = require('./out/policy.js');
 

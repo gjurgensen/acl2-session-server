@@ -1,16 +1,25 @@
-# What CI can check without an ACL2: build, the ACL2-free test suites, and
-# clippy with warnings promoted to errors.
+# What CI can check without an ACL2: build, the ACL2-free test suites on both
+# sides of the wire, and clippy with warnings promoted to errors.
 #
-# The live suites -- 25 core tests plus 4 wire tests that drive the built
-# server over stdio -- need a real saved_acl2 image and stay local:
+# The live suites -- 51 core tests, 21 editor-protocol tests and 8 MCP wire
+# tests that drive the built servers over stdio -- need a real saved_acl2
+# image and stay local:
 #
 #   ACL2=/path/to/saved_acl2 cargo test -- --ignored --test-threads=1
+#
+# (Two more, in `corpus.rs`, want `ACL2_BOOKS` rather than an image.)
 #
 # They are the tests that matter most, so green CI means "nothing that can be
 # checked cheaply broke", not "the server works"; run the live suite before
 # trusting a change. rustfmt is deliberately not enforced: the tree carries
 # hand-laid formatting (probe strings, aligned narration) that a formatter
 # would churn.
+#
+# The extension is checked too, and has to be: the client is typed against
+# the daemon's wire by hand, so a Rust-side rename that breaks it is exactly
+# the kind of thing that sails through a Rust-only CI. `npm test` compiles it
+# and runs the nine harnesses that need no ACL2 -- `smoke.mjs`, which drives
+# a real daemon, stays local with the rest of the live suite.
 
 name: ci
 
@@ -37,3 +46,20 @@ jobs:
         run: cargo test --workspace
       - name: Clippy, warnings as errors
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+  extension:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+      - name: Install exactly what the lockfile says
+        run: npm ci
+      - name: Compile and run the ACL2-free harnesses
+        run: npm test

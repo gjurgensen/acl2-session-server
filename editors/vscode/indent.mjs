@@ -17,16 +17,29 @@
 //
 //   npm run compile   (or tsc -p .)
 //   node indent.mjs [file-or-directory ...]
+//
+// With no arguments it reindents two directories of the community books,
+// found under `ACL2_BOOKS`.
 
 import { readFileSync, readdirSync, statSync } from 'fs';
 import { join } from 'path';
 import { createRequire } from 'module';
 
+import { freshOrDie } from './fresh.mjs';
+
+// Before the first require: this harness tests the compiled module, so a
+// stale out/ makes it report on code that is not the code.
+freshOrDie();
+
 const require = createRequire(import.meta.url);
 const { reindent, topLevelStarts, insideOpaque, plannedIndent, enclosingStart } =
   require('./out/indent.js');
 
-const BOOKS = '/path/to/acl2/books';
+// `ACL2_BOOKS`, the same spelling `source-grammar.mjs` reads, then a
+// placeholder as the last resort. Without the env var a fresh clone
+// degraded silently to the unit cases with no hint that a corpus was even
+// wanted, and the score this harness exists to produce simply did not appear.
+const BOOKS = process.env.ACL2_BOOKS ?? '/path/to/acl2/books';
 const DEFAULT = [join(BOOKS, 'kestrel/c/syntax'), join(BOOKS, 'kestrel/fty')];
 
 function lispFiles(p) {
@@ -226,7 +239,7 @@ plan('Enter after a finished form lands at column zero',
 
 const targets = (process.argv.slice(2).length ? process.argv.slice(2) : DEFAULT).flatMap(lispFiles);
 if (!targets.length) {
-  console.log(`\nno corpus at ${BOOKS} -- unit cases only`);
+  console.log(`\nno corpus at ${BOOKS} -- unit cases only (pass a path or set ACL2_BOOKS)`);
   process.exit(unitBad ? 1 : 0);
 }
 

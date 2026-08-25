@@ -766,11 +766,13 @@
   },
   "scripts": {
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "watch": "tsc -watch -p ./",
+    "clean": "rm -rf out",
+    "test": "npm run compile && node attention.mjs && node barrier.mjs && node indent.mjs && node output-grammar.mjs && node paintmap.mjs && node positions.mjs && node source-grammar.mjs && node themecolors.mjs && node webview.mjs"
   },
   "devDependencies": {
     "@types/node": "^16.11.7",
-    "@types/vscode": "^1.77.0",
+    "@types/vscode": "1.77.0",
     "typescript": "^5.0.2"
   },
   "dependencies": {
