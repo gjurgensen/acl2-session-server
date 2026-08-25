@@ -415,3 +415,35 @@ export function warningMessage(kind: string): string {
       return kind;
   }
 }
+
+// ---- serializing certifications ------------------------------------------
+
+/**
+ * A one-at-a-time runner for async jobs.
+ *
+ * Certifications must not overlap: `cert.pl` already parallelises a build with
+ * `-j`, so two at once only oversubscribe the machine, and -- worse -- two
+ * builds whose dependency graphs share a library race on the same `.cert`
+ * files. Serialising also lets the second build *reuse* the `.cert` files the
+ * first produced instead of redoing them.
+ *
+ * Each call queues a job behind every earlier one and resolves with that job's
+ * own result (or rejection). A job that throws does not break the chain: the
+ * next runs regardless, because a failed build must not wedge every build
+ * after it. Pure and free of any editor type, so the ordering is unit-tested
+ * without a webview.
+ */
+export function makeSerializer(): <T>(job: () => Promise<T>) => Promise<T> {
+  let tail: Promise<unknown> = Promise.resolve();
+  return <T>(job: () => Promise<T>): Promise<T> => {
+    // Run after the previous settles either way -- `then(job, job)` so a
+    // rejection upstream still lets this one start.
+    const run = tail.then(job, job) as Promise<T>;
+    // The chain itself swallows outcomes; only the caller sees them.
+    tail = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  };
+}

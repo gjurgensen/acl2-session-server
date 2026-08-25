@@ -23,6 +23,7 @@ import {
   diagnosticMessage,
   warningMessage,
   keepAnchor,
+  makeSerializer,
   pinnedIndex,
   planTail,
   stepBarrier,
@@ -1032,18 +1033,30 @@ async function certifyBook(s: BookSession): Promise<void> {
 }
 
 /**
+ * The one runner every certification serializes through -- current book and
+ * dependency alike -- so no two builds overlap. See `makeSerializer`.
+ */
+const certSerialize = makeSerializer();
+
+/**
  * Follow one certification in a cancellable progress notification.
  *
- * The whole certification UI, current book and (later) dependency alike: the
- * toast is up for the duration -- so its presence answers "is it running" --
- * carries an elapsed clock ticked once a second, and its Cancel button
- * interrupts the build. Dismissing the toast does not cancel; the running
- * notification stays in the bell, clock and Cancel intact.
+ * The whole certification UI, current book and dependency alike. The toast is
+ * up from the moment it is asked for -- so its presence answers "is it still
+ * going" -- and it passes through two phases:
+ *
+ *   - **queued**, while an earlier build runs: the message says so, and Cancel
+ *     simply drops this one out of the queue, touching no build;
+ *   - **running**: the message becomes an elapsed clock ticked once a second,
+ *     and Cancel interrupts the build.
+ *
+ * Dismissing the toast never cancels; the notification stays in the bell with
+ * its clock and Cancel intact.
  *
  * `start` fires the certify request and resolves with its reply; `cancel`
  * interrupts the build behind it. An interrupt makes `start` reject, so the
- * user's own Cancel is told apart from a real fault by the `cancelled` flag
- * -- reporting "interrupted" as an error is the one wrong thing to do here.
+ * user's Cancel is told apart from a real fault -- reporting "interrupted" as
+ * an error is the one wrong thing to do here.
  */
 function certifyWithProgress(opts: {
   label: string;
@@ -1058,46 +1071,68 @@ function certifyWithProgress(opts: {
       title: `Certifying ${opts.label}`,
     },
     async (progress, token) => {
-      const started = Date.now();
-      const tick = setInterval(() => {
-        const secs = Math.floor((Date.now() - started) / 1000);
-        progress.report({ message: `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}` });
-      }, 1000);
+      progress.report({ message: 'queued…' });
       let cancelled = false;
+      let running = false;
       token.onCancellationRequested(() => {
         cancelled = true;
-        opts.cancel();
+        // Only a *running* build has something to interrupt; a queued one is
+        // dropped by the guard at the top of the job below.
+        if (running) {
+          opts.cancel();
+        }
       });
-      try {
-        const r = await opts.start();
-        if (r.status === 'certified') {
-          void vscode.window.showInformationMessage(
-            `ACL2: certified ${opts.label} in ${(r.elapsed_ms / 1000).toFixed(1)}s`
-          );
-        } else {
-          // The blamed book is usually a dependency rather than this one, and
-          // saying which is the difference between a report and "it broke".
-          const blamed = (r.failed_books ?? [])[0];
-          const where = blamed && basename(blamed) !== opts.label ? ` in ${basename(blamed)}` : '';
-          const pick = await vscode.window.showErrorMessage(
-            `ACL2: certification of ${opts.label} failed${where}` +
-              (r.error_line ? `: ${r.error_line}` : ''),
-            'Show Log'
-          );
-          if (pick === 'Show Log' && r.output_ref) {
-            await opts.showLog(r.output_ref, r.output_lines);
-          }
-        }
-      } catch (e) {
+      await certSerialize(async () => {
         if (cancelled) {
-          void vscode.window.showInformationMessage(
-            `ACL2: certification of ${opts.label} cancelled`
-          );
-        } else {
-          report(e);
+          // Cancelled while still waiting its turn: never started, nothing to
+          // interrupt, just fall through to the notice below.
+          return;
         }
-      } finally {
-        clearInterval(tick);
+        running = true;
+        const started = Date.now();
+        const tick = setInterval(() => {
+          const secs = Math.floor((Date.now() - started) / 1000);
+          progress.report({
+            message: `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`,
+          });
+        }, 1000);
+        try {
+          const r = await opts.start();
+          if (r.status === 'certified') {
+            void vscode.window.showInformationMessage(
+              `ACL2: certified ${opts.label} in ${(r.elapsed_ms / 1000).toFixed(1)}s`
+            );
+          } else {
+            // The blamed book is usually a dependency rather than this one,
+            // and saying which is the difference between a report and "it
+            // broke".
+            const blamed = (r.failed_books ?? [])[0];
+            const where = blamed && basename(blamed) !== opts.label ? ` in ${basename(blamed)}` : '';
+            const pick = await vscode.window.showErrorMessage(
+              `ACL2: certification of ${opts.label} failed${where}` +
+                (r.error_line ? `: ${r.error_line}` : ''),
+              'Show Log'
+            );
+            if (pick === 'Show Log' && r.output_ref) {
+              await opts.showLog(r.output_ref, r.output_lines);
+            }
+          }
+        } catch (e) {
+          if (cancelled) {
+            void vscode.window.showInformationMessage(
+              `ACL2: certification of ${opts.label} cancelled`
+            );
+          } else {
+            report(e);
+          }
+        } finally {
+          clearInterval(tick);
+        }
+      });
+      if (cancelled && !running) {
+        void vscode.window.showInformationMessage(
+          `ACL2: certification of ${opts.label} cancelled`
+        );
       }
     }
   );

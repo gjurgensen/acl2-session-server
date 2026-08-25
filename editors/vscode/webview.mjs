@@ -1301,6 +1301,39 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   }
 }
 
+// ---- certifications run one at a time ----
+//
+// cert.pl already parallelises with -j, and two builds whose graphs share a
+// library race on the same .cert files -- so the serializer must never let two
+// jobs overlap, must run them in order, and must not wedge on a failure.
+{
+  const { makeSerializer } = require('./out/policy.js');
+  const run = makeSerializer();
+  const log = [];
+  const job = (id, ms, fail) => () =>
+    new Promise((res, rej) => {
+      log.push('start ' + id);
+      setTimeout(() => {
+        log.push('end ' + id);
+        fail ? rej(new Error(id)) : res(id);
+      }, ms);
+    });
+  // Queue three at once; the first is the slowest. If they overlapped, a
+  // later "start" would appear before the earlier "end".
+  const a = run(job('a', 20));
+  const b = run(job('b', 1, true)); // b rejects
+  const c = run(job('c', 1));
+  const settled = await Promise.allSettled([a, b, c]);
+  check(log.join(',') === 'start a,end a,start b,end b,start c,end c',
+    `serialized, in order, no overlap (got ${log.join(',')})`);
+  check(settled[0].value === 'a' && settled[2].value === 'c',
+    'each caller gets its own job’s result');
+  check(settled[1].status === 'rejected',
+    'a failing job rejects to its caller');
+  check(log.includes('start c'),
+    'and does not wedge the chain: c ran after b failed');
+}
+
 // ---- a Problems row names what is wrong, tersely, from the status alone ----
 {
   const { diagnosticMessage, warningMessage } = require('./out/policy.js');
