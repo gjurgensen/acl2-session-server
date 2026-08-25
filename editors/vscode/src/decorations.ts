@@ -3,7 +3,9 @@
 // `gutter` (the default) is a continuous gutter status column of bars, the
 // Dafny shape, and nothing else -- the buffer text stays entirely unmarked.
 // Gray over lines queued but not yet processed (the load-bearing signal on
-// a book that takes minutes), blue over the form being proved, green over
+// a book that takes minutes), the same grey pulsing over the form being
+// proved -- a running form is a queued form that has come up, not a fifth
+// kind of thing -- green over
 // admitted forms ("actually good" is a positive mark, not an absence),
 // yellow over conditional ones, red over skipped/failed ones. Every status
 // echoes in the overview ruler. The failure envelope's home is the form view;
@@ -41,7 +43,6 @@ import {
   INLINE_TARGET,
   WASHES,
   barColorId,
-  barFor,
   markFor,
   spinnerSvg,
   forTheme,
@@ -551,22 +552,35 @@ export class Decorations {
     for (const t of this.everyType()) {
       editor.setDecorations(t, []);
     }
-    editor.setDecorations(this.unreadable, []);
   }
 
   dispose(): void {
     for (const t of this.everyType()) {
       t.dispose();
     }
-    this.unreadable.dispose();
   }
 
+  /**
+   * Every type this object owns -- the list `clear`, `dispose` and `reload`
+   * all work from.
+   *
+   * Every type, with no exceptions kept elsewhere: the spinner was missing
+   * from it entirely and `unreadable` was handled by a line of its own beside
+   * each caller, so both were one edit away from being forgotten and both
+   * were. `clear` (via `dropBook`) never stopped the spinner, so stopping a
+   * session mid-proof in `minimal` mode left it turning in the gutter with no
+   * session behind it; `reload` disposed this list and then `build`
+   * reassigned the two fields, leaking the old types and stranding whatever
+   * they were drawing with no handle left to clear it.
+   */
   private everyType(): vscode.TextEditorDecorationType[] {
     return [
       ...this.washes.values(),
       ...this.washParts.values(),
       ...this.gutterBars.values(),
       ...this.inlineBars.values(),
+      this.spinner,
+      this.unreadable,
       this.unreadableBar,
       this.target,
     ];
