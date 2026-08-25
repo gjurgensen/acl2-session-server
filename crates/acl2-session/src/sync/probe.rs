@@ -412,15 +412,23 @@ pub(super) const EVENT_DATA_PROBE: &str = r#"(acl2::prog2$
           (acl2::list "" "splitter ~x*~%" "splitter ~x*~%" "splitter ~x*~%"
             (acl2::get-event-data 'acl2::splitter-rules acl2::state)))
         (acl2::prog2$
+          (acl2::cw "xdoc ~x0~%"
+            (acl2::if (acl2::assoc-equal "XDOC" (acl2::known-package-alist acl2::state))
+              (acl2::len
+                (acl2::cdr (acl2::assoc-eq (acl2::intern$ "DOC" "XDOC")
+                  (acl2::table-alist (acl2::intern$ "XDOC" "XDOC") (acl2::w acl2::state)))))
+              0))
+        (acl2::prog2$
           (acl2::cw "<<<PROBE-END evd>>>~%")
-          (acl2::value :invisible)))))))"#;
+          (acl2::value :invisible))))))))"#;
 
 pub(super) fn parse_event_data(sub: &crate::session::Submission) -> EventData {
     let mut e = EventData::default();
     let Some(body) = sub.block("evd") else { return e };
     // ACL2 wraps long values at its right margin, so a value runs until the
     // next known key rather than to end of line.
-    let done = keyed_block(body, &["steps", "warning", "time", "rule", "hint", "splitter"]);
+    let done =
+        keyed_block(body, &["steps", "warning", "time", "rule", "hint", "splitter", "xdoc"]);
     let pick = |k: &str| -> Option<String> {
         done.iter()
             .find(|(dk, _)| dk == k)
@@ -439,6 +447,7 @@ pub(super) fn parse_event_data(sub: &crate::session::Submission) -> EventData {
         .map(|w| unquote(&w).unwrap_or(w))
         .collect();
     e.time = pick("time");
+    e.xdoc_topics = pick("xdoc").and_then(|v| v.parse().ok());
     e
 }
 
@@ -1585,6 +1594,33 @@ mod capture_tests {
             blocks: blocks.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
             elapsed: Duration::ZERO,
         }
+    }
+
+    /// The xdoc count rides on the probe every form already pays for, so it
+    /// has to survive the same block parser as everything beside it -- and
+    /// mean the right thing when the world has no xdoc at all.
+    #[test]
+    fn the_xdoc_count_is_read_from_the_event_block() {
+        let e = parse_event_data(&sub(&[("evd", "steps 12\nxdoc 7184\n")]));
+        assert_eq!(e.xdoc_topics, Some(7184));
+        assert_eq!(e.prover_steps, Some(12), "its neighbours still read");
+
+        // Zero is a *state*, not an absence: the probe's guard answers 0 in a
+        // world with no XDOC package rather than failing, which is the whole
+        // reason it can ride along on every form. A world without xdoc must
+        // read as "documented nothing", not as "unknown".
+        assert_eq!(parse_event_data(&sub(&[("evd", "xdoc 0\n")])).xdoc_topics, Some(0));
+
+        // No line at all is the probe not having run, which is a different
+        // thing again -- nothing is known, rather than nothing documented.
+        assert_eq!(parse_event_data(&sub(&[("evd", "steps 3\n")])).xdoc_topics, None);
+
+        // It is a running total, so a form documents something exactly when
+        // the count moves. Both readings have to come from the same place or
+        // the subtraction is meaningless.
+        let before = parse_event_data(&sub(&[("evd", "xdoc 7184\n")])).xdoc_topics;
+        let after = parse_event_data(&sub(&[("evd", "xdoc 7186\n")])).xdoc_topics;
+        assert_eq!(after.zip(before).map(|(a, b)| a - b), Some(2));
     }
 
     // ---- parse_inner --------------------------------------------------------

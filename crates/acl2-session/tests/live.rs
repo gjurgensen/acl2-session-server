@@ -2816,3 +2816,69 @@ fn a_slow_probe_is_discarded_rather_than_reported_as_an_eval() {
     let ev = b.eval("(+ 1 1)", Duration::from_secs(30)).unwrap();
     assert_eq!(ev.value.map(|v| v.text).as_deref(), Some("2"));
 }
+
+/// Which forms contributed documentation, from ACL2's own table.
+///
+/// The count is a running total of `(xdoc doc)` in the world, so a form
+/// documented something exactly when its count exceeds the previous form's.
+/// A total rather than a delta because the table is *world state*: a rollback
+/// restores it along with everything else, and a stored delta would not know
+/// that had happened.
+///
+/// The probe names no package. `xdoc::` in a world without XDOC is a **read**
+/// error that aborts from raw Lisp and takes the rest of the submission with
+/// it -- so the table's name and key are interned from strings at runtime,
+/// behind a guard on `known-package-alist`. That is what lets this ride along
+/// on the probe every form already pays for rather than needing one of its
+/// own, and it is why the first form here is in a bare world on purpose.
+#[test]
+#[ignore = "needs ACL2"]
+fn documented_forms_are_told_apart_from_undocumented_ones() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("xdoc-count");
+    let book = dir.join("doc.lisp");
+
+    // A bare world first: no xdoc anywhere, and the probe must still answer.
+    write(&book, &["(in-package \"ACL2\")", "(defun bare (x) x)"]);
+    let mut b = Book::open(&acl2, &book).expect("open");
+    let o = b.sync(None, D).expect("bare sync");
+    assert_eq!(o.admitted.last().expect("a form").event_data.xdoc_topics, Some(0),
+               "a world with no xdoc answers zero, not nothing");
+
+    write(&book, &[
+        "(in-package \"ACL2\")",
+        "(defun bare (x) x)",
+        "(include-book \"xdoc/top\" :dir :system)",
+        "(defxdoc a-topic :short \"documented\")",
+        "(defun undocumented (x) x)",
+        "(defxdoc b-topic :short \"also documented\")",
+    ]);
+    let o = b.sync(None, D).expect("documented sync");
+    let counts: Vec<Option<usize>> =
+        o.admitted.iter().map(|u| u.event_data.xdoc_topics).collect();
+    assert!(counts.iter().all(Option::is_some), "every form answered: {counts:?}");
+    let n: Vec<usize> = counts.into_iter().flatten().collect();
+
+    // Only the four *new* forms: `admitted` is what this sync added, not the
+    // reused prefix, so the counts start at the include-book.
+    assert_eq!(n.len(), 4, "four new forms: {n:?}");
+    assert!(n[1] > n[0], "a defxdoc adds one: {n:?}");
+    assert_eq!(n[2], n[1], "a plain defun adds none: {n:?}");
+    assert!(n[3] > n[2], "and the second defxdoc adds one more: {n:?}");
+
+    // A rollback takes the topics with it, because the table is world state.
+    // Nothing here maintains that -- `ubu!` does -- which is the argument for
+    // recording a total rather than a difference.
+    write(&book, &[
+        "(in-package \"ACL2\")",
+        "(defun bare (x) x)",
+        "(include-book \"xdoc/top\" :dir :system)",
+        "(defxdoc a-topic :short \"documented\")",
+        "(defun undocumented (x) x)",
+    ]);
+    let o = b.sync(None, D).expect("rollback sync");
+    assert!(o.rolled_back > 0, "the last form went away");
+    let after = b.sync(None, D).expect("settle");
+    let _ = after;
+    let _ = std::fs::remove_dir_all(&dir);
+}

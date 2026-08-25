@@ -219,6 +219,24 @@ pub struct EventData {
     /// identically here. Multiplicity exists solely in the printed output,
     /// which is where a client counting them must look.
     pub warnings: Vec<String>,
+    /// How many xdoc topics the world held *after* this event.
+    ///
+    /// A running total, not this form's contribution: the difference against
+    /// the previous form is what says whether this one documented anything,
+    /// and the caller has both. Kept as the total because that is what
+    /// survives a rollback correctly -- the table is world state, so `ubu!`
+    /// restores it, and a stored delta would not know that had happened.
+    ///
+    /// `Some(0)` in a world with no xdoc, which is an ordinary state and not
+    /// a failure. `None` only when the probe did not run at all.
+    ///
+    /// The probe names no package. `xdoc::` in a world without XDOC is a
+    /// *read* error that aborts from raw Lisp and takes the session with it --
+    /// measured, and it ends the whole submission rather than one form -- so
+    /// both symbols are interned from strings at runtime behind a guard on
+    /// `known-package-alist`. That is what lets this ride along on the probe
+    /// every form already pays for, instead of needing one of its own.
+    pub xdoc_topics: Option<usize>,
     /// `(prove print proof-tree other)`, in seconds.
     pub time: Option<String>,
     /// Hints that fired, one per entry -- `((:use lemma))` and friends.
