@@ -2468,14 +2468,17 @@ function updateStatusBar(s: BookSession): void {
         ? 'interrupted'
         : reds > 0
           ? `${reds} red`
-          : 'all admitted';
+          // Nothing to add: the count already says every form went in, and
+          // "40/40 admitted -- all admitted" says it twice.
+          : '';
   // The file is named because the bar is one widget over many books: with two
   // sessions live, `12/40` alone does not say whose. It goes in the tooltip
   // rather than the strip, where the detail belongs.
   setStatus(
     s,
     `${icon} ACL2 ${at}/${total}`,
-    `ACL2: ${basename(s.doc.fileName)} \u2014 ${green}/${total} admitted \u2014 ${why}` +
+    `ACL2: ${basename(s.doc.fileName)} \u2014 ${green}/${total} admitted` +
+      (why ? ` \u2014 ${why}` : '') +
       `\nClick to show the form view`
   );
 }
