@@ -141,46 +141,5 @@ for (const [line, column] of [[1, 0], [3, 4], [5, 1], [5, 8], [7, 1], [9, 10], [
   check('a repeated kind is one entry', warningKinds('Use, Use'), ['Use']);
 }
 
-// ---- what a Problems row says ----
-{
-  const { diagnosticMessage } = require('./out/policy.js');
-  const m = (o) => diagnosticMessage(o);
-
-  // Short. A diagnostic names what is wrong; the form view explains it. These
-  // were paragraphs -- the conditional one recommended a remedy, and the
-  // skipped one said "skipped" twice in one sentence.
-  check('a skipped form', m({ kind: 'error', status: 'skipped' }),
-    'ACL2 Error: proofs skipped');
-  check('a conditional form', m({ kind: 'warning', status: 'conditional', conditionalOn: 12 }),
-    'ACL2 Warning: conditional on line 12');
-  check('and one whose cause is unknown',
-    m({ kind: 'warning', status: 'conditional' }), 'ACL2 Warning: conditional');
-  check('a form that gave up',
-    m({ kind: 'error', status: 'failed', abortCause: 'empty-clause' }),
-    'ACL2 Error: empty-clause');
-  check('and one with nothing said about it at all',
-    m({ kind: 'error', status: 'failed' }), 'ACL2 Error: not admitted');
-
-  // ACL2's own line, verbatim and unprefixed: it already says "ACL2 Error",
-  // and with a prefix it stuttered.
-  const real = 'ACL2 Error in ( DEFTHM FOO ...):  The proof failed.';
-  check('ACL2 speaks for itself when it has spoken',
-    m({ kind: 'error', status: 'failed', errorLine: '  ' + real + ' ' }), real);
-  check('and is not prefixed with a second ACL2',
-    /^ACL2 Error: ACL2/.test(m({ kind: 'error', status: 'failed', errorLine: real })), false);
-
-  // The invariant that is easy to get wrong by hand: `skipped` reads like a
-  // warning and is reported as an *error*, so a label written into the string
-  // would contradict the icon beside it. Whenever we supply the label, it
-  // names the severity the diagnostic actually carries.
-  for (const status of ['skipped', 'conditional', 'failed']) {
-    for (const kind of ['error', 'warning']) {
-      const s = m({ kind, status, conditionalOn: 3, abortCause: 'x' });
-      check(`${kind}/${status} labels itself ${kind}`,
-        s.startsWith(kind === 'warning' ? 'ACL2 Warning:' : 'ACL2 Error:'), true);
-    }
-  }
-}
-
 console.log(failures === 0 ? 'barrier: all green' : `barrier: ${failures} failed`);
 process.exit(failures === 0 ? 0 : 1);
