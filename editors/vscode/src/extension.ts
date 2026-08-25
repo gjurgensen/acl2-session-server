@@ -20,6 +20,7 @@ import {
   Edit,
   attentionPoints,
   barrierIndex,
+  diagnosticMessage,
   keepAnchor,
   pinnedIndex,
   planTail,
@@ -2207,8 +2208,7 @@ function updateProblems(s: BookSession): void {
     const text = doc.lineAt(line).text;
     const d = new vscode.Diagnostic(
       new vscode.Range(line, 0, line, Math.max(1, text.length)),
-      `ACL2: ${s.unreadableWhy ?? 'the file cannot be read from here'} \u2014 ` +
-        'nothing below this point has been checked.',
+      `ACL2 Error: ${s.unreadableWhy ?? 'cannot be read from here'}`,
       vscode.DiagnosticSeverity.Error
     );
     d.source = 'ACL2';
@@ -2249,7 +2249,7 @@ function updateProblems(s: BookSession): void {
     for (const k of kinds) {
       const w = new vscode.Diagnostic(
         span,
-        `ACL2 Warning [${k}] \u2014 see this form's output for what it says.`,
+        `ACL2 Warning: ${k.toLowerCase()}`,
         vscode.DiagnosticSeverity.Warning
       );
       w.source = 'ACL2';
@@ -2259,18 +2259,13 @@ function updateProblems(s: BookSession): void {
       continue;
     }
     const e = s.unitEvents.get(u.index);
-    const why =
-      e?.error_line?.trim() ||
-      (e?.abort_cause ? `the proof gave up: ${e.abort_cause}` : undefined) ||
-      (u.status === 'skipped' ? 'admitted with its proofs skipped' : 'this form did not go in');
-    const message =
-      u.status === 'conditional'
-        ? 'ACL2: this form was proved, but on top of a claim that was not' +
-          (because === undefined ? '' : ` \u2014 see line ${because}`) +
-          '. Re-check without skipping, or certify, before trusting it.'
-        : u.status === 'skipped'
-          ? `ACL2 skipped this form's proofs \u2014 ${why}`
-          : `ACL2: ${why}`;
+    const message = diagnosticMessage({
+      kind,
+      status: u.status,
+      errorLine: e?.error_line,
+      abortCause: e?.abort_cause,
+      conditionalOn: because,
+    });
     const d = new vscode.Diagnostic(
       span,
       message,
