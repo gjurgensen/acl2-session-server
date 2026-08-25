@@ -198,7 +198,9 @@ enum RequestError {
 /// form finishes -- which may be after a proof it queued behind.
 enum Answer {
     Now(Value),
-    ByDriver,
+    /// Somebody else holds the id and will reply: a driver for the verbs it
+    /// runs against a session, or `open`'s own thread while ACL2 starts.
+    Later,
 }
 
 struct Daemon {
@@ -214,6 +216,15 @@ struct Daemon {
     /// breath, so the handles have to be kept somewhere the sweep still
     /// reaches or the process exits mid-unwind and the child is left running.
     closing: Mutex<Vec<std::thread::JoinHandle<()>>>,
+    /// Opens still starting their ACL2.
+    ///
+    /// `open` runs off the protocol thread (see `request`), so at EOF there
+    /// may be a book that does not exist yet and is about to. Joined *before*
+    /// the books sweep, so that whatever these threads register is in the map
+    /// by the time the sweep reads it -- otherwise an open racing a shutdown
+    /// leaves an ACL2 nobody ever kills, which is the one thing the sweep
+    /// exists to prevent.
+    opening: Mutex<Vec<std::thread::JoinHandle<()>>>,
     out: Out,
 }
 
@@ -223,14 +234,51 @@ impl Daemon {
         books.get(book).map(f).ok_or_else(|| format!("unknown book {book:?}"))
     }
 
-    fn request(&self, id: &Value, method: &str, params: Value) -> Result<Answer, RequestError> {
+    /// Answer one request.
+    ///
+    /// Everything here runs on the protocol thread -- the only thread reading
+    /// stdin -- so anything slow answered inline is a stall for every book,
+    /// not just its own. That is why the session verbs hand off to their
+    /// driver and reply `Later`.
+    ///
+    /// `open` is the same shape for the same reason, and it was the one that
+    /// was not. Starting ACL2 is a handshake that runs to the
+    /// customization-file timeout in the bad case, and holding it here meant a
+    /// second book's open stopped every other book's `update`, `hover` and
+    /// `interrupt` from even being *read*. With one book it is invisible;
+    /// with two it is a freeze. `Book::open` already runs unlocked so the
+    /// registry stays answerable, which was half the property -- the other
+    /// half is not blocking the reader.
+    fn request(
+        self: &Arc<Self>,
+        id: &Value,
+        method: &str,
+        params: Value,
+    ) -> Result<Answer, RequestError> {
         fn args<T: serde::de::DeserializeOwned>(params: Value) -> Result<T, RequestError> {
             serde_json::from_value(params).map_err(|e| RequestError::Failed(e.to_string()))
         }
         let fail = RequestError::Failed;
         let now = |r: Result<Value, String>| r.map(Answer::Now).map_err(RequestError::Failed);
         match method {
-            "open" => now(self.open(args(params)?)),
+            "open" => {
+                let p: wire::OpenParams = args(params)?;
+                let id = id.clone();
+                let me = self.clone();
+                let t = std::thread::Builder::new()
+                    .name("acl2-session-open".into())
+                    .spawn(move || match me.open(p) {
+                        Ok(v) => me.out.reply(&id, v),
+                        Err(e) => me.out.error(&id, -32603, e),
+                    })
+                    .map_err(|e| fail(e.to_string()))?;
+                let mut opening = self.opening.lock().expect("opening lock");
+                // Reap the ones that finished while we were not looking, so a
+                // long editing session does not accumulate a handle per open.
+                opening.retain(|h| !h.is_finished());
+                opening.push(t);
+                Ok(Answer::Later)
+            }
             "close" => {
                 let p: wire::BookParams = args(params)?;
                 now(self.close(&p.book))
@@ -250,7 +298,7 @@ impl Daemon {
                 })
                 .map_err(fail)?
                 .map_err(fail)?;
-                Ok(Answer::ByDriver)
+                Ok(Answer::Later)
             }
             // Answered by the driver like `eval`, because it needs the
             // session -- but never queued behind one: see `Driver::describe`.
@@ -263,7 +311,7 @@ impl Daemon {
                 })
                 .map_err(fail)?
                 .map_err(fail)?;
-                Ok(Answer::ByDriver)
+                Ok(Answer::Later)
             }
             "definition" => {
                 let p: wire::DefinitionParams = args(params)?;
@@ -273,7 +321,7 @@ impl Daemon {
                 })
                 .map_err(fail)?
                 .map_err(fail)?;
-                Ok(Answer::ByDriver)
+                Ok(Answer::Later)
             }
             "links" => {
                 let p: wire::BookParams = args(params)?;
@@ -283,7 +331,7 @@ impl Daemon {
                 })
                 .map_err(fail)?
                 .map_err(fail)?;
-                Ok(Answer::ByDriver)
+                Ok(Answer::Later)
             }
             "complete" => {
                 let p: wire::CompleteParams = args(params)?;
@@ -293,7 +341,7 @@ impl Daemon {
                 })
                 .map_err(fail)?
                 .map_err(fail)?;
-                Ok(Answer::ByDriver)
+                Ok(Answer::Later)
             }
             "symbols" => {
                 let p: wire::BookParams = args(params)?;
@@ -303,7 +351,7 @@ impl Daemon {
                 })
                 .map_err(fail)?
                 .map_err(fail)?;
-                Ok(Answer::ByDriver)
+                Ok(Answer::Later)
             }
             // Served from the scrape, so unlike `describe` it is never
             // declined for a busy session: see `Driver::rules`.
@@ -315,7 +363,7 @@ impl Daemon {
                 })
                 .map_err(fail)?
                 .map_err(fail)?;
-                Ok(Answer::ByDriver)
+                Ok(Answer::Later)
             }
             "doc" => {
                 let p: wire::DocParams = args(params)?;
@@ -325,7 +373,7 @@ impl Daemon {
                 })
                 .map_err(fail)?
                 .map_err(fail)?;
-                Ok(Answer::ByDriver)
+                Ok(Answer::Later)
             }
             "certify" => {
                 let p: wire::CertifyParams = args(params)?;
@@ -335,7 +383,7 @@ impl Daemon {
                 })
                 .map_err(fail)?
                 .map_err(fail)?;
-                Ok(Answer::ByDriver)
+                Ok(Answer::Later)
             }
             "interrupt" => {
                 let p: wire::BookParams = args(params)?;
@@ -669,12 +717,15 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let daemon = Daemon {
+    // An `Arc` because `open` runs on a thread of its own and needs the
+    // registry, the book map and the out queue to answer with.
+    let daemon = Arc::new(Daemon {
         registry: Mutex::new(Registry::new(policy)),
         books: Mutex::new(HashMap::new()),
         closing: Mutex::new(Vec::new()),
+        opening: Mutex::new(Vec::new()),
         out: Out::new(),
-    };
+    });
     let stdin = io::stdin();
     let mut r = io::BufReader::new(stdin.lock());
     // Say why the loop ends. `while let Ok(Some(_))` treated three different
@@ -710,7 +761,7 @@ fn main() {
             Some(id) => match daemon.request(&id, &method, params) {
                 Ok(Answer::Now(result)) => daemon.out.reply(&id, result),
                 // The driver has the id and will reply when the form is done.
-                Ok(Answer::ByDriver) => {}
+                Ok(Answer::Later) => {}
                 Err(RequestError::UnknownMethod) => {
                     daemon.out.error(&id, -32601, format!("unknown method {method:?}"));
                 }
@@ -719,7 +770,19 @@ fn main() {
             None => daemon.notification(&method, params),
         }
     }
-    // EOF: wake anything blocked, close every driver, and JOIN them.
+    // EOF: first let any open in flight finish registering its book.
+    //
+    // Before the sweep below, not after: an `open` that is still starting ACL2
+    // has a child running and no entry in the map yet, so a sweep that ran
+    // first would find nothing to kill and the process would exit leaving that
+    // ACL2 behind -- exactly the abandoned child the sweep exists to prevent,
+    // reached by the one path that used to be impossible because `open` held
+    // this thread.
+    let opening: Vec<_> = std::mem::take(&mut *daemon.opening.lock().expect("opening lock"));
+    for h in opening {
+        let _ = h.join();
+    }
+    // Then: wake anything blocked, close every driver, and JOIN them.
     // Exiting with drivers unjoined skips their `Book` drops -- the drop is
     // what kills the ACL2 child -- and an ACL2 abandoned mid-proof never
     // reaches the read that would tell it to exit: it grinds and allocates

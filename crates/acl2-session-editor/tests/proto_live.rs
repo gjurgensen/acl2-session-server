@@ -59,10 +59,11 @@ impl Daemon {
     }
 
     /// Send a request and do not wait for -- or read -- the reply.
-    fn send_only(&mut self, method: &str, params: Value) {
+    fn send_only(&mut self, method: &str, params: Value) -> u64 {
         self.next_id += 1;
         let id = self.next_id;
         self.frame(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
+        id
     }
 
     /// Drop our end of the daemon's stdin, which is its EOF.
@@ -1811,4 +1812,65 @@ fn a_paused_session_stops_admitting_and_nothing_else() {
     assert_eq!(statuses(&last_state(&events)), ["admitted"; 4],
                "resuming admits what pausing withheld: {:?}", last_state(&events));
     assert_eq!(events.last().expect("settled").1["reason"], "reached_target");
+}
+
+/// A second book's startup does not stop the first book being talked to.
+///
+/// `open` runs the whole ACL2 startup handshake, and it used to run it inline
+/// on the daemon's one protocol thread -- the only thread reading stdin. So
+/// while a second book started, the first book's `update`, `status`, hover and
+/// `interrupt` were not being *answered*; they were not being read. With one
+/// book that is invisible, which is why it survived; with two it is a freeze
+/// for as long as ACL2 takes to come up, and up to the customization-file
+/// timeout in the bad case.
+///
+/// Written as an ordering rather than a duration, because a timing threshold
+/// on a machine under load is a flaky test: the question is whether the first
+/// book's reply can overtake the second book's open, and inline it could not
+/// have, ever.
+#[test]
+#[ignore = "needs ACL2"]
+fn one_books_open_does_not_stall_another_book() {
+    let Some(acl2) = acl2() else {
+        eprintln!("ACL2 not set; skipping");
+        return;
+    };
+    let root = std::env::temp_dir().join(format!("acl2-editord-two-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("dir");
+    let book = "(in-package \"ACL2\")\n\n(defun f (x) (if (consp x) (f (cdr x)) nil))\n";
+    std::fs::write(root.join("a.lisp"), book).unwrap();
+    std::fs::write(root.join("b.lisp"), book).unwrap();
+
+    let mut d = Daemon::start(&acl2);
+    let a = d.request("open", json!({ "path": root.join("a.lisp").to_str().unwrap() }));
+    let a_id = a["book"].as_str().expect("book id").to_string();
+
+    // The second open goes out and is deliberately not waited for.
+    let open_id = d.send_only("open", json!({ "path": root.join("b.lisp").to_str().unwrap() }));
+    // Then a question about the first book, which the protocol thread answers
+    // from lock-free handles without touching the book at all.
+    let status_id = d.send_only("status", json!({ "book": a_id }));
+
+    let mut replies: Vec<(u64, Value)> = Vec::new();
+    while replies.len() < 2 {
+        let v = d.read_frame();
+        if let Some(i) = v.get("id").and_then(|i| i.as_u64()) {
+            assert!(v.get("error").is_none(), "reply {i} failed: {v}");
+            replies.push((i, v["result"].clone()));
+        }
+    }
+    assert_eq!(
+        replies.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+        vec![status_id, open_id],
+        "the first book's status must come back while the second book is still starting"
+    );
+
+    // And the second book really did open -- a reply that arrives in the right
+    // order is not enough if it arrives empty.
+    let b_id = replies[1].1["book"].as_str().expect("the second book's id");
+    assert_ne!(b_id, a_id, "the second open is a book of its own");
+
+    d.shutdown();
+    let _ = std::fs::remove_dir_all(&root);
 }
