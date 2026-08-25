@@ -869,6 +869,29 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   check(!/\$\(unpin\)/.test(JSON.stringify(pkg.contributes.commands)),
     'and neither uses $(unpin), which is newer than the engine we declare');
 
+  // The four session controls are all one family, and that is a colour
+  // decision as much as a shape one. VSCode colours certain codicons globally
+  // -- `debugColors.ts` adds a rule on `.monaco-workbench .codicon-debug-pause`
+  // and friends -- so the colour arrives with the *name*, anywhere in the
+  // workbench, including an editor title bar that has nothing to do with
+  // debugging.
+  //
+  // Before this, two of the four were `debug-*` and two were not, so stop was
+  // red and pause was blue while start and resume were the default foreground
+  // -- a tint on half the set, for a reason invisible to anyone reading the
+  // manifest. Whole family or none; mixed is the only wrong answer.
+  const control = {
+    'acl2-session.start': '$(debug-start)',
+    'acl2-session.pause': '$(debug-pause)',
+    'acl2-session.resume': '$(debug-continue)',
+    'acl2-session.stop': '$(debug-stop)',
+  };
+  for (const [cmd, want] of Object.entries(control)) {
+    check(icon(cmd) === want, `${cmd} uses ${want}`);
+  }
+  check(Object.values(control).every((i) => /^\$\(debug-/.test(i)),
+    'and every session control is in the debug family, so all four are coloured');
+
   // One word for it, everywhere a reader sees one.
   for (const c of pkg.contributes.commands) {
     check(!/\b(lock|hold|held)\b/i.test(c.title),

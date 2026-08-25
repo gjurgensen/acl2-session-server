@@ -285,7 +285,7 @@
         "command": "acl2-session.start",
         "category": "ACL2",
         "title": "Start Live Checking",
-        "icon": "$(play)"
+        "icon": "$(debug-start)"
       },
       {
         "command": "acl2-session.stop",
@@ -303,7 +303,7 @@
         "command": "acl2-session.resume",
         "category": "ACL2",
         "title": "Resume",
-        "icon": "$(play)"
+        "icon": "$(debug-continue)"
       },
       {
         "command": "acl2-session.interrupt",

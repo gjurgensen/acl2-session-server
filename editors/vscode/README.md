@@ -371,11 +371,21 @@ opens without taking the cursor. Clicking the status bar brings it back if you
 close it.
 
 That button is the editor's **only** title-bar action, which is what VSCode's
-own guidance asks for, so it carries all three states: &#9654; to start, then
-&#10074;&#10074; to pause, then &#9654; again to resume. `ctrl+alt+a` follows
-it — on a paused session it resumes, because from your side that is the same
-gesture. **Stop** and **Certify Book** are in the `…` overflow beside it, and
+own guidance asks for, so it carries all three states: a green &#9654; to
+start, then a blue &#10074;&#10074; to pause, then a blue &#9654;&#10074; to
+resume &mdash; start and resume are different icons because they are different
+things, one beginning a session and one carrying on from where it stopped.
+`ctrl+alt+a` follows it — on a paused session it resumes,
+because from your side that is the same gesture. **Stop** and **Certify Book** are in the `…` overflow beside it, and
 in the command palette.
+
+The four session controls all use VSCode's debug-family icons, which is a
+colour decision as well as a shape one: VSCode colours those codicons globally
+by name, so start is green, pause and resume are blue, and stop is red without
+this extension choosing anything. The sequence reads green to begin, blue while
+you are steering it, red to end it &mdash; and blue is what this extension
+already uses for *the reader's own instruction* rather than a verdict, which is
+exactly what pausing is.
 
 ### Pausing
 
