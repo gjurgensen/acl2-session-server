@@ -40,7 +40,6 @@ import {
 import { Envelope, RulesReply, RuneWire } from './protocol';
 import { DecorationMode, Decorations } from './decorations';
 import { byteColumn, charOffset } from './positions';
-import { paintMap } from './paintmap';
 import { problemFor } from './bars';
 import { EVAL_SCHEME, OutputView, SCHEME } from './outputView';
 import { Highlighter } from './highlight';
@@ -61,7 +60,6 @@ import {
   prefixAt,
   BookSymbol,
   DocReply,
-  xdocText,
 } from './names';
 
 /**
@@ -784,18 +782,25 @@ const SYMBOL_KIND: Record<string, vscode.SymbolKind> = {
  */
 let symbolReg: vscode.Disposable | undefined;
 /**
- * What the outline last showed, so it is only renewed when it would differ.
+ * What each book's outline last showed, so it is only renewed when it would
+ * differ.
  *
  * Without this the renewal feeds itself: `drive` settles on every command
  * pass, so a symbols query produces a `settled`, which renews, which makes
  * VSCode query again -- a loop that flickers the Outline view continuously
  * and is started by *any* request, not just this one.
+ *
+ * Per book, because renewing is not a per-book act: re-registering the
+ * provider invalidates VSCode's symbol cache for *every* ACL2 document. One
+ * global held whichever book settled last, so with two live books each settle
+ * looked like a change to the other's outline and renewed on every pass --
+ * exactly the flicker this exists to prevent, restored by the fix for it.
  */
-let outlineKey = '';
+const outlineKeys = new Map<string, string>();
 
 function currentOutlineKey(s: BookSession): string {
   const units = s.lastState?.units ?? [];
-  return `${s.id}|${units.length}|${units.map((u) => u.status).join(',')}`;
+  return `${units.length}|${units.map((u) => u.status).join(',')}`;
 }
 
 /**
@@ -1494,7 +1499,7 @@ async function startCommand(initial?: Held): Promise<void> {
     byId.set(s.id, s);
     // The outline could not be answered before this session existed, and
     // VSCode will not ask again on its own.
-    outlineKey = '';
+    outlineKeys.delete(s.id);
     renewSymbols();
     status.show();
     status.text = '$(sync~spin) ACL2: starting';
@@ -1607,6 +1612,7 @@ function dropBook(s: BookSession): void {
   }
   books.delete(s.doc.uri.toString());
   byId.delete(s.id);
+  outlineKeys.delete(s.id);
   // The transcript is answers from a world that no longer exists.
   s.console?.dispose();
   s.console = undefined;
@@ -2110,8 +2116,8 @@ function onSettled(p: SettledEvent): void {
   // as fresh as the last time VSCode asked -- but renew only when they have
   // actually moved, or the renewal feeds itself. See `outlineKey`.
   const key = currentOutlineKey(s);
-  if (key !== outlineKey) {
-    outlineKey = key;
+  if (key !== outlineKeys.get(s.id)) {
+    outlineKeys.set(s.id, key);
     renewSymbols();
   }
   if (p.reason === 'split_error' || p.reason === 'error') {
