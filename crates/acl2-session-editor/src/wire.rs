@@ -1282,28 +1282,18 @@ pub fn evaluated(r: &EvalResult) -> EvalReply {
     }
 }
 
+/// Fifty lines by default, where the MCP surface takes forty: an editor
+/// renders into a pane and pays nothing per line. Everything else about the
+/// reading is `SliceRequest`'s, so the two surfaces cannot drift again on what
+/// a `range` with no bounds or a `goal` with no name means.
 pub fn slice_from(p: &OutputParams) -> Result<Slice, String> {
-    let lines = p.lines.unwrap_or(50);
-    match p.mode.as_deref().unwrap_or("tail") {
-        "all" => Ok(Slice::All),
-        "head" => Ok(Slice::Head(lines)),
-        "tail" => Ok(Slice::Tail(lines)),
-        "range" => match (p.from_line, p.to_line) {
-            (Some(a), Some(b)) => Ok(Slice::Range(a, b)),
-            _ => Err("range needs from_line and to_line".into()),
-        },
-        "goal" => match &p.text {
-            Some(t) => Ok(Slice::Goal { name: t.clone() }),
-            None => Err("goal needs text".into()),
-        },
-        "find" => match &p.text {
-            Some(t) => Ok(Slice::Find {
-                needle: t.clone(),
-                context: p.context.unwrap_or(2),
-                ignore_case: true,
-            }),
-            None => Err("find needs text".into()),
-        },
-        m => Err(format!("unknown output mode {m:?}")),
+    acl2_session::SliceRequest {
+        mode: p.mode.as_deref(),
+        lines: p.lines,
+        from_line: p.from_line,
+        to_line: p.to_line,
+        text: p.text.as_deref(),
+        context: p.context,
     }
+    .resolve(50)
 }

@@ -104,7 +104,7 @@ pub use registry::{Registry, RegistryError, SessionId};
 pub use cert::{Build, CertError, CertReport, CertStatus};
 pub use image::{find_checkout, ImageError, ImagePolicy};
 pub use induction::Induction;
-pub use output::{OutputRef, OutputSlice, OutputStore, Slice};
+pub use output::{OutputRef, OutputSlice, OutputStore, Slice, SliceRequest};
 pub use session::Progress;
 pub use sync::{
     Book, Budget, CensusEntry, Checkpoint, DocTopic, EvalFailure, EvalResult, Health, InnerEvent,

@@ -2026,3 +2026,69 @@ fn a_unit_events_lines_match_the_revision_it_carries() {
     d.shutdown();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// The protocol's error codes, which need no ACL2 at all.
+///
+/// A generic JSON-RPC client reads these: `-32602` says "you asked wrongly",
+/// `-32603` says "I could not". Everything that was not an unknown method
+/// replied `-32603`, so a mistyped book id read as the server's fault -- and a
+/// frame that was valid JSON but not an object fell through to the
+/// notification path and came back as an error *notification* about an unknown
+/// method, which is neither the code nor the shape the spec gives for it.
+///
+/// **Not ignored**, unlike everything else in this file. The daemon checks its
+/// `--default` image exists and then does nothing further with it until a book
+/// is opened, and this opens none -- so the test binary serves as the image
+/// and the whole protocol-error surface runs in CI. It is the first test here
+/// that does.
+#[test]
+fn the_protocol_answers_with_the_codes_the_spec_gives() {
+    // Any file that exists. The daemon only checks that much before a book is
+    // opened, and no book is opened here.
+    let image = std::env::current_exe().expect("current exe");
+    let mut d = Daemon::start(image.to_str().expect("utf-8 path"));
+
+    fn reply(d: &mut Daemon, v: Value) -> Value {
+        d.frame(v);
+        loop {
+            let got = d.read_frame();
+            if got.get("error").is_some() || got.get("result").is_some() {
+                return got;
+            }
+        }
+    }
+
+    // A method nobody serves.
+    let e = reply(&mut d, json!({ "jsonrpc": "2.0", "id": 1, "method": "nonesuch" }));
+    assert_eq!(e["error"]["code"], -32601, "unknown method: {e}");
+
+    // Params that will not deserialize -- `book` is not a string.
+    let e = reply(
+        &mut d,
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "status", "params": { "book": 7 } }),
+    );
+    assert_eq!(e["error"]["code"], -32602, "bad params: {e}");
+
+    // Params that deserialize and name a book that does not exist. That is a
+    // statement about the request, not about the daemon.
+    let e = reply(
+        &mut d,
+        json!({ "jsonrpc": "2.0", "id": 3, "method": "status", "params": { "book": "nope" } }),
+    );
+    assert_eq!(e["error"]["code"], -32602, "unknown book: {e}");
+
+    // Valid JSON, not a request.
+    let e = reply(&mut d, json!([1, 2, 3]));
+    assert_eq!(e["error"]["code"], -32600, "not an object: {e}");
+
+    // Not valid JSON at all.
+    let e = reply(&mut d, json!("just a string"));
+    assert_eq!(e["error"]["code"], -32600, "a bare string is not a request: {e}");
+
+    // And the daemon is still speaking afterwards -- none of the above is a
+    // reason to stop reading the client.
+    let ok = reply(&mut d, json!({ "jsonrpc": "2.0", "id": 4, "method": "images" }));
+    assert!(ok.get("result").is_some(), "still answering: {ok}");
+
+    d.shutdown();
+}

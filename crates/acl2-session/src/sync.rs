@@ -4012,9 +4012,15 @@ impl Book {
     /// and this is a probe with a deadline, so the honest thing is to have
     /// somewhere to fall back to.
     fn scrape_rules(&mut self, names: &[String], unit: usize) {
+        // Filtered here as well as in `rules_probe`, for a different reason:
+        // there it is the invariant, here it is not paying for a round trip
+        // that would ask about nothing.
+        let names: Vec<String> =
+            names.iter().filter(|n| is_safe_symbol(n)).cloned().collect();
         if names.is_empty() {
             return;
         }
+        let names = &names[..];
         if self.scrape_rules_pass(names, unit, SCRAPE_BUDGET, true) != Scrape::TimedOut {
             return;
         }
@@ -4514,7 +4520,21 @@ fn rules_probe(names: &[String], untranslated: bool) -> String {
         "(acl2::prog2$ (acl2::cw \"~%<<<PROBE-BEGIN rules>>>~%\") \
          (acl2::value :invisible))\n",
     );
-    for n in names {
+    // The gate every other splice of a name into generated Lisp applies, here
+    // rather than only at the caller, because this is where the splice is: a
+    // future caller cannot forget what the function itself refuses.
+    //
+    // These names come from a probe's own output rather than from a user,
+    // which is why the omission was survivable -- but they have been through
+    // `items()`'s whitespace collapse by then, so a bar-quoted name containing
+    // a newline is already not the name ACL2 printed, and splicing it produces
+    // a probe that means something else. An unbalanced one produces a probe
+    // ACL2 reads past the end of, and then every later admission in the
+    // session dies with "end of file".
+    //
+    // Dropped rather than escaped: the scrape is best-effort, and the cost of
+    // dropping is a name nobody can `describe`.
+    for n in names.iter().filter(|n| is_safe_symbol(n)) {
         out.push_str(&format!(
             "(acl2::prog2$\n\
              (acl2::let* ((acl2::wrld (acl2::w acl2::state))\n\
@@ -4998,6 +5018,31 @@ mod tests {
                     "a#b", "a\\b", "a`b", "a,b"] {
             assert!(!super::is_safe_symbol(bad), "{bad:?} must be refused");
         }
+    }
+
+    /// And the scrape applies it, which is the splice that did not.
+    ///
+    /// Not a user surface -- these names come from a probe's own output -- but
+    /// they have been through `items()`'s whitespace collapse by the time they
+    /// arrive, so a bar-quoted name with a newline in it is already not the
+    /// name ACL2 printed. Splicing that produces a probe that means something
+    /// else; splicing an unbalanced one produces a probe ACL2 reads past the
+    /// end of, and then every later admission in the session dies with "end of
+    /// file".
+    #[test]
+    fn the_rules_probe_never_carries_a_name_it_cannot_splice() {
+        let bad = ["a b", "a(b", "a)b", "a\"b", "a;b", "a|b", "a\\b", "", "a\nb"];
+        for n in bad {
+            let probe = super::rules_probe(&[n.to_string()], true);
+            assert!(
+                !probe.contains(&format!("'{n}")),
+                "{n:?} must never be spliced"
+            );
+        }
+        // And an ordinary one still is, or the gate would have closed the
+        // feature rather than the hole.
+        let probe = super::rules_probe(&["binary-append".to_string()], true);
+        assert!(probe.contains("'binary-append"), "a plain name is spliceable");
     }
 
     /// The census orientation, which is the whole correctness question.

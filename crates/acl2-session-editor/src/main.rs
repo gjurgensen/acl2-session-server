@@ -237,7 +237,28 @@ struct BookHandle {
 
 enum RequestError {
     UnknownMethod,
+    /// The request was well-formed and could not be carried out: the session
+    /// is dead, a driver is gone, ACL2 said no. JSON-RPC `-32603`.
     Failed(String),
+    /// The params are wrong: they would not deserialize, or they name a book
+    /// that does not exist. JSON-RPC `-32602`.
+    ///
+    /// Distinguished from `Failed` because the two say different things to
+    /// whoever is on the other end -- one is "you asked wrongly", the other is
+    /// "I could not". Both replied `-32603` before, which tells a generic
+    /// client that a bad book id is the server's fault.
+    BadParams(String),
+}
+
+impl RequestError {
+    /// The message alone, for the notification path -- which has no reply to
+    /// carry a code on and says what went wrong as an `error` event instead.
+    fn message(self) -> String {
+        match self {
+            RequestError::UnknownMethod => "unknown method".into(),
+            RequestError::Failed(m) | RequestError::BadParams(m) => m,
+        }
+    }
 }
 
 /// What a request produced.
@@ -279,9 +300,22 @@ struct Daemon {
 }
 
 impl Daemon {
-    fn handle_of<T>(&self, book: &str, f: impl FnOnce(&BookHandle) -> T) -> Result<T, String> {
+    /// Run `f` against a book's handles, or say the book is not known.
+    ///
+    /// The error is `BadParams` rather than `Failed`, and that is the whole
+    /// reason this returns a typed error instead of a string: an id naming no
+    /// book is a statement about the request. Reported as `-32603` it told a
+    /// generic client the daemon had broken.
+    fn handle_of<T>(
+        &self,
+        book: &str,
+        f: impl FnOnce(&BookHandle) -> T,
+    ) -> Result<T, RequestError> {
         let books = self.books.lock().expect("books lock");
-        books.get(book).map(f).ok_or_else(|| format!("unknown book {book:?}"))
+        books
+            .get(book)
+            .map(f)
+            .ok_or_else(|| RequestError::BadParams(format!("unknown book {book:?}")))
     }
 
     /// Answer one request.
@@ -306,7 +340,7 @@ impl Daemon {
         params: Value,
     ) -> Result<Answer, RequestError> {
         fn args<T: serde::de::DeserializeOwned>(params: Value) -> Result<T, RequestError> {
-            serde_json::from_value(params).map_err(|e| RequestError::Failed(e.to_string()))
+            serde_json::from_value(params).map_err(|e| RequestError::BadParams(e.to_string()))
         }
         let fail = RequestError::Failed;
         let now = |r: Result<Value, String>| r.map(Answer::Now).map_err(RequestError::Failed);
@@ -333,12 +367,12 @@ impl Daemon {
                 let p: wire::BookParams = args(params)?;
                 now(self.close(&p.book))
             }
-            "output" => now(self.output(args(params)?)),
-            "induction" => now(self.induction(args(params)?)),
+            "output" => self.output(args(params)?).map(Answer::Now),
+            "induction" => self.induction(args(params)?).map(Answer::Now),
             "reflow" => now(self.reflow(args(params)?)),
             "status" => {
                 let p: wire::BookParams = args(params)?;
-                now(self.status(&p.book))
+                self.status(&p.book).map(Answer::Now)
             }
             "eval" => {
                 let p: wire::EvalParams = args(params)?;
@@ -346,7 +380,7 @@ impl Daemon {
                 self.handle_of(&p.book, |h| {
                     h.tx.send(Cmd::Eval { id, form: p.form }).map_err(|e| e.to_string())
                 })
-                .map_err(fail)?
+                ?
                 .map_err(fail)?;
                 Ok(Answer::Later)
             }
@@ -359,7 +393,7 @@ impl Daemon {
                     h.tx.send(Cmd::Describe { id, name: p.name, cols: p.cols })
                         .map_err(|e| e.to_string())
                 })
-                .map_err(fail)?
+                ?
                 .map_err(fail)?;
                 Ok(Answer::Later)
             }
@@ -369,7 +403,7 @@ impl Daemon {
                 self.handle_of(&p.book, |h| {
                     h.tx.send(Cmd::Definition { id, name: p.name }).map_err(|e| e.to_string())
                 })
-                .map_err(fail)?
+                ?
                 .map_err(fail)?;
                 Ok(Answer::Later)
             }
@@ -379,7 +413,7 @@ impl Daemon {
                 self.handle_of(&p.book, |h| {
                     h.tx.send(Cmd::Links { id }).map_err(|e| e.to_string())
                 })
-                .map_err(fail)?
+                ?
                 .map_err(fail)?;
                 Ok(Answer::Later)
             }
@@ -389,7 +423,7 @@ impl Daemon {
                 self.handle_of(&p.book, |h| {
                     h.tx.send(Cmd::Complete { id, prefix: p.prefix }).map_err(|e| e.to_string())
                 })
-                .map_err(fail)?
+                ?
                 .map_err(fail)?;
                 Ok(Answer::Later)
             }
@@ -399,7 +433,7 @@ impl Daemon {
                 self.handle_of(&p.book, |h| {
                     h.tx.send(Cmd::Symbols { id }).map_err(|e| e.to_string())
                 })
-                .map_err(fail)?
+                ?
                 .map_err(fail)?;
                 Ok(Answer::Later)
             }
@@ -411,7 +445,7 @@ impl Daemon {
                 self.handle_of(&p.book, |h| {
                     h.tx.send(Cmd::Rules { id, names: p.names }).map_err(|e| e.to_string())
                 })
-                .map_err(fail)?
+                ?
                 .map_err(fail)?;
                 Ok(Answer::Later)
             }
@@ -421,7 +455,7 @@ impl Daemon {
                 self.handle_of(&p.book, |h| {
                     h.tx.send(Cmd::Doc { id, name: p.name }).map_err(|e| e.to_string())
                 })
-                .map_err(fail)?
+                ?
                 .map_err(fail)?;
                 Ok(Answer::Later)
             }
@@ -431,7 +465,7 @@ impl Daemon {
                 self.handle_of(&p.book, |h| {
                     h.tx.send(Cmd::Certify { id, jobs: p.jobs }).map_err(|e| e.to_string())
                 })
-                .map_err(fail)?
+                ?
                 .map_err(fail)?;
                 Ok(Answer::Later)
             }
@@ -443,7 +477,7 @@ impl Daemon {
                     h.control.request_abort();
                     let _ = h.tx.send(Cmd::Interrupt);
                 })
-                .map_err(fail)?;
+                ?;
                 Ok(Answer::Now(json!({})))
             }
             // Stop admitting forms, or start again. Pausing wakes a blocked
@@ -458,7 +492,7 @@ impl Daemon {
                     }
                     let _ = h.tx.send(Cmd::SetPaused(on));
                 })
-                .map_err(fail)?;
+                ?;
                 Ok(Answer::Now(json!({})))
             }
             "images" => {
@@ -570,12 +604,12 @@ impl Daemon {
     /// because the daemon's wire is private and a client that wants the
     /// announcements *as a block* -- which is all this honestly offers -- can
     /// still ask. The form view does not: it reads the log.
-    fn induction(&self, p: wire::InductionParams) -> Result<Value, String> {
+    fn induction(&self, p: wire::InductionParams) -> Result<Value, RequestError> {
         let outputs = self.handle_of(&p.book, |h| h.outputs.clone())?;
         let r = OutputRef::from(p.output_ref.as_str());
         let found = {
             let outs = outputs.lock().expect("outputs lock");
-            acl2_session::induction::from_output(&outs, &r).map_err(|e| e.to_string())?
+            acl2_session::induction::from_output(&outs, &r).map_err(|e| RequestError::Failed(e.to_string()))?
         };
         Ok(serde_json::to_value(wire::InductionReply {
             inductions: found.iter().map(wire::induction).collect(),
@@ -583,10 +617,10 @@ impl Daemon {
         .expect("serialize"))
     }
 
-    fn output(&self, p: wire::OutputParams) -> Result<Value, String> {
+    fn output(&self, p: wire::OutputParams) -> Result<Value, RequestError> {
         let (outputs, control) =
             self.handle_of(&p.book, |h| (h.outputs.clone(), h.control.clone()))?;
-        let slice = wire::slice_from(&p)?;
+        let slice = wire::slice_from(&p).map_err(RequestError::BadParams)?;
         let r = OutputRef::from(p.output_ref.as_str());
         // A form still running has printed into memory, not into its file.
         // Neither lookup touches the book, so this answers while a proof is
@@ -597,7 +631,7 @@ impl Daemon {
                 .lock()
                 .expect("outputs lock")
                 .get(&r, slice)
-                .map_err(|e| e.to_string())?,
+                .map_err(|e| RequestError::Failed(e.to_string()))?,
         };
         Ok(serde_json::to_value(wire::OutputReply {
             text: s.text,
@@ -607,7 +641,7 @@ impl Daemon {
         .expect("serialize"))
     }
 
-    fn status(&self, book: &str) -> Result<Value, String> {
+    fn status(&self, book: &str) -> Result<Value, RequestError> {
         let control = self.handle_of(book, |h| h.control.clone())?;
         let running = control.snapshot().map(|s| wire::RunningReply {
             unit: s.unit,
@@ -644,7 +678,8 @@ impl Daemon {
                             revision,
                         })
                             .map_err(|e| e.to_string())
-                    })?
+                    })
+                    .map_err(RequestError::message)?
                 }),
             // How wide the pane is, so terms cross the wire already laid out
             // for it. Not per book: one client, one pane, however many books
@@ -657,7 +692,8 @@ impl Daemon {
                 .and_then(|p| {
                     self.handle_of(&p.book, |h| {
                         h.tx.send(Cmd::Retract { keep: p.keep }).map_err(|e| e.to_string())
-                    })?
+                    })
+                    .map_err(RequestError::message)?
                 }),
             m => Err(format!("unknown notification {m:?}")),
         };
@@ -812,6 +848,15 @@ fn main() {
                 continue;
             }
         };
+        // Valid JSON that is not a request. An array, a bare number, a string:
+        // there is no id to answer under and no method to run, and it used to
+        // fall through to the notification path and come back as an error
+        // *notification* about an unknown method -- which is neither the code
+        // nor the shape the spec gives for this.
+        if !v.is_object() {
+            daemon.out.error(&Value::Null, -32600, "request must be a JSON object".into());
+            continue;
+        }
         let id = v.get("id").cloned().filter(|i| !i.is_null());
         let method = v.get("method").and_then(|m| m.as_str()).unwrap_or("").to_string();
         let params = v.get("params").cloned().unwrap_or(Value::Null);
@@ -823,6 +868,7 @@ fn main() {
                 Err(RequestError::UnknownMethod) => {
                     daemon.out.error(&id, -32601, format!("unknown method {method:?}"));
                 }
+                Err(RequestError::BadParams(m)) => daemon.out.error(&id, -32602, m),
                 Err(RequestError::Failed(m)) => daemon.out.error(&id, -32603, m),
             },
             None => daemon.notification(&method, params),

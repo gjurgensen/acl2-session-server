@@ -50,6 +50,130 @@ impl From<&str> for OutputRef {
     }
 }
 
+/// What a caller asked for, before it is resolved into a [`Slice`].
+///
+/// Both wire layers accept the same six fields under the same names and mean
+/// the same thing by them, and until this they each turned them into a `Slice`
+/// themselves -- with differences nobody chose. The editor errored on a
+/// `range` with no bounds; the MCP silently read it as "the whole file". The
+/// editor errored on a `goal` with no text; the MCP searched for the empty
+/// string, which matches the first line of anything. One verb, parsed twice,
+/// answering differently.
+///
+/// The line count stays per-surface, because that difference *is* chosen: an
+/// editor renders and pays nothing per line, an agent surface pays per token.
+/// So `resolve` takes the default rather than owning one.
+#[derive(Debug, Default, Clone)]
+pub struct SliceRequest<'a> {
+    /// `all`, `head`, `tail` (the default), `range`, `goal`, or `find`.
+    pub mode: Option<&'a str>,
+    pub lines: Option<usize>,
+    pub from_line: Option<usize>,
+    pub to_line: Option<usize>,
+    /// The goal name for `goal`, the literal needle for `find`.
+    pub text: Option<&'a str>,
+    pub context: Option<usize>,
+}
+
+impl SliceRequest<'_> {
+    /// Resolve into a [`Slice`], or say what is missing.
+    ///
+    /// Errors rather than defaulting wherever the answer would otherwise be a
+    /// guess about what the caller meant. A `range` with no bounds and a
+    /// `goal` with no name are not requests with obvious readings; returning
+    /// the whole log for the first and matching everything for the second
+    /// gives a caller an answer to a question they did not ask, which is
+    /// harder to notice than an error.
+    pub fn resolve(&self, default_lines: usize) -> Result<Slice, String> {
+        let lines = self.lines.unwrap_or(default_lines);
+        match self.mode.unwrap_or("tail") {
+            "all" => Ok(Slice::All),
+            "head" => Ok(Slice::Head(lines)),
+            "tail" => Ok(Slice::Tail(lines)),
+            "range" => match (self.from_line, self.to_line) {
+                (Some(a), Some(b)) => Ok(Slice::Range(a, b)),
+                _ => Err("range needs from_line and to_line".into()),
+            },
+            "goal" => match self.text {
+                Some(t) if !t.is_empty() => Ok(Slice::Goal { name: t.to_string() }),
+                _ => Err("goal needs text: the goal name, such as \"Subgoal *1/2\"".into()),
+            },
+            "find" => match self.text {
+                Some(t) if !t.is_empty() => Ok(Slice::Find {
+                    needle: t.to_string(),
+                    context: self.context.unwrap_or(2),
+                    ignore_case: true,
+                }),
+                _ => Err("find needs text: the literal to search for".into()),
+            },
+            m => Err(format!("unknown output mode {m:?}")),
+        }
+    }
+}
+
+/// One reading of the slice parameters, so two surfaces cannot drift on it.
+///
+/// The divergence these pin was not a choice anywhere: a `range` with no
+/// bounds meant "the whole log" on one surface and an error on the other, and
+/// a `goal` with no name searched for the empty string, which matches the
+/// first line of anything.
+#[cfg(test)]
+mod slice_request_tests {
+    use super::{Slice, SliceRequest};
+
+    fn ask(mode: &str) -> SliceRequest<'_> {
+        SliceRequest { mode: Some(mode), ..SliceRequest::default() }
+    }
+
+    #[test]
+    fn the_default_is_a_tail_of_whatever_the_surface_asked_for() {
+        let r = SliceRequest::default().resolve(40).expect("tail");
+        assert!(matches!(r, Slice::Tail(40)));
+        assert!(matches!(SliceRequest::default().resolve(50).expect("tail"), Slice::Tail(50)));
+    }
+
+    #[test]
+    fn an_explicit_count_beats_the_surfaces_default() {
+        let r = SliceRequest { lines: Some(7), ..ask("head") }.resolve(40).expect("head");
+        assert!(matches!(r, Slice::Head(7)));
+    }
+
+    /// The half that used to differ. Neither reading is obvious, so neither is
+    /// guessed: an error is easier to notice than an answer to a question
+    /// nobody asked.
+    #[test]
+    fn a_range_needs_both_of_its_bounds() {
+        assert!(ask("range").resolve(40).is_err(), "neither bound");
+        assert!(SliceRequest { from_line: Some(1), ..ask("range") }.resolve(40).is_err());
+        assert!(SliceRequest { to_line: Some(9), ..ask("range") }.resolve(40).is_err());
+        let ok = SliceRequest { from_line: Some(1), to_line: Some(9), ..ask("range") }
+            .resolve(40)
+            .expect("range");
+        assert!(matches!(ok, Slice::Range(1, 9)));
+    }
+
+    #[test]
+    fn goal_and_find_need_text_that_says_something() {
+        for mode in ["goal", "find"] {
+            assert!(ask(mode).resolve(40).is_err(), "{mode} with no text");
+            assert!(
+                SliceRequest { text: Some(""), ..ask(mode) }.resolve(40).is_err(),
+                "{mode} with empty text -- which matches everything"
+            );
+        }
+        let g = SliceRequest { text: Some("Subgoal *1/2"), ..ask("goal") }
+            .resolve(40)
+            .expect("goal");
+        assert!(matches!(g, Slice::Goal { name } if name == "Subgoal *1/2"));
+    }
+
+    #[test]
+    fn an_unknown_mode_names_itself() {
+        let e = ask("sideways").resolve(40).unwrap_err();
+        assert!(e.contains("sideways"), "{e}");
+    }
+}
+
 /// What part of an output to return.
 #[derive(Debug, Clone)]
 pub enum Slice {

@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use acl2_session::{Book, Health, ImagePolicy, Registry, SessionId, Slice};
+use acl2_session::{Book, Health, ImagePolicy, Registry, SessionId};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler, ServiceExt};
@@ -726,21 +726,22 @@ impl Acl2Mcp {
                     a.session_id
                 ))
             })?;
-        let slice = match a.mode.as_deref().unwrap_or("tail") {
-            "all" => Slice::All,
-            "head" => Slice::Head(a.lines.unwrap_or(40)),
-            "tail" => Slice::Tail(a.lines.unwrap_or(40)),
-            "range" => Slice::Range(a.from_line.unwrap_or(1), a.to_line.unwrap_or(usize::MAX)),
-            "goal" => Slice::Goal {
-                name: a.text.clone().unwrap_or_default(),
-            },
-            "find" => Slice::Find {
-                needle: a.text.clone().unwrap_or_default(),
-                context: a.context.unwrap_or(2),
-                ignore_case: true,
-            },
-            other => return Err(fail(format!("unknown mode {other:?}"))),
-        };
+        // Forty lines by default, where the editor takes fifty: this surface
+        // pays per token. Everything else about the reading is
+        // `SliceRequest`'s, and the difference it removes was not a choice --
+        // a `range` with no bounds used to mean "the whole log" here and an
+        // error there, and a `goal` with no name searched for the empty
+        // string, which matches the first line of anything.
+        let slice = acl2_session::SliceRequest {
+            mode: a.mode.as_deref(),
+            lines: a.lines,
+            from_line: a.from_line,
+            to_line: a.to_line,
+            text: a.text.as_deref(),
+            context: a.context,
+        }
+        .resolve(40)
+        .map_err(fail)?;
         // A form still running has printed into memory rather than into its
         // file, so ask the control first. Like the store, it is reachable
         // without the book, so this stays answerable mid-proof -- which is
