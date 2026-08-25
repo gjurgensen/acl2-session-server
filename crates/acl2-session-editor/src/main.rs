@@ -32,6 +32,18 @@ use driver::{Cmd, Driver};
 /// this whole queue exists to survive; a client keeping up never sees it.
 const OUT_BACKLOG: usize = 256;
 
+/// The largest frame the daemon will read, in bytes.
+///
+/// Not a protocol limit anyone should feel: the biggest thing a client sends
+/// is an `update` carrying a whole buffer, and 64 MiB is two orders of
+/// magnitude past the largest book anyone edits. It is a *malformed-input*
+/// guard. `Content-Length: 999999999999` used to be allocated directly, and
+/// an allocation failure aborts the process without unwinding -- so the one
+/// path in the daemon that could skip the shutdown sweep entirely, leaving
+/// every driver unjoined and its ACL2 child stranded, was a header a
+/// confused client could type.
+const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
+
 /// The shared stdout, one frame at a time, writable from any thread.
 ///
 /// Frames are queued and written by a thread of their own, and this is not
@@ -569,6 +581,12 @@ fn read_frame(r: &mut impl BufRead) -> io::Result<Option<Vec<u8>>> {
     }
     let n = len
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "frame without Content-Length"))?;
+    if n > MAX_FRAME_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("frame of {n} bytes exceeds the {MAX_FRAME_BYTES}-byte limit"),
+        ));
+    }
     let mut buf = vec![0u8; n];
     r.read_exact(&mut buf)?;
     Ok(Some(buf))
@@ -577,6 +595,15 @@ fn read_frame(r: &mut impl BufRead) -> io::Result<Option<Vec<u8>>> {
 /// Mirror of the MCP server's trust flags: `--trusted <dir>` (repeatable),
 /// `--default <image>` or a bare image path, with `ACL2_TRUSTED` /
 /// `ACL2_DEFAULT` as the environment spelling.
+///
+/// "Mirror" is a promise about *behaviour*, and it had quietly stopped being
+/// true in three places: `-x` was taken as a bare image where the MCP rejects
+/// anything `-`-prefixed, a second bare argument silently overwrote the first
+/// where the MCP errors, and the default image was never checked to exist --
+/// so which ACL2 a book may run, the one security-shaped decision this
+/// function makes, was decided by two different rules. Args come in as a
+/// parameter rather than off `env::args()` precisely so the tests below can
+/// hold the two to the same cases.
 fn policy_from_args(args: Vec<String>) -> Result<ImagePolicy, String> {
     let mut trusted: Vec<String> = Vec::new();
     let mut default: Option<String> = None;
@@ -589,8 +616,8 @@ fn policy_from_args(args: Vec<String>) -> Result<ImagePolicy, String> {
             "--default" => {
                 default = Some(it.next().ok_or("--default needs an image")?);
             }
-            bare if !bare.starts_with("--") => default = Some(bare.to_string()),
-            other => return Err(format!("unknown flag {other:?}")),
+            bare if !bare.starts_with('-') && default.is_none() => default = Some(bare.to_string()),
+            other => return Err(format!("unrecognised argument {other:?}")),
         }
     }
     if default.is_none() {
@@ -610,7 +637,18 @@ fn policy_from_args(args: Vec<String>) -> Result<ImagePolicy, String> {
         policy = policy.trust(p);
     }
     if let Some(d) = &default {
-        policy = policy.default_image(PathBuf::from(d));
+        // Checked here rather than at first open, where the failure arrives as
+        // a session that would not start and a message about the wrong thing.
+        let p = PathBuf::from(d);
+        if !p.exists() {
+            return Err(format!("no ACL2 image at {d}"));
+        }
+        if p.is_dir() {
+            return Err(format!(
+                "{d} is a directory; the image is usually the saved_acl2 script inside it"
+            ));
+        }
+        policy = policy.default_image(p);
     }
     if default.is_none() && trusted.is_empty() {
         return Err("no ACL2 to run.\n\
@@ -711,4 +749,144 @@ fn main() {
     // Everything the drivers said as they wound up is still queued; give the
     // writer a moment to get it out before the process ends.
     daemon.out.drain(std::time::Duration::from_secs(2));
+}
+
+/// Everything in this file that runs without ACL2.
+///
+/// The daemon's argument parsing and its frame reader are pure functions of
+/// their input, and both decide something that matters -- which images a book
+/// may run, and how many bytes a header may make the process allocate -- yet
+/// every test the daemon had sat behind `ACL2=`, so neither was exercised by
+/// anything CI can run. That is how `policy_from_args` drifted from the twin
+/// it claims to mirror without a word.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// An existing file and an existing directory, without a fixture: the test
+    /// binary is both, and it is guaranteed to be there.
+    fn a_file() -> String {
+        std::env::current_exe().expect("current exe").display().to_string()
+    }
+
+    fn a_dir() -> String {
+        std::env::current_exe()
+            .expect("current exe")
+            .parent()
+            .expect("exe has a parent")
+            .display()
+            .to_string()
+    }
+
+    // ---- the flags the MCP server also parses -------------------------------
+    //
+    // Each of these is a case where the two used to disagree. They are written
+    // against the MCP's answer, because that is the one the doc comment on both
+    // sides promises.
+
+    #[test]
+    fn a_dash_prefixed_token_is_not_an_image() {
+        // The divergence that mattered: `-x` was accepted as a bare image path,
+        // so a mistyped flag configured the default image to a file that could
+        // not exist rather than being refused.
+        let e = policy_from_args(args(&["-x"])).unwrap_err();
+        assert!(e.contains("-x"), "{e}");
+    }
+
+    #[test]
+    fn a_second_bare_image_is_an_error_not_an_overwrite() {
+        let e = policy_from_args(args(&[&a_file(), &a_file()])).unwrap_err();
+        assert!(e.contains("unrecognised"), "{e}");
+    }
+
+    #[test]
+    fn a_bare_image_is_the_default_image() {
+        let p = policy_from_args(args(&[&a_file()])).expect("policy");
+        assert_eq!(p.default_path().map(|p| p.display().to_string()), Some(a_file()));
+    }
+
+    #[test]
+    fn default_and_bare_spell_the_same_thing() {
+        let bare = policy_from_args(args(&[&a_file()])).expect("policy");
+        let flag = policy_from_args(args(&["--default", &a_file()])).expect("policy");
+        assert_eq!(bare.default_path(), flag.default_path());
+    }
+
+    #[test]
+    fn a_missing_default_image_is_refused_at_startup() {
+        // Not at first open, where it arrives as a session that would not
+        // start and a message about the wrong thing.
+        let e = policy_from_args(args(&["--default", "/nonexistent/saved_acl2"])).unwrap_err();
+        assert!(e.contains("no ACL2 image at"), "{e}");
+    }
+
+    #[test]
+    fn a_directory_as_the_default_image_says_what_to_do_instead() {
+        let e = policy_from_args(args(&["--default", &a_dir()])).unwrap_err();
+        assert!(e.contains("saved_acl2"), "{e}");
+    }
+
+    #[test]
+    fn trusted_is_repeatable_and_must_name_directories() {
+        let p = policy_from_args(args(&["--trusted", &a_dir(), "--trusted", &a_dir()]))
+            .expect("policy");
+        assert_eq!(p.trusted_roots().len(), 2);
+        let e = policy_from_args(args(&["--trusted", &a_file()])).unwrap_err();
+        assert!(e.contains("not a directory"), "{e}");
+    }
+
+    #[test]
+    fn a_flag_missing_its_value_says_which() {
+        assert!(policy_from_args(args(&["--trusted"])).unwrap_err().contains("--trusted"));
+        assert!(policy_from_args(args(&["--default"])).unwrap_err().contains("--default"));
+    }
+
+    // ---- the frame reader ---------------------------------------------------
+
+    fn frame(bytes: &[u8]) -> io::Result<Option<Vec<u8>>> {
+        read_frame(&mut io::BufReader::new(bytes))
+    }
+
+    #[test]
+    fn a_well_formed_frame_reads_its_body() {
+        let f = frame(b"Content-Length: 2\r\n\r\n{}").expect("read").expect("a frame");
+        assert_eq!(f, b"{}");
+    }
+
+    #[test]
+    fn end_of_input_is_not_an_error() {
+        assert!(frame(b"").expect("read").is_none());
+    }
+
+    #[test]
+    fn a_frame_without_a_length_is_refused() {
+        let e = frame(b"Content-Type: application/json\r\n\r\n{}").unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// The malformed-input path that used to bypass the shutdown discipline.
+    ///
+    /// The length is not read against the body at all -- it is refused before
+    /// the allocation, which is the whole point: allocating it is what aborted
+    /// the process without unwinding, leaving drivers unjoined and their ACL2
+    /// children running.
+    #[test]
+    fn an_absurd_content_length_is_refused_before_it_is_allocated() {
+        let e = frame(b"Content-Length: 999999999999\r\n\r\n").unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+        assert!(e.to_string().contains("exceeds"), "{e}");
+    }
+
+    #[test]
+    fn the_largest_allowed_frame_is_still_read_normally() {
+        let n = MAX_FRAME_BYTES;
+        let e = frame(format!("Content-Length: {n}\r\n\r\n").as_bytes()).unwrap_err();
+        // Refused for running out of body, not for the header -- i.e. the cap
+        // itself is inclusive.
+        assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof);
+    }
 }
