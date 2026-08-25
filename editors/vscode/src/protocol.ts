@@ -349,24 +349,6 @@ export class DaemonClient extends EventEmitter {
   }
 }
 
-/**
- * Why the prover inducted, recovered from the log.
- *
- * A different class of fact from the rest of this file: everything else is
- * probed out of the world or read from `get-event-data`, and the induction
- * scheme is *printed* by ACL2 and recorded nowhere. So every field is
- * optional -- a reworded ACL2 drops one rather than inventing it -- and an
- * empty list means "nothing recognised", not "no induction".
- *
- * **Nothing calls the `induction` verb.** Two reasons, and the second is the
- * one that keeps it that way. The form view stopped asking after a `defines`
- * whose three schemes came to 20.9 MB in one reply and took the extension
- * host down with them -- see `policy.ts`. And the reply cannot say which of a
- * form's events any announcement belongs to: a form is often several events,
- * each numbering its goals from `*1`, so the list attaches to no event in
- * particular. The type is kept because the wire still carries it; it is not a
- * surface waiting to be wired up.
- */
 /** One field of a rule, as ACL2 keys it: `:lhs`, `:trigger`, `:corollary`. */
 export interface RuneFieldWire {
   key: string;
@@ -422,29 +404,4 @@ export interface StaleDepsEvent {
   book: string;
   revision: number;
   stale: StaleDepWire[];
-}
-
-export interface InductionWire {
-  /** The pool name: `*1`, or `*1.1` for an induction beneath one. */
-  goal?: string;
-  /** The induction term from the conjecture, untranslated: `(append x y)`. */
-  suggested_by?: string;
-  /** Which rule suggested it: "the :induction rule binary-append". */
-  attribution?: string;
-  /** The scheme, with `:p` standing for the conjecture. */
-  scheme?: string;
-  /**
-   * How long the scheme really is, when `scheme` is only its head.
-   *
-   * The daemon cuts it above its own limit and this is how the client knows
-   * to say so. Absent means the whole scheme is there. A mutual recursion
-   * inducts on its entire clique, and one measured here ran to 6.83 MB --
-   * see `SCHEME_LIMIT` in the daemon's `wire.rs`, and `MAX_TERM` in
-   * `policy.ts` for what the client does with a term that size.
-   */
-  scheme_chars?: number;
-  /** The function whose admission licenses it, when one does. */
-  justified_by?: string;
-  /** ACL2's own phrasing: "two nontautological subgoals". */
-  subgoals?: string;
 }

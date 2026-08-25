@@ -2329,61 +2329,6 @@ fn a_failed_rebuild_does_not_keep_a_deaf_session() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The canary for the one extraction that reads ACL2's prose.
-///
-/// `induction.rs` parses the printed narrative because there is nowhere else
-/// to read a scheme from -- it is computed inside a printing function and
-/// dropped. It is written to degrade quietly: a reworded ACL2 yields an empty
-/// result rather than a wrong one. But *empty is also the ordinary answer*,
-/// since most proofs never induct, so nothing downstream can tell "did not
-/// induct" from "can no longer read". The unit tests parse a string frozen in
-/// this file and will stay green through any rewording.
-///
-/// So this is the only thing that would notice. Induction is *forced* with a
-/// hint rather than left to the heuristics, which keeps the test about the
-/// parse rather than about which scheme ACL2 picks today.
-#[test]
-#[ignore = "needs ACL2"]
-fn the_induction_narrative_still_parses() {
-    let acl2 = acl2_or_skip!();
-    let dir = scratch("induction-canary");
-    let book = dir.join("demo.lisp");
-    write(&book, &["(in-package \"ACL2\")", ALPHA,
-                   "(defthm alpha-is-nil (equal (alpha x) nil) \
-                      :hints ((\"Goal\" :induct (alpha x))))"]);
-    let mut b = Book::open(&acl2, &book).expect("open");
-    let o = b.sync(None, D).expect("sync");
-    assert_eq!(o.admitted.len(), 3, "the hinted theorem is admitted: {o:?}");
-
-    let store = b.output_store();
-    let found = {
-        let g = store.lock().expect("output store");
-        acl2_session::induction::from_output(&g, &o.admitted[2].output_ref).expect("read log")
-    };
-    assert_eq!(found.len(), 1, "one announcement for one induction: {found:#?}");
-    let i = &found[0];
-
-    // Every field, because each one hangs off its own anchor phrase: this is
-    // six separate canaries, and a rewording usually moves only one of them.
-    // Any of these going None is the signal -- ACL2 now prints something this
-    // module cannot read, and `acl2_induction` has quietly stopped answering.
-    assert!(i.goal.is_some() && i.suggested_by.is_some() && i.attribution.is_some()
-                && i.scheme.is_some() && i.justified_by.is_some() && i.subgoals.is_some(),
-            "a field went missing -- the narrative moved: {i:#?}");
-
-    // The three that come from this book rather than from ACL2's English, so
-    // they say the parse found the *right* text and not merely some text.
-    assert_eq!(i.goal.as_deref(), Some("*1"), "{i:#?}");
-    assert_eq!(i.suggested_by.as_deref(), Some("(alpha x)"), "{i:#?}");
-    assert_eq!(i.justified_by.as_deref(), Some("alpha"), "{i:#?}");
-    // The rest are prose or layout, so only their substance is pinned; an
-    // exact match here would fail on cosmetic rewrapping that costs nothing.
-    assert!(i.attribution.as_deref().is_some_and(|a| a.contains("alpha")), "{i:#?}");
-    assert!(i.scheme.as_deref().is_some_and(|s| s.contains("(:p x)")), "{i:#?}");
-
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
 /// A form's log is readable while the form is still printing it.
 ///
 /// The point of the exercise: the handle a timed-out call hands back used to
