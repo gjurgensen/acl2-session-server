@@ -1933,3 +1933,96 @@ fn a_retract_past_the_end_of_the_buffer_keeps_everything() {
     d.shutdown();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A unit event's coordinates describe the revision it is stamped with.
+///
+/// A form's coordinates are recorded when it is *submitted*, because the file
+/// may change while it runs -- and it does: the driver applies queued updates
+/// mid-flight. The unit survives that whenever the content hashes through it
+/// are intact, which is exactly what a layout-only edit leaves: a blank line
+/// inserted above moves every form below it on the page without changing a
+/// word of what any of them says.
+///
+/// So the event went out carrying the new revision and the pre-edit line
+/// numbers. Latent while the client paints from `state` events, which are
+/// recomputed right after -- and a lie about the snapshot it names, which the
+/// first client to trust unit coordinates would inherit.
+///
+/// The slow unit is a large `include-book`, as in the hover test above: it
+/// reliably outruns the step deadline and puts the driver into the resume loop
+/// where the stamping happens.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_unit_events_lines_match_the_revision_it_carries() {
+    let Some(acl2) = acl2() else {
+        eprintln!("ACL2 not set; skipping");
+        return;
+    };
+    let root = std::env::temp_dir().join(format!("acl2-editord-restamp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("dir");
+    let path = root.join("b.lisp");
+    let slow = "(include-book \"std/top\" :dir :system)";
+    let text = format!(
+        "(in-package \"ACL2\")\n\
+         (defun app (x y) (if (consp x) (cons (car x) (app (cdr x) y)) y))\n\
+         {slow}\n"
+    );
+    std::fs::write(&path, &text).unwrap();
+
+    let mut d = Daemon::start(&acl2);
+    let r = d.request("open", json!({ "path": path.to_str().unwrap() }));
+    let book = r["book"].as_str().unwrap().to_string();
+
+    // Hold before the slow form, so the two quick ones are in and settled.
+    d.notify("update", json!({ "book": book, "text": text, "target_line": 2, "revision": 1 }));
+    let _ = d.events_until_settled();
+
+    // Let it run, and wait until it really is in flight.
+    d.notify("update", json!({ "book": book, "text": text, "revision": 2 }));
+    let mut running = false;
+    for _ in 0..100 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        if !d.request("status", json!({ "book": book }))["running"].is_null() {
+            running = true;
+            break;
+        }
+    }
+    assert!(running, "the include-book must outrun a step for this to be the resume path");
+
+    // A blank line above it: every hash is unchanged, so it keeps running, and
+    // every line below moves by one.
+    let moved = text.replace(slow, &format!("\n{slow}"));
+    d.notify("update", json!({ "book": book, "text": moved, "revision": 3 }));
+    let after = d.events_until_settled();
+
+    // Whatever this snapshot's units are, that is what a unit event stamped
+    // with this revision has to say.
+    let state = last_state(&after);
+    let rev = state["revision"].as_u64().expect("revision");
+    let want: Vec<(u64, u64)> = state["units"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| (u["line_start"].as_u64().unwrap(), u["line_end"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(want[2], (4, 4), "the blank line moved the last form down one: {state}");
+
+    let mut checked = 0;
+    for (m, p) in &after {
+        if m != "unit" || p["revision"].as_u64() != Some(rev) {
+            continue;
+        }
+        let i = p["index"].as_u64().expect("index") as usize;
+        assert_eq!(
+            (p["line_start"].as_u64().unwrap(), p["line_end"].as_u64().unwrap()),
+            want[i],
+            "unit {i} at revision {rev} must carry revision {rev}'s coordinates: {p}"
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "no unit event was stamped with the settled revision");
+
+    d.shutdown();
+    let _ = std::fs::remove_dir_all(&root);
+}

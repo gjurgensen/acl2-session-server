@@ -1572,18 +1572,21 @@ impl Driver {
                         });
                     }
                 }
-                Ok(Some(Resumed::Admitted(u))) => {
+                Ok(Some(Resumed::Admitted(mut u))) => {
+                    self.restamp_unit(&mut u);
                     self.note_unit(&u);
                     self.out.notify("unit", &wire::unit_admitted(&self.id, self.revision, &u));
                     self.emit_state(None);
                     return Flow::Continue;
                 }
-                Ok(Some(Resumed::Skipped(f))) => {
+                Ok(Some(Resumed::Skipped(mut f))) => {
+                    self.restamp_failure(&mut f);
                     self.out.notify("unit", &wire::unit_failure(&self.id, self.revision, &f, "skipped"));
                     self.emit_state(None);
                     return Flow::Continue;
                 }
-                Ok(Some(Resumed::Failed(f))) => {
+                Ok(Some(Resumed::Failed(mut f))) => {
+                    self.restamp_failure(&mut f);
                     if f.still_running {
                         // The skip-proofs retry is itself in flight now.
                         continue;
@@ -1627,6 +1630,44 @@ impl Driver {
         };
         let col = self.target_column;
         self.units.iter().rposition(|u| u.covers(line, col) || u.ends_by(line, col))
+    }
+
+    /// Re-stamp a report's coordinates from the snapshot it will be sent with.
+    ///
+    /// A report from `resume` carries the coordinates the unit had when it was
+    /// *submitted*, and those are recorded at submission because the file may
+    /// change while the form runs. It often does: `drain` applies queued
+    /// updates while a proof is in flight, which bumps `self.revision` and
+    /// replaces `self.units`.
+    ///
+    /// The proof survives that whenever the content hashes through the running
+    /// unit are intact -- a reindent, a comment, a blank line added above --
+    /// and every one of those moves the form on the page without changing what
+    /// it says. So the event went out stamped with the new revision and the
+    /// old line and column: a client that painted from it would mark the wrong
+    /// lines, and the wire would be saying something untrue about the snapshot
+    /// it names.
+    ///
+    /// The unit is looked up by index, which is sound exactly here: the guard
+    /// that let the proof continue is that the prefix through this unit has
+    /// the same hashes, so the entry at this index is the same form.
+    fn restamp_unit(&self, u: &mut acl2_session::sync::UnitReport) {
+        if let Some(now) = self.units.get(u.index) {
+            u.line_start = now.line_start;
+            u.line_end = now.line_end;
+            u.col_start = now.col_start;
+            u.col_end = now.col_end;
+        }
+    }
+
+    /// The same, for a failure envelope. See [`Driver::restamp_unit`].
+    fn restamp_failure(&self, f: &mut acl2_session::sync::FailureReport) {
+        if let Some(now) = self.units.get(f.index) {
+            f.line_start = now.line_start;
+            f.line_end = now.line_end;
+            f.col_start = now.col_start;
+            f.col_end = now.col_end;
+        }
     }
 
     /// Units currently in the world (skipped ones included).

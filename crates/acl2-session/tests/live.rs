@@ -2793,3 +2793,54 @@ fn a_slow_skip_retry_reports_skipped_not_admitted() {
     }
     panic!("the retry never finished");
 }
+
+/// A probe that outruns its deadline is discarded, not reported as an eval.
+///
+/// `resume` had one way to describe a form in flight with no unit attached:
+/// the caller's `eval`. Every generated probe -- `query`, the census, the
+/// deps and doc walks, the post-mortems -- submits the same way, so a slow one
+/// came back announced as `Resumed::Evaluated`, handing the caller our own
+/// bookkeeping as the result of something they typed.
+///
+/// The floor makes this rare rather than impossible, which is why it stayed
+/// hidden; `query` is the one probe whose form a test can choose, so this
+/// arranges the rare state on purpose.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_slow_probe_is_discarded_rather_than_reported_as_an_eval() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("slow-probe");
+    let file = dir.join("q.lisp");
+    std::fs::write(&file, "(in-package \"ACL2\")\n").unwrap();
+    let mut b = Book::open(&acl2, &file).unwrap();
+    b.sync(None, Duration::from_secs(60)).unwrap();
+
+    // Server-generated and world-neutral, as the contract requires -- and
+    // slower than the floor `query` applies, which is what puts it in flight.
+    let slow = "(value-triple (mod (expt 3 12000000) 7))";
+    let q = b.query(slow, Duration::from_millis(1)).unwrap();
+    assert_eq!(q.outcome, acl2_session::Outcome::StillRunning, "the probe is in flight");
+
+    // Whoever resumes next is not owed an answer about it.
+    let mut saw = None;
+    for _ in 0..120 {
+        match b.resume(Duration::from_secs(5)).expect("resume") {
+            Some(Resumed::StillRunning { .. }) => continue,
+            other => {
+                saw = Some(other);
+                break;
+            }
+        }
+    }
+    match saw {
+        Some(None) => {}
+        Some(Some(Resumed::Evaluated(r))) => {
+            panic!("our own probe was reported as the caller's eval: {r:?}")
+        }
+        other => panic!("unexpected resume: {other:?}"),
+    }
+
+    // And the session is usable, with a real eval still answering as one.
+    let ev = b.eval("(+ 1 1)", Duration::from_secs(30)).unwrap();
+    assert_eq!(ev.value.map(|v| v.text).as_deref(), Some("2"));
+}

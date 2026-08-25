@@ -2066,6 +2066,21 @@ pub struct Book {
     /// has, rather than under a fresh one while the original stays empty
     /// forever. Cleared once filled.
     in_flight_output: Option<OutputRef>,
+    /// Whether what is in flight is the *user's* `eval`.
+    ///
+    /// `resume` has to tell an eval from a probe, and until this it could not:
+    /// with no `PendingUnit` attached it assumed an eval, because that was the
+    /// only other thing that put a form in flight. It is not. Every generated
+    /// probe -- `query`, the census, the deps and doc walks, the post-mortems
+    /// -- submits the same way, and one that outruns its floored deadline came
+    /// back through `resume` and was announced as `Resumed::Evaluated`: our
+    /// own bookkeeping reported to the caller as the result of something they
+    /// typed.
+    ///
+    /// Marked from the eval side rather than at every probe, because there is
+    /// one `eval` and a dozen probes, and a probe added later would otherwise
+    /// have to remember.
+    in_flight_eval: bool,
     /// Where this image keeps its books, as ACL2 itself reports it.
     ///
     /// Asked rather than inferred. Walking up from the image looking for
@@ -2180,6 +2195,7 @@ impl Book {
             inherited_inhibit: None,
             books_dir: None,
             in_flight_output: None,
+            in_flight_eval: false,
             build: None,
         };
         b.post_start_setup()?;
@@ -2373,6 +2389,10 @@ impl Book {
         // that matters) reads `saved-output-reversed`, which is untouched.
         let body =
             format!("{CLEAR_STALE}\n{form}\n{}\n{CMD_PROBE}", crate::session::VALUE_PROBE);
+        // Before the submit, so that a form which outruns the deadline is
+        // already marked when `resume` comes looking. Cleared by `finish_eval`
+        // on whichever call completes it.
+        self.in_flight_eval = true;
         let sub = self.session.submit(&body, deadline)?;
         self.finish_eval(sub, deadline)
     }
@@ -2627,6 +2647,9 @@ impl Book {
         sub: crate::session::Submission,
         deadline: Duration,
     ) -> Result<EvalResult, SyncError> {
+        if sub.outcome != Outcome::StillRunning {
+            self.in_flight_eval = false;
+        }
         let output_ref = self.record_output(&sub)?;
         let output_lines = self.outs().lines(&output_ref).unwrap_or(0);
         // Probe before the undo: rolling back is itself a submission, and the
@@ -3423,7 +3446,21 @@ impl Book {
         self.pending = None;
 
         let Some(p) = pending else {
-            // No unit attached: an eval finished.
+            if !self.in_flight_eval {
+                // A probe of ours, not the caller's eval. Discarded rather
+                // than reported: nobody asked for it, and announcing it as an
+                // `Evaluated` handed the caller our bookkeeping as the result
+                // of something they typed. `Ok(None)` is the truth -- nothing
+                // the caller is waiting for was running.
+                //
+                // The world check `query` runs afterwards is skipped by
+                // arriving here, which is acceptable on the same grounds that
+                // make the check belt-and-braces in the first place: every
+                // form that reaches a probe is server-generated and
+                // world-neutral by contract.
+                return Ok(None);
+            }
+            // No unit attached and the eval marker set: an eval finished.
             let r = self.finish_eval(sub, deadline)?;
             return Ok(Some(Resumed::Evaluated(r)));
         };
@@ -3653,6 +3690,9 @@ impl Book {
             return Ok(InterruptReport { ok: false, interrupted: None });
         }
         self.pending = None;
+        // Whatever was in flight is not any more, eval or probe, so the marker
+        // must not survive to describe the next thing that is.
+        self.in_flight_eval = false;
         if let Some(r) = self.in_flight_output.take() {
             // It describes a form that was abandoned rather than the world
             // as it now stands, which is what `superseded` is for.
@@ -4218,6 +4258,8 @@ impl Book {
             }
         };
         self.admitted.clear();
+        // A new process: nothing at all is in flight in it.
+        self.in_flight_eval = false;
         // The same pruning `rollback_to` does, for the same reason: units past
         // `keep` are not going to exist in the rebuilt world, so the store must
         // not keep answering `describe` for the names they introduced. Without
