@@ -4541,6 +4541,254 @@ fn resolve_target(units: &[Form], line: Option<usize>, column: Option<usize>) ->
     units.iter().rposition(|u| u.ends_by(line, column))
 }
 
+/// The capture parsers, offline.
+///
+/// `parse_inner` and `parse_checkpoints` turn what a probe printed into the
+/// structure every surface then reports. They are pure functions of a
+/// `Submission`, whose fields are public -- so a fixture is a struct literal,
+/// and none of this needs an ACL2. Until now all of it was live-only, which
+/// meant the layer between a probe's output and the wire was checked only
+/// where an image was to hand.
+///
+/// The fixtures are shaped the way the probes actually print: values wrapped
+/// at ACL2's right margin, `nil` for a slot with nothing in it, and the
+/// index-tagged rune stream.
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+    use crate::session::Submission;
+    use std::time::Duration;
+
+    fn sub(blocks: &[(&str, &str)]) -> Submission {
+        Submission {
+            outcome: Outcome::Ok,
+            output: String::new(),
+            data: Vec::new(),
+            blocks: blocks.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            elapsed: Duration::ZERO,
+        }
+    }
+
+    // ---- parse_inner --------------------------------------------------------
+
+    /// A compound form's events, as the `inner` probe prints them.
+    ///
+    /// One line per *element*, not one line per key: the probe is a `~*0`
+    /// with `"iname ~x*~%"` for each of its three slots, so every item gets
+    /// its own line under a repeated prefix. That is what makes the parse
+    /// independent of the width ACL2 formatted for -- a value may wrap, but
+    /// only onto lines that do not carry the prefix.
+    ///
+    /// Newest-first, and the fields are positional across events.
+    const INNER: &str = "\
+iname REV-REV
+iname LEN-APP
+iname APP-ASSOC
+iclq REV-REV
+iclq MY-REV
+ik DEFTHM
+ik DEFTHM
+ik DEFTHM
+ia (INDUCTION-DEPTH-LIMIT-EXCEEDED)
+ia NIL
+ia NIL
+inx YES
+inx YES
+inx YES
+it 2
+it 1
+it 1
+is 997
+is 316
+is 435
+irune (0 :INDUCTION REVAPPEND)
+irune (1 :DEFINITION LEN)
+irune (1 :REWRITE CDR-CONS)";
+
+    #[test]
+    fn every_event_is_named_and_its_fields_are_positional() {
+        let (events, total, _) = parse_inner(&sub(&[("inner", INNER)]));
+        assert_eq!(total, 3);
+        assert_eq!(
+            events.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            vec!["REV-REV", "LEN-APP", "APP-ASSOC"]
+        );
+        // Index 0 is the failing event: `event-data-fal` is newest-first and a
+        // compound form stops where it failed, so the default detail depth
+        // never misses it.
+        assert_eq!(events[0].abort_causes.as_deref(), Some("(INDUCTION-DEPTH-LIMIT-EXCEEDED)"));
+        assert_eq!(events[1].abort_causes, None, "nil is no cause");
+        assert_eq!(events[0].prover_steps, Some(997));
+        assert_eq!(events[2].prover_steps, Some(435));
+        // Lowercased and de-qualified by `symbol_name_of`: ACL2 prints a
+        // symbol package-qualified whenever the current package cannot see it,
+        // so the printed text is not a stable key and this is.
+        assert_eq!(events[0].kind.as_deref(), Some("defthm"));
+        assert_eq!(events[0].has_namex, Some(true));
+    }
+
+    /// `revert` is bookkeeping, not a cause: ACL2 records it whenever a proof
+    /// falls back to induction, which is an ordinary thing for a proof that
+    /// then succeeds. A cause list that is nothing but reverts is no cause.
+    #[test]
+    fn revert_is_filtered_out_of_the_causes() {
+        let body = "iname A\niname B\niname C\n\
+             ia (REVERT)\nia (ACL2::MAYBE-REVERT)\nia (REVERT SOMETHING-REAL)";
+        let (events, _, _) = parse_inner(&sub(&[("inner", body)]));
+        assert_eq!(events[0].abort_causes, None);
+        assert_eq!(events[1].abort_causes, None, "package-qualified too");
+        // Rewrapped as a list, because that is what it is: the filter takes
+        // members out, it does not change the shape.
+        assert_eq!(
+            events[2].abort_causes.as_deref(),
+            Some("(SOMETHING-REAL)"),
+            "a real cause beside a revert survives alone"
+        );
+    }
+
+    /// Runes arrive index-tagged in one flat stream, because a per-event list
+    /// cannot survive `cw`'s printing. The tag is ours, so peeling it is
+    /// sentinel parsing rather than prose parsing.
+    #[test]
+    fn runes_are_returned_to_the_event_that_earned_them() {
+        let (events, _, _) = parse_inner(&sub(&[("inner", INNER)]));
+        assert_eq!(events[0].rules, vec!["(:INDUCTION REVAPPEND)"]);
+        assert_eq!(events[1].rules, vec!["(:DEFINITION LEN)", "(:REWRITE CDR-CONS)"]);
+        assert!(events[2].rules.is_empty(), "an event with no runes gets none");
+    }
+
+    /// A rune tagged for an event that does not exist is dropped rather than
+    /// panicking or landing on the wrong one -- the probe's prefix is limited,
+    /// so an index past the end is a shape this really sees.
+    #[test]
+    fn a_rune_for_no_event_is_dropped() {
+        let body = "iname A\nirune (0 :REWRITE OK)\nirune (9 :REWRITE STRAY)\nirune malformed";
+        let (events, _, _) = parse_inner(&sub(&[("inner", body)]));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].rules, vec!["(:REWRITE OK)"]);
+    }
+
+    /// ACL2 records a `mutual-recursion` as one event, so its other members
+    /// are nowhere in `iname`; the clique list is how they surface at all.
+    /// Only the ones the events did not already carry -- the probe emits a
+    /// `recursivep` list for every recursive function, which for the ordinary
+    /// singly-recursive one is just its own name back.
+    #[test]
+    fn the_clique_reports_only_the_members_no_event_named() {
+        let (_, _, clique) = parse_inner(&sub(&[("inner", INNER)]));
+        assert_eq!(clique, vec!["MY-REV"], "REV-REV is already an event");
+    }
+
+    /// Beyond the probed prefix a field is simply absent, which is how a
+    /// consumer tells "no rules" from "rules not read".
+    #[test]
+    fn fields_past_the_probed_prefix_are_absent_not_zero() {
+        let body = "iname A\niname B\niname C\nis 100";
+        let (events, _, _) = parse_inner(&sub(&[("inner", body)]));
+        assert_eq!(events[0].prover_steps, Some(100));
+        assert_eq!(events[1].prover_steps, None);
+        assert_eq!(events[2].prover_steps, None);
+    }
+
+    #[test]
+    fn a_submission_without_an_inner_block_reports_nothing() {
+        let (events, total, clique) = parse_inner(&sub(&[]));
+        assert!(events.is_empty() && clique.is_empty() && total == 0);
+    }
+
+    // ---- parse_checkpoints --------------------------------------------------
+
+    /// What the `ckpt` probe prints for a failed proof that reverted to
+    /// induction: counts, flags, and up to three goals on each side. The terms
+    /// are wrapped at ACL2's margin, which is why `keyed_block` runs a value
+    /// to the next known key rather than to end of line.
+    const CKPT: &str = "\
+gag T
+ntop 1
+nsub 1
+forced NIL
+abort (INDUCTION-DEPTH-LIMIT-EXCEEDED)
+reverted T
+top0 (IMPLIES (TRUE-LISTP A)
+              (EQUAL (REVAPPEND (REVAPPEND A NIL) NIL) A))
+top1 NIL
+top2 NIL
+sub0 (IMPLIES (AND (CONSP A) (EQUAL X (CDR A)))
+              (EQUAL Y A))
+sub1 NIL
+sub2 NIL
+tid0 Goal'
+tid1 NIL
+tid2 NIL
+sid0 Subgoal *1/3'''
+sid1 NIL
+sid2 NIL";
+
+    #[test]
+    fn a_failed_proof_reports_its_goals_on_both_sides() {
+        let c = parse_checkpoints(&sub(&[("ckpt", CKPT)]));
+        assert!(c.proof_ran && c.pre_revert && !c.forced);
+        assert_eq!(c.n_top, 1);
+        assert_eq!(c.n_sub, 1);
+        assert_eq!(c.abort_cause.as_deref(), Some("(INDUCTION-DEPTH-LIMIT-EXCEEDED)"));
+        assert_eq!(c.top.len(), 1);
+        assert_eq!(c.sub.len(), 1);
+        assert_eq!(c.top[0].goal.as_deref(), Some("Goal'"));
+        assert_eq!(c.sub[0].goal.as_deref(), Some("Subgoal *1/3'''"));
+    }
+
+    /// A wrapped term keeps its layout: ACL2 indents to show structure, and
+    /// the goal name it is addressed by must not.
+    #[test]
+    fn a_wrapped_term_keeps_its_lines_and_a_goal_name_does_not() {
+        let c = parse_checkpoints(&sub(&[("ckpt", CKPT)]));
+        assert!(c.top[0].term.contains('\n'), "the term is as ACL2 laid it out");
+        assert!(!c.sub[0].goal.as_deref().unwrap().contains('\n'));
+    }
+
+    /// An empty slot prints `nil`, and a `nil` term is dropped -- while the
+    /// counts, which are authoritative, still say how many there were.
+    #[test]
+    fn nil_slots_are_dropped_but_the_counts_stand() {
+        let body = "gag T\nntop 5\nnsub 0\ntop0 NIL\ntop1 NIL\ntop2 NIL";
+        let c = parse_checkpoints(&sub(&[("ckpt", body)]));
+        assert_eq!(c.n_top, 5, "five existed");
+        assert!(c.top.is_empty(), "and none of the three slots held one");
+    }
+
+    /// No block at all is a proof that did not run, not a proof with no
+    /// checkpoints -- `proof_ran` is the field that says which.
+    #[test]
+    fn a_submission_without_a_ckpt_block_says_no_proof_ran() {
+        let c = parse_checkpoints(&sub(&[]));
+        assert!(!c.proof_ran);
+        assert!(c.top.is_empty() && c.sub.is_empty());
+        assert!(c.abort_cause.is_none());
+    }
+
+    // ---- keyed_block, which both of them stand on ---------------------------
+
+    /// The wrapping is the whole reason this exists: a value runs to the next
+    /// *known key*, not to end of line, because ACL2 breaks long values at its
+    /// right margin and a line-per-value parse loses everything after the
+    /// break.
+    #[test]
+    fn a_value_runs_to_the_next_known_key() {
+        let got = keyed_block("a one\n  two\n  three\nb four", &["a", "b"]);
+        assert_eq!(got[0], ("a".to_string(), "one\n  two\n  three".to_string()));
+        assert_eq!(got[1], ("b".to_string(), "four".to_string()));
+    }
+
+    /// A key is only a key at the start of a line and followed by a space, or
+    /// a term mentioning `top0` would end the value it is inside.
+    #[test]
+    fn a_key_is_only_a_key_where_a_key_can_be() {
+        let got = keyed_block("a (f top0 x)\nb 1", &["a", "b", "top0"]);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].1, "(f top0 x)");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// Count parens outside string literals. Generated probes are checked

@@ -1375,6 +1375,162 @@ fn strip_sentinels(s: &str) -> Stripped {
     (out.trim_start_matches(['\n', '\r']).to_string(), data, blocks)
 }
 
+/// The capture parsers, offline.
+///
+/// `strip_sentinels` and `display_of` decide what a reader ever sees of a
+/// form: they take the raw PTY stream and remove our own scaffolding from it.
+/// Every test of them used to need a live ACL2, which meant the one layer
+/// standing between a user and a wall of `<<<PROBE-BEGIN>>>` markers was
+/// checked only when somebody had an image to hand.
+///
+/// The fixtures are shaped like the real stream -- a prompt fragment at the
+/// head, because ACL2 prints one before reading our line; markers embedded
+/// mid-line, because `fmt` puts them wherever the margin lands.
+#[cfg(test)]
+mod capture_tests {
+    use super::{display_of, is_completion_marker, strip_sentinels};
+
+    /// What ACL2 actually hands back for an ordinary form: a prompt fragment,
+    /// the form's own output, our planted label echoed as the value, and the
+    /// completion marker.
+    /// `\x20` for the leading space ACL2 prints before a form's value: a
+    /// backslash-newline in a Rust literal eats the indentation *and* it.
+    const REAL: &str = "ACL2 !>\n\
+        Since MY-REV is non-recursive, its admission is trivial.\n\
+        \x20MY-REV\n\
+        ACL2-SESSION-MARK-3\n\
+        <<<PROBE-OK 7>>>\n\
+        ACL2 !>";
+
+    /// The form's own output, and nothing of ours: the leading prompt, our
+    /// planted label and the completion marker are all gone.
+    ///
+    /// The *trailing* prompt stays, and that is the difference between the
+    /// two functions rather than an oversight. A finished capture never
+    /// carries one because consumption cuts the stream at the marker; only a
+    /// live read sees past it, which is why `display_of` has a cut of its own.
+    #[test]
+    fn an_ordinary_capture_keeps_only_what_acl2_said() {
+        let (text, data, blocks) = strip_sentinels(REAL);
+        assert_eq!(
+            text,
+            "Since MY-REV is non-recursive, its admission is trivial.\n MY-REV\nACL2 !>"
+        );
+        assert!(data.is_empty() && blocks.is_empty());
+    }
+
+    /// The prompt is dropped only when it leads. One appearing later is
+    /// ACL2's own nested prompt during an `ld`, and is part of the output.
+    #[test]
+    fn only_a_leading_prompt_is_dropped() {
+        assert_eq!(strip_sentinels("ACL2 !>hello").0, "hello");
+        assert_eq!(strip_sentinels("FOO !>hello").0, "hello");
+        assert_eq!(strip_sentinels("hello\nACL2 !>there").0, "hello\nACL2 !>there");
+    }
+
+    /// The label is ours, and arrives package-qualified when the session's
+    /// current package is not "ACL2". A name that merely looks like one is
+    /// not: only digits after the prefix.
+    #[test]
+    fn our_own_labels_are_removed_however_they_are_printed() {
+        assert_eq!(strip_sentinels("a\nACL2-SESSION-MARK-12\nb").0, "a\nb");
+        assert_eq!(strip_sentinels("a\nACL2::ACL2-SESSION-MARK-12\nb").0, "a\nb");
+        assert_eq!(strip_sentinels("a\n  acl2-session-mark-3  \nb").0, "a\nb");
+        assert_eq!(
+            strip_sentinels("a\nACL2-SESSION-MARK-FOO\nb").0,
+            "a\nACL2-SESSION-MARK-FOO\nb",
+            "a name that is not one of ours is the user's"
+        );
+    }
+
+    #[test]
+    fn one_line_data_comes_out_as_pairs_and_leaves_the_text() {
+        let (text, data, _) = strip_sentinels("before\n<<<PROBE-DATA pkg \"ACL2\">>>\nafter");
+        assert_eq!(text, "before\nafter");
+        assert_eq!(data, vec![("pkg".to_string(), "\"ACL2\"".to_string())]);
+    }
+
+    /// Blocks are lifted out entirely, so a block's contents never appear
+    /// twice -- once as structure and once as prose.
+    #[test]
+    fn a_block_is_lifted_out_of_the_text_completely() {
+        let raw = "head\n<<<PROBE-BEGIN evd>>>\n(:rules a b)\n(:time 1)\n<<<PROBE-END evd>>>\ntail";
+        let (text, _, blocks) = strip_sentinels(raw);
+        assert_eq!(text, "head\ntail");
+        assert_eq!(blocks, vec![("evd".to_string(), "(:rules a b)\n(:time 1)".to_string())]);
+    }
+
+    /// A `PROBE-END` for a different key does not close the block. The body
+    /// goes on accumulating, which is what keeps two probes from merging.
+    #[test]
+    fn a_block_is_closed_only_by_its_own_key() {
+        let raw = "<<<PROBE-BEGIN a>>>\nbody\n<<<PROBE-END b>>>\nmore\n<<<PROBE-END a>>>";
+        let (_, _, blocks) = strip_sentinels(raw);
+        assert_eq!(blocks, vec![("a".to_string(), "body\nmore".to_string())]);
+    }
+
+    /// The path the review called out, pinned rather than fixed.
+    ///
+    /// A block that never closes swallows everything after its `BEGIN`: those
+    /// lines sit in the pending body and are dropped when the loop ends. That
+    /// is the right outcome and not an oversight -- the probes are emitted
+    /// *after* the user's form has printed, so what is swallowed is our
+    /// scaffolding, and showing half a probe block would be strictly worse
+    /// than showing none. Everything the form itself printed is above the
+    /// `BEGIN` and survives.
+    ///
+    /// It reaches a reader through `display_of`, on a form interrupted or
+    /// timed out mid-probe.
+    #[test]
+    fn an_unterminated_block_swallows_itself_and_nothing_above_it() {
+        let (text, _, blocks) = strip_sentinels("the form's output\n<<<PROBE-BEGIN evd>>>\ncut off here");
+        assert_eq!(text, "the form's output");
+        assert!(blocks.is_empty(), "half a block is no block");
+    }
+
+    /// A marker of any generation is display scaffolding wherever it turns
+    /// up -- an outcome decision matches the exact generation, but leaving a
+    /// stale one in the text just shows a reader a magic string.
+    #[test]
+    fn completion_markers_are_recognised_by_shape_not_by_generation() {
+        assert!(is_completion_marker("<<<PROBE-OK 7>>>"));
+        assert!(is_completion_marker("<<<PROBE-DONE 999>>>"));
+        assert!(is_completion_marker("trailing text <<<PROBE-OK 1>>> and more"));
+        assert!(!is_completion_marker("<<<PROBE-OK>>>"), "an id is required");
+        assert!(!is_completion_marker("<<<PROBE-OK abc>>>"), "and it is digits");
+        assert!(!is_completion_marker("<<<PROBE-BEGIN 7>>>"), "not every marker");
+    }
+
+    /// `display_of` is the live half, and its contract is that a form watched
+    /// while it runs and the same form read afterwards are the same document.
+    /// It cuts at the completion marker: everything past it is the prompt for
+    /// whatever comes next, which a finished capture never carries.
+    #[test]
+    fn a_live_read_stops_where_the_finished_log_stops() {
+        assert_eq!(
+            display_of(REAL),
+            "Since MY-REV is non-recursive, its admission is trivial.\n MY-REV",
+            "the same text the finished capture files"
+        );
+    }
+
+    /// And mid-flight -- no marker yet, trailing probes already printing --
+    /// it shows the form's output and none of the scaffolding. This is the
+    /// case that produced the measurement in `display_of`'s own doc: 77 raw
+    /// lines against the 45 the same form filed.
+    #[test]
+    fn a_live_read_mid_probe_shows_no_scaffolding() {
+        let raw = "ACL2 !>\nProof output here.\n<<<PROBE-BEGIN evd>>>\n(:time 1)";
+        assert_eq!(display_of(raw), "Proof output here.");
+    }
+
+    #[test]
+    fn an_empty_capture_is_empty() {
+        assert_eq!(display_of(""), "");
+        assert_eq!(strip_sentinels("").0, "");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
