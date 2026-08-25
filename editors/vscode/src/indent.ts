@@ -734,10 +734,6 @@ export function reindent(text: string, opts: IndentOptions = {}): string {
   return out;
 }
 
-function lineStartOf(text: string, offset: number): number {
-  return text.lastIndexOf('\n', offset - 1) + 1;
-}
-
 /**
  * Whether `limit` sits inside a string or a block comment.
  *
