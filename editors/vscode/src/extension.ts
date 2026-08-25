@@ -316,7 +316,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // The progress readout is also the way back to the form view, for when it has
   // been closed and the gutter says something needs looking at.
   status.command = 'acl2-session.showFormView';
-  status.tooltip = 'ACL2: show the formView';
+  status.tooltip = 'ACL2: show the form view';
   channel = vscode.window.createOutputChannel('ACL2');
   problems = vscode.languages.createDiagnosticCollection('acl2');
   context.subscriptions.push(problems);
@@ -418,9 +418,18 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('acl2-session.resume', () =>
       forBook((s) => setPaused(s, false))
     ),
-    vscode.commands.registerCommand('acl2-session.interrupt', () =>
-      forBook((s) => void client?.request('interrupt', { book: s.id }).catch(report))
-    ),
+    // The book id is optional and comes from the status bar during a
+    // certification, where the bar is timing one book and the focus may be
+    // anywhere. Everywhere else it is the active editor's, as every other
+    // command resolves it.
+    vscode.commands.registerCommand('acl2-session.interrupt', (book?: string) => {
+      const named = typeof book === 'string' ? byId.get(book) : undefined;
+      if (named) {
+        void client?.request('interrupt', { book: named.id }).catch(report);
+        return;
+      }
+      forBook((s) => void client?.request('interrupt', { book: s.id }).catch(report));
+    }),
     vscode.commands.registerCommand('acl2-session.retractToCursor', () =>
       forBook((s) => {
         const units = s.lastState?.units ?? [];
@@ -581,7 +590,12 @@ export function activate(context: vscode.ExtensionContext): void {
         paint(s);
       }
     }),
-    vscode.window.onDidChangeActiveTextEditor(refreshContext),
+    vscode.window.onDidChangeActiveTextEditor(() => {
+      refreshContext();
+      // The bar describes the file in front, so a tab switch is a repaint.
+      // Without this it went on describing the file you had left.
+      refreshStatusBar();
+    }),
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (
         e.affectsConfiguration('acl2-session.colors') ||
@@ -990,8 +1004,10 @@ async function certifyBook(s: BookSession): Promise<void> {
   const tick = setInterval(() => {
     const secs = Math.floor((Date.now() - started) / 1000);
     status.text = `$(sync~spin) ACL2: certifying ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
-    status.tooltip = 'ACL2: click to interrupt the certification';
-    status.command = 'acl2-session.interrupt';
+    status.tooltip = `ACL2: click to interrupt certifying ${basename(s.doc.fileName)}`;
+    // With the book named, so the button interrupts what the bar is timing
+    // rather than whatever file happens to be focused when it is clicked.
+    status.command = { command: 'acl2-session.interrupt', title: 'Interrupt', arguments: [s.id] };
   }, 500);
   try {
     const r: CertifyReply = await client!.request('certify', { book: s.id, jobs });
@@ -1018,8 +1034,8 @@ async function certifyBook(s: BookSession): Promise<void> {
     clearInterval(tick);
     s.certifying = false;
     status.command = 'acl2-session.showFormView';
-    status.tooltip = 'ACL2: show the formView';
     updateStatusBar(s);
+    refreshStatusBar();
   }
 }
 
@@ -1517,7 +1533,7 @@ async function startCommand(initial?: Held): Promise<void> {
     outlineKeys.delete(s.id);
     renewSymbols();
     status.show();
-    status.text = '$(sync~spin) ACL2: starting';
+    setStatus(s, '$(sync~spin) ACL2: starting');
     channel.appendLine(`opened ${doc.fileName} as ${s.id} under ${r.image}`);
     void noteProveOverride(r.prove_output_overridden as string | undefined);
     sendUpdate(s);
@@ -1628,6 +1644,12 @@ function dropBook(s: BookSession): void {
   books.delete(s.doc.uri.toString());
   byId.delete(s.id);
   outlineKeys.delete(s.id);
+  // The bar cannot go on describing a book that no longer exists, and with
+  // this cleared the next live book to ask for it can have it.
+  if (statusBook === s.id) {
+    statusBook = undefined;
+    refreshStatusBar();
+  }
   // The transcript is answers from a world that no longer exists.
   s.console?.dispose();
   s.console = undefined;
@@ -1644,6 +1666,7 @@ function dropBook(s: BookSession): void {
   }
   if (books.size === 0) {
     status.hide();
+    statusBook = undefined;
   }
   refreshContext();
 }
@@ -2112,7 +2135,10 @@ function onTail(p: TailEvent): void {
     formView.tail(p.book, p.unit, p.elapsed_ms, p.text);
   }
   const secs = Math.round(p.elapsed_ms / 1000);
-  status.text = `$(sync~spin) ACL2: proving ${p.unit === null ? '' : `${p.unit + 1}/${s.lastState?.units.length ?? '?'} `}(${secs}s)`;
+  setStatus(
+    s,
+    `$(sync~spin) ACL2: proving ${p.unit === null ? '' : `${p.unit + 1}/${s.lastState?.units.length ?? '?'} `}(${secs}s)`
+  );
 }
 
 function onSettled(p: SettledEvent): void {
@@ -2136,7 +2162,7 @@ function onSettled(p: SettledEvent): void {
     renewSymbols();
   }
   if (p.reason === 'split_error' || p.reason === 'error') {
-    status.text = `$(warning) ACL2: ${p.reason}`;
+    setStatus(s, `$(warning) ACL2: ${p.reason}`);
     if (p.message) {
       channel.appendLine(`${p.reason}: ${p.message}`);
     }
@@ -2326,6 +2352,80 @@ function paint(s: BookSession): void {
   }
 }
 
+/**
+ * Which book the status bar is currently describing.
+ *
+ * The bar is one widget and books are many, so it has to belong to one of
+ * them; without this it belonged to whichever book's event arrived last.
+ * `onTail`, `onSettled` and `onState` all repaint, so with two live books it
+ * flip-flopped between them several times a second -- and switching tabs
+ * repainted nothing at all, so it went on describing the file you had left
+ * until the next event from it.
+ *
+ * The book the bar shows is the active editor's, and it is also what the
+ * bar's *command* acts on: during a certification the bar becomes an
+ * interrupt button, and `acl2-session.interrupt` resolves against the active
+ * editor -- so a bar describing some other book was a button that interrupted
+ * the wrong session, or none.
+ */
+let statusBook: string | undefined;
+
+/**
+ * The book of the editor in front, if it has one.
+ *
+ * A webview or an output panel taking focus leaves `activeTextEditor`
+ * undefined, which must not be read as "no book": the bar would blank every
+ * time you clicked the form view it links to.
+ */
+function activeBook(): BookSession | undefined {
+  const editor = vscode.window.activeTextEditor;
+  return editor ? bookFor(editor.document) : undefined;
+}
+
+/** Repaint the bar for whichever book is in front now. */
+function refreshStatusBar(): void {
+  const s = activeBook();
+  if (s) {
+    updateStatusBar(s);
+  }
+}
+
+/**
+ * Whether the bar is this book's to write to.
+ *
+ * The book in front owns it. With nothing in front that has a session -- a
+ * webview focused, a plain text file open -- whichever book the bar already
+ * describes keeps it, rather than the bar blanking or being taken by the next
+ * event to arrive from anywhere.
+ */
+function ownsStatus(s: BookSession): boolean {
+  const active = activeBook();
+  if (active) {
+    return active.id === s.id;
+  }
+  return statusBook === undefined || statusBook === s.id;
+}
+
+/**
+ * Write the bar on one book's behalf.
+ *
+ * Every write goes through here, because every write used to go straight to
+ * the widget: `onTail`, `onSettled` and `onState` each set it for whichever
+ * book's event had arrived, so two live books took turns several times a
+ * second.
+ *
+ * A running certification is the one thing that outranks the book in front:
+ * the bar is its clock and its interrupt button until it finishes.
+ */
+function setStatus(s: BookSession, text: string): void {
+  if (s.certifying || !ownsStatus(s)) {
+    return;
+  }
+  statusBook = s.id;
+  status.tooltip = `ACL2: ${basename(s.doc.fileName)} \u2014 show the form view`;
+  status.text = text;
+}
+
 function updateStatusBar(s: BookSession): void {
   const units = s.lastState?.units ?? [];
   const total = units.length;
@@ -2335,15 +2435,15 @@ function updateStatusBar(s: BookSession): void {
   if (s.paused) {
     // Ahead of the counts because it explains them: a paused book stops where
     // it stops, and a bare "12/40 admitted" would read as a run still coming.
-    status.text = `$(debug-pause) ACL2: paused \u2014 ${green}/${total} admitted`;
+    setStatus(s, `$(debug-pause) ACL2: paused \u2014 ${green}/${total} admitted`);
   } else if (running) {
-    status.text = `$(sync~spin) ACL2: proving ${running.index + 1}/${total}`;
+    setStatus(s, `$(sync~spin) ACL2: proving ${running.index + 1}/${total}`);
   } else if (s.lastSettle === 'interrupted') {
-    status.text = `$(circle-slash) ACL2: interrupted \u2014 ${green}/${total} admitted`;
+    setStatus(s, `$(circle-slash) ACL2: interrupted \u2014 ${green}/${total} admitted`);
   } else if (reds > 0) {
-    status.text = `$(error) ACL2: ${green}/${total} admitted, ${reds} red`;
+    setStatus(s, `$(error) ACL2: ${green}/${total} admitted, ${reds} red`);
   } else {
-    status.text = `$(check) ACL2: ${green}/${total} admitted`;
+    setStatus(s, `$(check) ACL2: ${green}/${total} admitted`);
   }
 }
 
