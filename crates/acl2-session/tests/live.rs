@@ -2720,3 +2720,76 @@ fn a_stale_marker_does_not_truncate_an_interrupted_forms_log() {
         "the form's own output must survive the stale marker, not be cut at it"
     );
 }
+
+/// A skip-proofs retry that outruns its deadline still reports as `skipped`.
+///
+/// Under ContinuePastFailure a failed unit is retried under `skip-proofs`.
+/// When the retry finishes inside its own deadline the sync reports `skipped`
+/// with the original failure's envelope. When it does not, the unit comes back
+/// through `resume` -- which had nothing but the submission to go on, so it
+/// answered `Admitted`: a form whose proof failed reported as plain green,
+/// with its checkpoints, abort cause and error line dropped on the floor. The
+/// same unit, the same outcome, two different answers.
+///
+/// The slow one is the path under test, and reaching it costs real time: the
+/// retry's deadline is floored at `PROBE_FLOOR` (ten seconds), so the work
+/// that survives `skip-proofs` has to outlast that. `(expt 3 12000000)` was
+/// measured at about seventeen seconds; a faster machine may finish inside
+/// the floor and take the fast path instead -- the assertion holds either
+/// way, and the test says which it exercised.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_slow_skip_retry_reports_skipped_not_admitted() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("cpf-slow-retry");
+    let file = dir.join("b.lisp");
+    // One compound form: a theorem that cannot be proved, and beside it work
+    // that `skip-proofs` does not skip.
+    //
+    // A `make-event`, specifically. `skip-proofs` short-circuits far more than
+    // its name suggests -- a `value-triple` beside the theorem is not
+    // evaluated at all, so a retry over one finishes in milliseconds -- but an
+    // expansion has to run, because it is what decides which events there are.
+    // That is the shape this bug needs, and it is a real one: a compound form
+    // whose macros do work is exactly where a retry outlives its floor.
+    write(&file, &[
+        "(in-package \"ACL2\")",
+        "(defun f (x) (if (consp x) (f (cdr x)) nil))",
+        "(progn (defthm cannot (equal (f x) t))\n\
+                (make-event (prog2$ (mod (expt 3 12000000) 7)\n\
+                                    (quote (value-triple :ok)))))",
+    ]);
+    let mut b = Book::open(&acl2, &file).unwrap();
+    b.set_sync_mode(SyncMode::ContinuePastFailure);
+
+    let out = b.sync(None, Duration::from_millis(1200)).unwrap();
+    if !out.skipped.is_empty() {
+        eprintln!("(fast path: the retry finished inside its floor)");
+        assert_eq!(out.skipped.len(), 1, "the fast path reports it skipped: {out:?}");
+        return;
+    }
+    let f = out.failed.expect("a failure, retried under skip-proofs");
+    assert!(f.still_running, "the retry is what is in flight: {f:?}");
+    eprintln!("(slow path: the retry outran its floor, resuming)");
+
+    for _ in 0..120 {
+        match b.resume(Duration::from_secs(5)).expect("resume") {
+            Some(Resumed::StillRunning { .. }) => continue,
+            Some(Resumed::Skipped(f)) => {
+                assert!(
+                    f.error_line.is_some()
+                        || !f.checkpoints.top.is_empty()
+                        || !f.checkpoints.sub.is_empty(),
+                    "the original diagnosis rides along rather than being dropped: {f:?}"
+                );
+                assert!(f.retry_output_ref.is_some(), "and the retry's own log with it");
+                return;
+            }
+            Some(Resumed::Admitted(u)) => {
+                panic!("a form whose proof failed reported as admitted: unit {}", u.index)
+            }
+            other => panic!("unexpected resume: {other:?}"),
+        }
+    }
+    panic!("the retry never finished");
+}

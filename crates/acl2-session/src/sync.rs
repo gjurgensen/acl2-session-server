@@ -2129,6 +2129,15 @@ struct PendingUnit {
     /// This submission *is* the skip-proofs retry. Its failure is terminal:
     /// never retry a retry.
     skipped: bool,
+    /// The failure this submission is retrying under skip-proofs.
+    ///
+    /// Set only on a retry, and it is what makes the slow path answer like the
+    /// fast one. A retry that finishes inside its deadline reports
+    /// `skipped` with the original diagnosis attached; one that outruns it
+    /// came back through `resume`, which had nothing to attach and so reported
+    /// a plain `admitted` -- a green unit for a form whose proof failed, with
+    /// its checkpoints, abort cause and error line dropped on the floor.
+    failure: Option<Box<FailureReport>>,
 }
 
 impl Book {
@@ -3033,6 +3042,15 @@ impl Book {
                                 // still_running says resume finishes the
                                 // skip attempt.
                                 report.still_running = true;
+                                // And the envelope goes with the pending unit,
+                                // so `resume` can report the same thing this
+                                // path would have. Without it the retry
+                                // finished as a plain `admitted`: a green unit
+                                // for a form whose proof failed, and the whole
+                                // diagnosis lost.
+                                if let Some(p) = self.pending.as_mut() {
+                                    p.failure = Some(Box::new(report.clone()));
+                                }
                             }
                             // Terminal: what survives skip-proofs is not a
                             // proof obligation, and it failed the same
@@ -3304,6 +3322,9 @@ impl Book {
                 in_package: in_package_target(text),
                 text: text.to_vec(),
                 skipped,
+                // Filled in by the caller when this is a retry: `admit_bytes`
+                // is told only that proofs are skipped, never what failed.
+                failure: None,
             });
         }
         let output_ref = self.record_output(&sub)?;
@@ -3408,6 +3429,36 @@ impl Book {
         };
         let output_ref = self.record_output(&sub)?;
         let output_lines = self.outs().lines(&output_ref).unwrap_or(0);
+        if sub.outcome == Outcome::Ok
+            && let Some(mut failed) = p.failure.clone()
+        {
+            // A skip-proofs retry that finished. The form is in the world, so
+            // the bookkeeping below still runs -- but what it is is `skipped`,
+            // not `admitted`, and the report is the original failure's: the
+            // retry proves nothing and has no diagnosis of its own. Exactly
+            // what the fast path returns for the same unit, which is the point
+            // -- two paths, one logical outcome, one answer.
+            self.admitted.push(Admitted {
+                hash: p.hash,
+                at: p.at,
+                label: p.label,
+                command_number: sub.get("cmd").and_then(|v| v.parse().ok()),
+                package: sub.get("pkg").and_then(unquote),
+                dep_count: sub.get("ndeps").and_then(|v| v.parse().ok()),
+                output_ref: output_ref.clone(),
+                skipped: p.skipped,
+            });
+            if let Some(target) = p.in_package.clone() {
+                self.make_package_stick(&target, deadline.max(PROBE_FLOOR))?;
+            }
+            let introduced = inner_names(&sub);
+            self.scrape_rules(&introduced, p.index);
+            // The retry's log, so a reader can see what the skip attempt
+            // printed; the failure envelope above is the original's.
+            failed.retry_output_ref = Some(output_ref);
+            failed.still_running = false;
+            return Ok(Some(Resumed::Skipped(*failed)));
+        }
         if sub.outcome == Outcome::Ok {
             self.admitted.push(Admitted {
                 hash: p.hash,

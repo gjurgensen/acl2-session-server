@@ -1490,6 +1490,13 @@ impl Driver {
             }
             if let Some(f) = &o.failed {
                 if f.still_running {
+                    // No `unit` event yet, and deliberately: `unit_failure`
+                    // carries no "still running", so the client would read one
+                    // as the form having landed and stop tracking the form
+                    // that is in fact still going. The envelope is not lost by
+                    // waiting -- `resume` reports this unit as `skipped` with
+                    // the original diagnosis attached, which is the same
+                    // answer the fast path gives.
                     self.emit_state(Some(f.index));
                     if let Flow::Exit = self.follow_running() {
                         return Flow::Exit;
