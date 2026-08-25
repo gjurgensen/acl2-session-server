@@ -402,6 +402,13 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.languages.registerHoverProvider({ language: 'acl2' }, hoverProvider),
     vscode.languages.registerDefinitionProvider({ language: 'acl2' }, definitionProvider),
     vscode.languages.registerDocumentLinkProvider({ language: 'acl2' }, linkProvider),
+    vscode.languages.registerCodeActionsProvider({ language: 'acl2' }, certifyCodeActions, {
+      providedCodeActionKinds: [vscode.CodeActionKind.QuickFix],
+    }),
+    vscode.commands.registerCommand(
+      'acl2-session.certifyIncluded',
+      (uri?: vscode.Uri, line?: number) => void certifyIncluded(uri, line)
+    ),
     // Indentation. Three providers, none of which needs a session: see
     // `formatting.ts`, and `indent.ts` for why the language configuration
     // cannot carry this.
@@ -1025,11 +1032,128 @@ async function certifyBook(s: BookSession): Promise<void> {
       label: basename(s.doc.fileName),
       start: () => client!.request('certify', { book: s.id, jobs }) as Promise<CertifyReply>,
       cancel: () => void client?.request('interrupt', { book: s.id }).catch(report),
-      showLog: (ref, lines) => showCertLog(s, ref, lines),
+      showLog: (ref, lines) => showCertLog(s.id, ref, lines),
     });
   } finally {
     s.certifying = false;
   }
+}
+
+/** Dependency paths with a certification queued or running, so a second
+ *  request for the same book is refused rather than opening a second driver
+ *  on it. The current book is guarded separately by `s.certifying`. */
+const certifyingDeps = new Set<string>();
+
+/**
+ * Certify a book this editor does not have open -- a dependency named on an
+ * `include-book` line whose `Uncertified`/`Skip-proofs` warning offers this
+ * as its fix.
+ *
+ * The core certifies a file, not a session (it never consults the session),
+ * so the daemon has no path-based verb; instead a driver is opened *scoped to
+ * the dependency*, certified, and closed. The open is done inside `start`, so
+ * it happens only when this reaches the front of the queue -- a request left
+ * waiting behind other builds holds no ACL2 in the meantime. The close waits
+ * until `certifyWithProgress` has fully resolved, so the log the failure path
+ * reads is still there when "Show Log" asks for it.
+ */
+async function certifyDependency(path: string): Promise<void> {
+  const label = basename(path);
+  if (certifyingDeps.has(path)) {
+    void vscode.window.showInformationMessage(`ACL2: ${label} is already being certified`);
+    return;
+  }
+  certifyingDeps.add(path);
+  const jobs = vscode.workspace
+    .getConfiguration('acl2-session')
+    .get<number>('certifyJobs', 4);
+  let depId: string | undefined;
+  try {
+    await certifyWithProgress({
+      label,
+      start: async () => {
+        const opened = (await client!.request('open', { path })) as { book: string };
+        depId = opened.book;
+        return client!.request('certify', { book: depId, jobs }) as Promise<CertifyReply>;
+      },
+      cancel: () => {
+        if (depId) {
+          void client?.request('interrupt', { book: depId }).catch(report);
+        }
+      },
+      showLog: (ref, lines) => (depId ? showCertLog(depId, ref, lines) : Promise.resolve()),
+    });
+  } finally {
+    if (depId) {
+      await client?.request('close', { book: depId }).catch(report);
+    }
+    certifyingDeps.delete(path);
+  }
+}
+
+/** The warnings whose fix is to certify the book named on their line. Both
+ *  are about an included book being untrustworthy, which certifying repairs. */
+const CERTIFIABLE = new Set([warningMessage('uncertified'), warningMessage('skip-proofs')]);
+
+/**
+ * Offer "Certify included book" on an `Uncertified`/`Skip-proofs` warning.
+ *
+ * The path is not resolved here -- resolving means asking the daemon, and this
+ * runs on every cursor move over a diagnostic. The action carries only the
+ * document and line; `certifyIncluded` does the resolving once, when invoked.
+ */
+const certifyCodeActions: vscode.CodeActionProvider = {
+  provideCodeActions(doc, _range, context) {
+    const actions: vscode.CodeAction[] = [];
+    for (const d of context.diagnostics) {
+      if (d.source !== 'ACL2' || !CERTIFIABLE.has(d.message)) {
+        continue;
+      }
+      const a = new vscode.CodeAction('Certify included book', vscode.CodeActionKind.QuickFix);
+      a.diagnostics = [d];
+      a.command = {
+        command: 'acl2-session.certifyIncluded',
+        title: 'Certify included book',
+        arguments: [doc.uri, d.range.start.line],
+      };
+      actions.push(a);
+    }
+    return actions;
+  },
+};
+
+/**
+ * Resolve the include-book on `line` to a file and certify it.
+ *
+ * The daemon's `links` already resolves each include-book to its path (and
+ * leaves `path` absent for a `:dir` alias only ACL2 knows, or a file that is
+ * not there) -- the same resolution ctrl-click uses -- so this reuses it
+ * rather than re-deriving `:dir :system` and friends.
+ */
+async function certifyIncluded(uri?: vscode.Uri, line?: number): Promise<void> {
+  if (!(uri instanceof vscode.Uri) || typeof line !== 'number') {
+    return;
+  }
+  const s = books.get(uri.toString());
+  if (!s || !client?.alive) {
+    void vscode.window.showWarningMessage('ACL2: no live session for this file');
+    return;
+  }
+  let reply: { links: BookLink[] };
+  try {
+    reply = await client.request('links', { book: s.id });
+  } catch (e) {
+    report(e);
+    return;
+  }
+  const hit = reply.links.find((l) => l.line === line + 1 && l.path);
+  if (!hit?.path) {
+    void vscode.window.showWarningMessage(
+      "ACL2: couldn't resolve the included book's path to certify it"
+    );
+    return;
+  }
+  await certifyDependency(hit.path);
 }
 
 /**
@@ -1142,15 +1266,15 @@ function basename(p: string): string {
   return p.split(/[\\/]/).pop() ?? p;
 }
 
-async function showCertLog(s: BookSession, ref: string, lines: number): Promise<void> {
+async function showCertLog(book: string, ref: string, lines: number): Promise<void> {
   try {
     const out = await client!.request('output', {
-      book: s.id,
+      book,
       output_ref: ref,
       mode: 'tail',
       lines: Math.min(lines, 4000),
     });
-    outputView.set(s.id, null, out.text as string);
+    outputView.set(book, null, out.text as string);
     await outputView.open();
   } catch (e) {
     report(e);
