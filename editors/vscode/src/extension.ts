@@ -21,6 +21,7 @@ import {
   attentionPoints,
   barrierIndex,
   diagnosticMessage,
+  warningMessage,
   keepAnchor,
   pinnedIndex,
   planTail,
@@ -2402,20 +2403,12 @@ function updateProblems(s: BookSession): void {
     const text = doc.lineAt(line).text;
     const d = new vscode.Diagnostic(
       new vscode.Range(line, 0, line, Math.max(1, text.length)),
-      `ACL2 Error: ${s.unreadableWhy ?? 'cannot be read from here'}`,
+      s.unreadableWhy ?? 'Cannot be read from here',
       vscode.DiagnosticSeverity.Error
     );
     d.source = 'ACL2';
     out.push(d);
   }
-  // The form the skipping started at, for a conditional form to point back
-  // to: on its own, a conditional form looks fine, and the reason it is not
-  // trusted is somewhere above it.
-  const skippedAt = s.lastState?.conditional_from ?? null;
-  const because =
-    skippedAt === null
-      ? undefined
-      : s.lastState?.units.find((u) => u.index === skippedAt)?.line_start;
   const withConditional = warnConditional();
   const withWarnings = warnAcl2();
   for (const u of s.lastState?.units ?? []) {
@@ -2436,14 +2429,14 @@ function updateProblems(s: BookSession): void {
     const to =
       u.line_end === u.line_start ? charOffset(text, u.col_end) : text.length;
     const span = new vscode.Range(line, from, line, Math.max(from + 1, to));
-    // ACL2's own warnings, one entry per kind. Said in ACL2's own format --
-    // `ACL2 Warning [Double-rewrite]` -- so the word here is the word to
-    // search the log for, which matters because the kind is all we have: what
-    // the warning actually *says* lives only in the printed output.
+    // ACL2's own warnings, one entry per kind. The kind is all we have -- what
+    // the warning actually *says* lives only in the printed output -- so each
+    // becomes a fixed phrase (see `warningMessage`), and the form's output is
+    // where the full text is read.
     for (const k of kinds) {
       const w = new vscode.Diagnostic(
         span,
-        `ACL2 Warning: ${k.toLowerCase()}`,
+        warningMessage(k),
         vscode.DiagnosticSeverity.Warning
       );
       w.source = 'ACL2';
@@ -2452,17 +2445,9 @@ function updateProblems(s: BookSession): void {
     if (kind === undefined) {
       continue;
     }
-    const e = s.unitEvents.get(u.index);
-    const message = diagnosticMessage({
-      kind,
-      status: u.status,
-      errorLine: e?.error_line,
-      abortCause: e?.abort_cause,
-      conditionalOn: because,
-    });
     const d = new vscode.Diagnostic(
       span,
-      message,
+      diagnosticMessage(u.status),
       kind === 'warning' ? vscode.DiagnosticSeverity.Warning : vscode.DiagnosticSeverity.Error
     );
     d.source = 'ACL2';

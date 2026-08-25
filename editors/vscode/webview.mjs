@@ -1249,6 +1249,31 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   }
 }
 
+// ---- a Problems row names what is wrong, tersely, from the status alone ----
+{
+  const { diagnosticMessage, warningMessage } = require('./out/policy.js');
+  // No "ACL2" and no "Error/Warning" in the text: the source column and the
+  // severity icon carry both, so leading with them stutters. The failure is
+  // that the event failed; skip-proofs is only how checking carried on.
+  check(diagnosticMessage('skipped') === 'Event failed; proofs skipped',
+    'a skipped form led with the failure, not the skip');
+  check(diagnosticMessage('failed') === 'Event failed', 'a hard failure is terse');
+  check(diagnosticMessage('conditional') === 'Conditional on a skipped proof',
+    'and a conditional form says what it rests on');
+  for (const m of ['skipped', 'failed', 'conditional'].map(diagnosticMessage)) {
+    check(!/ACL2|Error|Warning/.test(m), `no prefix stutter in "${m}"`);
+  }
+  // Warnings: a phrase per known kind, ACL2's own bracket label otherwise.
+  check(warningMessage('Uncertified') === 'Includes an uncertified book',
+    'uncertified names the included book, not just the word');
+  check(warningMessage('Double-rewrite') === 'A rule variable may need double-rewrite',
+    'double-rewrite says what to consider');
+  check(warningMessage('Theory') === 'Theory expression may have no effect',
+    'theory is elaborated');
+  check(warningMessage('Skip-proofs') === 'Skip-proofs',
+    'an unmapped kind falls through to ACL2’s own label');
+}
+
 // ---- tails are pushed, never polled ----
 {
   const { planTail } = require('./out/policy.js');

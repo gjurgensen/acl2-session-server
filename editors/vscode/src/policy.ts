@@ -349,42 +349,54 @@ export function warningKinds(joined: string | undefined): string[] {
 // ---- what a Problems row says --------------------------------------------
 
 /**
- * The one line a diagnostic carries.
+ * The one line a diagnostic carries, from the form's status alone.
  *
- * A diagnostic *names* what is wrong. What it means, and what to do about it,
- * belong to the form view, which holds the whole envelope -- a Problems row is
- * an index entry, and a paragraph in one is a paragraph nobody reads. These
- * were paragraphs: a conditional form explained conditionality and recommended
- * a remedy, and a skipped one said its proofs were skipped twice in the same
- * sentence.
+ * A diagnostic *names* what is wrong; what it means and what to do belong to
+ * the form view, which holds the whole envelope -- a Problems row is an index
+ * entry. So this is deliberately terse and built only from the typed status,
+ * never from ACL2's printed output. The severity icon already says
+ * error-or-warning and the `source` column already says ACL2, so neither is
+ * repeated in the text -- the old messages led with "ACL2 Error:" and
+ * stuttered against both.
  *
- * ACL2's own error line is used verbatim when there is one. It already begins
- * "ACL2 Error", which is why it takes no label here -- with one it stuttered,
- * reading `ACL2: ACL2 Error in ( DEFTHM ...)`.
+ * The specifics a reader might want -- which checkpoints, which abort cause,
+ * the verbatim error line -- are all in the form view's Failure section, one
+ * click away. They are kept out of here on purpose rather than parsed back
+ * out of the log: a name in the Problems list wants to be scannable, not
+ * complete.
  *
- * Everywhere else the label names the severity, and names the *same* severity
- * the diagnostic carries. `skipped` is the trap: it reads like a warning and
- * is reported as an error, so a hand-written "Warning" there would contradict
- * the icon beside it.
+ * `skipped` reads as "Event failed": the failure is that the event did not
+ * prove, and skip-proofs is only how checking carried on past it.
  */
-export function diagnosticMessage(o: {
-  kind: 'error' | 'warning';
-  status: string;
-  errorLine?: string;
-  abortCause?: string;
-  conditionalOn?: number;
-}): string {
-  const label = o.kind === 'warning' ? 'ACL2 Warning' : 'ACL2 Error';
-  if (o.status === 'conditional') {
-    return `${label}: conditional` +
-      (o.conditionalOn === undefined ? '' : ` on line ${o.conditionalOn}`);
+export function diagnosticMessage(status: string): string {
+  if (status === 'conditional') {
+    return 'Conditional on a skipped proof';
   }
-  if (o.status === 'skipped') {
-    return `${label}: proofs skipped`;
+  if (status === 'skipped') {
+    return 'Event failed; proofs skipped';
   }
-  const line = o.errorLine?.trim();
-  if (line) {
-    return line;
+  return 'Event failed';
+}
+
+/**
+ * A warning's one line, from its kind.
+ *
+ * Only the kind is available -- the daemon scrapes the summary's
+ * `Warnings: [Uncertified, Theory]` list, not each warning's sentence -- so
+ * this is a fixed phrase per kind rather than ACL2's actual text. The common
+ * ones get a plain-English line; anything else falls through to ACL2's own
+ * bracket label, which is already capitalised (`Skip-proofs`, `Free`). No
+ * "ACL2 Warning:" prefix: the icon and the source column carry that.
+ */
+export function warningMessage(kind: string): string {
+  switch (kind.toLowerCase()) {
+    case 'uncertified':
+      return 'Includes an uncertified book';
+    case 'double-rewrite':
+      return 'A rule variable may need double-rewrite';
+    case 'theory':
+      return 'Theory expression may have no effect';
+    default:
+      return kind;
   }
-  return `${label}: ${o.abortCause || 'not admitted'}`;
 }
