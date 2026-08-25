@@ -2836,7 +2836,8 @@ impl Book {
         // outside it, bounded by its own fixed deadlines: a hung
         // customization file was never this call's proof work.)
         let budget = Budget::new(deadline);
-        if self.dirty {
+        let was_dirty = self.dirty;
+        if was_dirty {
             // An undo we could not verify: rebuild rather than trust it. With
             // `keep` 0 nothing is replayed, so this cannot report in-flight;
             // rebuild itself clears the flag.
@@ -2844,7 +2845,13 @@ impl Book {
         }
         let units = split(bytes).map_err(SyncError::Split)?;
 
-        let mut out = SyncOutcome::default();
+        // `rebuilt` is carried across the outcome's construction because the
+        // rebuild had to happen first: it is a whole ACL2 process discarded and
+        // every unit re-proved from nothing, which is precisely the latency
+        // `rebuilt` exists to attribute. `retract_to` already reports its own
+        // version of this situation; reporting `rebuilt: false` here made the
+        // most expensive path the one that looked cheapest.
+        let mut out = SyncOutcome { rebuilt: was_dirty, ..SyncOutcome::default() };
         // Before the diff, because it describes the world as this call found
         // it: what the *previous* sync built, measured against disk now.
         let deps_before = self.dep_count_now();
@@ -3536,7 +3543,14 @@ impl Book {
         // Capture before interrupting: the form will never report, so this is
         // the only chance to keep what it printed, and the interrupt handshake
         // reads more that would otherwise be mixed in.
-        let partial = self.session.captured_so_far();
+        //
+        // Stripped like every other read of a capture, finished or live. This
+        // is the one log written by a path other than consumption, and filing
+        // it verbatim made the interrupted form the only form whose permanent
+        // record carried our own `<<<PROBE-BEGIN ...>>>` scaffolding -- worst
+        // exactly when the interrupt lands during the trailing probes, which
+        // is when the form was closest to finishing.
+        let partial = crate::session::display_of(&self.session.captured_so_far());
         // A dead child cannot be interrupted, and asking would surface a raw
         // I/O error from the handshake's write; report a clean non-recovery
         // instead, with health's `dead` one call away. And an *idle* session
@@ -4137,6 +4151,14 @@ impl Book {
             }
         };
         self.admitted.clear();
+        // The same pruning `rollback_to` does, for the same reason: units past
+        // `keep` are not going to exist in the rebuilt world, so the store must
+        // not keep answering `describe` for the names they introduced. Without
+        // it a `rebuild(bytes, 0)` -- the dirty path -- left the whole map
+        // behind, and its stale `unit` indices then aliased re-admitted units,
+        // so a *later* rollback pruned by a number that no longer meant what it
+        // did when it was written.
+        self.rules.retain(|_, r| r.unit < keep);
         self.label_gen = 0;
         self.rebuilds += 1;
         self.post_start_setup()?;
