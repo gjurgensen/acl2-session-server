@@ -512,6 +512,14 @@ impl Daemon {
 
     /// Served from the outputs handle, like `output` and for the same reason:
     /// nothing here touches the session, so a grinding proof never delays it.
+    ///
+    /// **Not sufficient, and unused by the client.** The announcements come
+    /// back flat, with nothing saying which of a form's events printed each
+    /// one -- see `acl2_session::induction`, which measures why. The MCP
+    /// server's equivalent tool was withdrawn for it; this one is kept only
+    /// because the daemon's wire is private and a client that wants the
+    /// announcements *as a block* -- which is all this honestly offers -- can
+    /// still ask. The form view does not: it reads the log.
     fn induction(&self, p: wire::InductionParams) -> Result<Value, String> {
         let outputs = self.handle_of(&p.book, |h| h.outputs.clone())?;
         let r = OutputRef::from(p.output_ref.as_str());

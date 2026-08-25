@@ -182,18 +182,6 @@ struct StatusArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct InductionArgs {
-    session_id: String,
-    /// A handle from a previous reply's `output_ref`. Never construct one:
-    /// the `f` number counts stored submissions, not forms, so an invented
-    /// handle that happens to exist returns some *other* run's log -- an
-    /// eval's, a certification's, or an earlier attempt at the same form --
-    /// and reads as an ordinary answer. An invented one that does not exist
-    /// is rejected, which is the harmless case.
-    output_ref: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct OutputArgs {
     session_id: String,
     /// A handle from a previous reply's `output_ref`. Never construct one:
@@ -670,48 +658,9 @@ impl Acl2Mcp {
         json(reply)
     }
 
-    #[tool(description = "Why the prover inducted, for a form whose `rules` \
-        include an `:induction` rune -- the scheme it chose, the term that \
-        suggested it, the rule credited, and how many subgoals it produced. \
-        Read from the log, because ACL2 prints the scheme and records it \
-        nowhere: expect fields to be missing rather than wrong, and nothing \
-        at all from an ACL2 that words it differently. Cheap and safe to call \
-        while the session is busy. A `scheme` is truncated when ACL2 printed \
-        more than this reply should carry -- a mutual recursion inducts over \
-        its whole clique, and one such scheme ran to 6.8 million characters. \
-        Truncation is always visible: the text ends in a `;; TRUNCATED` line \
-        and `scheme_chars` gives the real length. Read the whole announcement \
-        with acl2_output on the same output_ref.")]
-    async fn acl2_induction(
-        &self,
-        Parameters(a): Parameters<InductionArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let outputs = self
-            .registry
-            .lock()
-            .map_err(fail)?
-            .outputs_of(&SessionId::from(a.session_id.as_str()))
-            .ok_or_else(|| {
-                fail(format!(
-                    "no session {}; it was never opened, or has been closed",
-                    a.session_id
-                ))
-            })?;
-        let r = acl2_session::OutputRef::from(a.output_ref.as_str());
-        let found = blocking!({
-            let store = outputs.lock().map_err(|e| e.to_string())?;
-            acl2_session::induction::from_output(&store, &r).map_err(|e| e.to_string())
-        })
-        .map_err(fail)?;
-        json(wire::InductionReply {
-            inductions: found.iter().map(wire::induction).collect(),
-        })
-    }
-
     #[tool(description = "Read part of a form's captured output, by handle. The \
-        structured results are a projection: per-goal rewriting detail and \
-        macro output exist only here. For why a proof inducted, prefer \
-        acl2_induction, which reads this same log and returns it as fields. \
+        structured results are a projection: per-goal rewriting detail, macro \
+        output and the prover's induction announcements exist only here. \
         Works immediately even while a sync or eval is blocked on the session, \
         and works on the form still running: a handle from in_flight reads the \
         proof as it goes, with every mode, and total_lines grows between \

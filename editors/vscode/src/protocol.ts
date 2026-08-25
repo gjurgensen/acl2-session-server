@@ -324,6 +324,15 @@ export class DaemonClient extends EventEmitter {
  * scheme is *printed* by ACL2 and recorded nowhere. So every field is
  * optional -- a reworded ACL2 drops one rather than inventing it -- and an
  * empty list means "nothing recognised", not "no induction".
+ *
+ * **Nothing calls the `induction` verb.** Two reasons, and the second is the
+ * one that keeps it that way. The form view stopped asking after a `defines`
+ * whose three schemes came to 20.9 MB in one reply and took the extension
+ * host down with them -- see `policy.ts`. And the reply cannot say which of a
+ * form's events any announcement belongs to: a form is often several events,
+ * each numbering its goals from `*1`, so the list attaches to no event in
+ * particular. The type is kept because the wire still carries it; it is not a
+ * surface waiting to be wired up.
  */
 /** One field of a rule, as ACL2 keys it: `:lhs`, `:trigger`, `:corollary`. */
 export interface RuneFieldWire {

@@ -531,6 +531,11 @@ pub struct InductionParams {
 
 /// What ACL2 said when it chose an induction.
 ///
+/// Carries no event, which is the whole trouble with it: a form is often
+/// several events and each numbers its goals from `*1`, so a list of these
+/// taken from one form's log attaches to no event in particular. See
+/// `acl2_session::induction` for the measurement.
+///
 /// A different class of fact from the rest of this wire: everything else is
 /// probed out of the world or the event data, and this is read out of ACL2's
 /// prose, because the scheme is printed and never recorded. Fields are

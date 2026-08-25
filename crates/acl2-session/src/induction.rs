@@ -28,6 +28,44 @@
 //! split across a newline. Anchors are matched as word sequences with
 //! arbitrary whitespace between them, and terms are delimited by counting
 //! parens rather than by looking for a closing pattern.
+//!
+//! # Not yet sufficient: an announcement cannot be attributed to its event
+//!
+//! **This module is incomplete in a way that makes its output unsafe to
+//! present as a fact about a form, and that is why no surface exposes it.**
+//!
+//! A log is one *form*. A form can be many *events* -- a `progn`, an
+//! `encapsulate`, a `mutual-recursion`, a `defines`, anything a macro
+//! expands into several -- and each event runs its own proof and prints its
+//! own announcements. [`parse`] returns them flat, in log order, with
+//! nothing saying which event any of them came from. It cannot: the
+//! announcement's text never names the event.
+//!
+//! Nothing else in the reply closes the gap either. Measured, on one form of
+//! three theorems that each induct:
+//!
+//! - every announcement came back with `goal` = `*1`. The pool counter
+//!   restarts per event, so the one field that looks like an identifier
+//!   collides across every event in the form.
+//! - the count does not line up with the events. One event can induct
+//!   several times (`*1`, then `*1.1` beneath it) and most events do not
+//!   induct at all, so the nth announcement is not the nth event's.
+//! - the orders are opposite. The announcements arrive in the order ACL2
+//!   printed them, which is source order; `SyncOutcome`'s inner events
+//!   arrive innermost-first, which for that form was the reverse. A caller
+//!   zipping the two lists -- the obvious thing to do, and the only thing
+//!   available -- attached every scheme to the wrong theorem.
+//!
+//! So the honest reading of a result from here is "these announcements
+//! appear somewhere in this form's log", and a reader who wants to know
+//! which theorem inducted how is better served by [`crate::output`] on the
+//! same handle, where the announcement still sits next to the event whose
+//! proof printed it.
+//!
+//! Fixing it means giving each announcement its event, which means tracking
+//! the event boundaries in the log -- ACL2 does print them, so this is
+//! work rather than a dead end. Until then the parse stands as a building
+//! block and not as an answer.
 
 use std::io;
 
@@ -427,6 +465,60 @@ Subgoal *1/2
         // The second announcement says nothing about justification; it must
         // not inherit the first's.
         assert!(v[1].justified_by.is_none());
+    }
+
+    /// The defect the module doc opens with, in the shape it was measured in.
+    ///
+    /// One `progn` of three theorems that each induct, captured from a real
+    /// session. Three announcements come out of one form's log and *every
+    /// one* of them is `*1`: the pool counter restarts per event, so the only
+    /// field that looks like an identifier identifies nothing. Nothing here
+    /// says which theorem is which, and the log itself is where that is still
+    /// legible.
+    ///
+    /// A test of what is wrong rather than of what is right, so that a later
+    /// fix has to come and delete it.
+    #[test]
+    fn announcements_from_one_form_cannot_be_told_apart() {
+        const THREE: &str = "\
+We will induct according to a scheme suggested by (append a b).
+This suggestion was produced using the :induction rule binary-append.
+If we let (:p a b c) denote *1 above then the induction scheme we'll
+use is
+(and (implies (endp a) (:p a b c))).
+This induction is justified by the same argument used to admit
+binary-append.
+
+We will induct according to a scheme suggested by (len a).
+This suggestion was produced using the :induction rules binary-append
+and len.
+If we let (:p a b) denote *1 above then the induction scheme we'll
+use is
+(and (implies (not (consp a)) (:p a b))).
+This induction is justified by the same argument used to admit len.
+
+We will induct according to a scheme suggested by (revappend a nil).
+This suggestion was produced using the :induction rules revappend and
+true-listp.
+If we let (:p a) denote *1 above then the induction scheme we'll
+use is
+(and (implies (endp a) (:p a))).
+This induction is justified by the same argument used to admit
+revappend.
+";
+        let v = parse(THREE);
+        assert_eq!(v.len(), 3, "three events, three announcements, one log");
+        assert!(
+            v.iter().all(|i| i.goal.as_deref() == Some("*1")),
+            "every one is *1: the pool counter restarts per event, so `goal` \
+             cannot tell them apart -- {:?}",
+            v.iter().map(|i| i.goal.as_deref()).collect::<Vec<_>>()
+        );
+        // And the only remaining signal is position, which is log order. The
+        // envelope's inner events arrive innermost-first, so zipping the two
+        // -- the only association available to a caller -- reverses them.
+        assert_eq!(v[0].justified_by.as_deref(), Some("binary-append"));
+        assert_eq!(v[2].suggested_by.as_deref(), Some("(revappend a nil)"));
     }
 
     /// Anchors are word sequences, so they must still respect word

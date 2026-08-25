@@ -43,7 +43,6 @@ explanation of the `--default` and `--trusted` arguments.
 | `acl2_interrupt` | Abort the form in flight and make the session usable again. |
 | `acl2_health` | Whether the session is answering: ready, busy, unresponsive, dead. |
 | `acl2_output` | Read part of a form's captured output, by handle. |
-| `acl2_induction` | Why the prover inducted, for a form whose `rules` carry an `:induction` rune. |
 
 Note that `acl2_sync` stops at the first failure and reports it as structure.
 The reply's `failed` object, for a theorem whose proof reverts to induction and
@@ -84,11 +83,16 @@ rewriting detail, arbitrary macro output — exist only in the printed narrative
 The structured result is a fast path over a complete log, never a replacement
 for it.
 
-`acl2_induction` is alone among the tools in being a *parse of ACL2's
-prose*: the scheme it returns is printed and recorded nowhere — not in
-`get-event-data`, not in `gag-state` — so it is best effort. Fields go missing
-rather than wrong, and a reworded ACL2 returns nothing at all. Call it only for
-a form whose `rules` carry an `:induction` rune.
+The induction scheme is one of the things that lives only in the log, and
+there is no tool that returns it as fields. There was one, and it was
+withdrawn: ACL2 prints the scheme and records it nowhere, so recovering it
+means parsing prose — and while the parse itself is sound, it cannot say
+*which event* an announcement belongs to. A form is often many events (a
+`progn`, an `encapsulate`, a `mutual-recursion`), each proving separately and
+each numbering its own goals from `*1`, so a flat list of announcements taken
+from one form's log attaches to no event in particular. Read the log with
+`acl2_output`, where each announcement still sits beside the proof that
+printed it. See the `induction` module for what a real fix would need.
 
 `acl2_certify` runs `cert.pl` on the session's book, with the same ACL2
 image the session runs and the `cert.pl` from that image's own checkout. It
