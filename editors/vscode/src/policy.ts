@@ -345,3 +345,46 @@ export function warningKinds(joined: string | undefined): string[] {
   }
   return [...seen];
 }
+
+// ---- what a Problems row says --------------------------------------------
+
+/**
+ * The one line a diagnostic carries.
+ *
+ * A diagnostic *names* what is wrong. What it means, and what to do about it,
+ * belong to the form view, which holds the whole envelope -- a Problems row is
+ * an index entry, and a paragraph in one is a paragraph nobody reads. These
+ * were paragraphs: a conditional form explained conditionality and recommended
+ * a remedy, and a skipped one said its proofs were skipped twice in the same
+ * sentence.
+ *
+ * ACL2's own error line is used verbatim when there is one. It already begins
+ * "ACL2 Error", which is why it takes no label here -- with one it stuttered,
+ * reading `ACL2: ACL2 Error in ( DEFTHM ...)`.
+ *
+ * Everywhere else the label names the severity, and names the *same* severity
+ * the diagnostic carries. `skipped` is the trap: it reads like a warning and
+ * is reported as an error, so a hand-written "Warning" there would contradict
+ * the icon beside it.
+ */
+export function diagnosticMessage(o: {
+  kind: 'error' | 'warning';
+  status: string;
+  errorLine?: string;
+  abortCause?: string;
+  conditionalOn?: number;
+}): string {
+  const label = o.kind === 'warning' ? 'ACL2 Warning' : 'ACL2 Error';
+  if (o.status === 'conditional') {
+    return `${label}: conditional` +
+      (o.conditionalOn === undefined ? '' : ` on line ${o.conditionalOn}`);
+  }
+  if (o.status === 'skipped') {
+    return `${label}: proofs skipped`;
+  }
+  const line = o.errorLine?.trim();
+  if (line) {
+    return line;
+  }
+  return `${label}: ${o.abortCause || 'not admitted'}`;
+}
