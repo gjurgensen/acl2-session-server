@@ -24,8 +24,8 @@
 //! **P1. Structure, don't summarize. Project, don't decide.** Everything
 //! returned is a lossless projection of ACL2's own state, and the complete
 //! transcript stays retrievable behind a handle. Nothing is withheld; things
-//! are *deferred*. So a reply that omits a 6 MB induction scheme still says
-//! how long it was and where to read it, and a surface that cannot answer
+//! are *deferred*. So a reply that omits a 6 MB term still says how long it
+//! was and where to read it, and a surface that cannot answer
 //! says so rather than guessing -- `describe` returning "ask me again" is not
 //! the same answer as "no such name", and the two must never render alike.
 //!
@@ -38,12 +38,17 @@
 //! from `get-event-data` and `gag-state` through probes, and the probes print
 //! under keys we picked.
 //!
-//! Two sanctioned exceptions, both narrow. Progress on a form still *running*
-//! is read from the stream, because the structured state is locked inside a
-//! busy process until it finishes. And [`induction`] parses prose outright,
+//! One sanctioned exception, and it is narrow. Progress on a form still
+//! *running* is read from the stream, because the structured state is locked
+//! inside a busy process until it finishes.
+//!
+//! There was a second: a module that parsed the printed induction narrative,
 //! because ACL2 computes the scheme inside a printing function and records it
-//! nowhere -- which is exactly why that module is best-effort, total, and not
-//! exposed as a fact about a form.
+//! nowhere. It is gone, and the two faults are worth keeping apart. Reading
+//! prose was the *sanctioned* part -- there was no other source. What made it
+//! unfixable is that an announcement cannot say which of a form's events it
+//! belongs to, and a form is often many events each numbering its goals from
+//! `*1`. Structured induction data in `get-event-data` is the replacement.
 //!
 //! **P3. Fast paths are verified against a recorded invariant; failure
 //! degrades to replay.** Undo is a performance optimization, never a
@@ -84,7 +89,6 @@
 
 pub mod cert;
 pub mod image;
-pub mod induction;
 pub mod output;
 pub mod pretty;
 pub mod pty;
@@ -103,7 +107,6 @@ pub use split::{
 pub use registry::{Registry, RegistryError, SessionId};
 pub use cert::{Build, CertError, CertReport, CertStatus};
 pub use image::{find_checkout, ImageError, ImagePolicy};
-pub use induction::Induction;
 pub use output::{OutputRef, OutputSlice, OutputStore, Slice, SliceRequest};
 pub use session::Progress;
 pub use sync::{

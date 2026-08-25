@@ -453,12 +453,12 @@
         "acl2-session.conditionalWarnings": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "Report **conditional** forms as warnings in the Problems view.\n\nA conditional form was proved correctly, but on top of a claim that was not \u2014 a form above it went in with its proofs skipped. Off by default because everything below a skipped form is conditional, so this can be a great many rows."
+          "markdownDescription": "Report **conditional** forms as warnings in the Problems view.\n\nA conditional form was proved correctly, but on top of a claim that was not — a form above it went in with its proofs skipped. Off by default because everything below a skipped form is conditional, so this can be a great many rows."
         },
         "acl2-session.formWarnings": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Report ACL2's own warnings \u2014 `Double-rewrite`, `Use`, `Subsume` \u2014 in the Problems view.\n\nThe kind is all there is: ACL2 records the *set* a form emitted, so five double-rewrite warnings look like one, and what any of them says is in that form's output. How many forms carry one varies from 1% to 40% by book; turn this off if yours is at the high end."
+          "markdownDescription": "Report ACL2's own warnings — `Double-rewrite`, `Use`, `Subsume` — in the Problems view.\n\nThe kind is all there is: ACL2 records the *set* a form emitted, so five double-rewrite warnings look like one, and what any of them says is in that form's output. How many forms carry one varies from 1% to 40% by book; turn this off if yours is at the high end."
         },
         "acl2-session.highlightOutput": {
           "type": "boolean",
@@ -492,7 +492,7 @@
         "acl2-session.colors": {
           "type": "object",
           "default": {},
-          "markdownDescription": "Override a status colour. Each status takes `bar` and `wash`, and each of those a string or `{ light, dark }` \u2014 any CSS colour, including `color-mix` over a theme variable. The gutter bar is the exception: it is an image, so only a literal reaches it.\n\nSee the extension README for the four sources and their precedence.",
+          "markdownDescription": "Override a status colour. Each status takes `bar` and `wash`, and each of those a string or `{ light, dark }` — any CSS colour, including `color-mix` over a theme variable. The gutter bar is the exception: it is an image, so only a literal reaches it.\n\nSee the extension README for the four sources and their precedence.",
           "additionalProperties": {
             "type": "object",
             "properties": {
@@ -600,7 +600,7 @@
         "acl2-session.tabIndents": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Make Tab re-indent the current line, the way it does in Emacs, when the cursor is in an ACL2 file with nothing selected. On by default; it is also the repair for a line no formatter is asked about, such as one opened by Vim's `o`.\n\nWhat it costs is a literal tab at the cursor. Turn it off to get VSCode's Tab back \u2014 indenting stays available as **ACL2: Indent Line or Selection**."
+          "markdownDescription": "Make Tab re-indent the current line, the way it does in Emacs, when the cursor is in an ACL2 file with nothing selected. On by default; it is also the repair for a line no formatter is asked about, such as one opened by Vim's `o`.\n\nWhat it costs is a literal tab at the cursor. Turn it off to get VSCode's Tab back — indenting stays available as **ACL2: Indent Line or Selection**."
         }
       }
     },

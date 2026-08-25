@@ -368,7 +368,6 @@ impl Daemon {
                 now(self.close(&p.book))
             }
             "output" => self.output(args(params)?).map(Answer::Now),
-            "induction" => self.induction(args(params)?).map(Answer::Now),
             "reflow" => now(self.reflow(args(params)?)),
             "status" => {
                 let p: wire::BookParams = args(params)?;
@@ -592,29 +591,6 @@ impl Daemon {
     /// test to that, because this depends on it.
     fn reflow(&self, p: wire::ReflowParams) -> Result<Value, String> {
         Ok(serde_json::to_value(wire::reflow(&p.terms)).expect("serialize"))
-    }
-
-    /// Served from the outputs handle, like `output` and for the same reason:
-    /// nothing here touches the session, so a grinding proof never delays it.
-    ///
-    /// **Not sufficient, and unused by the client.** The announcements come
-    /// back flat, with nothing saying which of a form's events printed each
-    /// one -- see `acl2_session::induction`, which measures why. The MCP
-    /// server's equivalent tool was withdrawn for it; this one is kept only
-    /// because the daemon's wire is private and a client that wants the
-    /// announcements *as a block* -- which is all this honestly offers -- can
-    /// still ask. The form view does not: it reads the log.
-    fn induction(&self, p: wire::InductionParams) -> Result<Value, RequestError> {
-        let outputs = self.handle_of(&p.book, |h| h.outputs.clone())?;
-        let r = OutputRef::from(p.output_ref.as_str());
-        let found = {
-            let outs = outputs.lock().expect("outputs lock");
-            acl2_session::induction::from_output(&outs, &r).map_err(|e| RequestError::Failed(e.to_string()))?
-        };
-        Ok(serde_json::to_value(wire::InductionReply {
-            inductions: found.iter().map(wire::induction).collect(),
-        })
-        .expect("serialize"))
     }
 
     fn output(&self, p: wire::OutputParams) -> Result<Value, RequestError> {
