@@ -605,7 +605,7 @@ check(!pages[1][1].includes('Introduced ('),
   // The cards, not the section that holds them: the Events section folds too
   // and is open by default, so asking the whole envelope would always find an
   // `open` and never see the cards close.
-  const cards = (h) => [...h.matchAll(/<details[^>]*class="event"[^>]*>/g)].map((m) => m[0]);
+  const cards = (h) => [...h.matchAll(/<details[^>]*class="card"[^>]*>/g)].map((m) => m[0]);
   check(cards(render(3, 4)).every((c) => c.includes(' open>')),
     'a handful of events open by default');
   check(cards(render(6, 4)).every((c) => !c.includes(' open>')),
@@ -1123,17 +1123,17 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   // and its one-line summary on the face, the body inside.
   const card = doc({ docs: [{ name: 'topic', short: 'a summary',
                               long: '<p>the whole document</p>' }] });
-  check(/<details[^>]*class="event"/.test(card), 'a documented topic is a card');
+  check(/<details[^>]*class="card"/.test(card), 'a documented topic is a card');
   check(/<summary>[\s\S]*topic[\s\S]*a summary[\s\S]*<\/summary>/.test(card),
     'with the name and the summary on its face');
   check(/the whole document/.test(card), 'and the body inside');
-  check(!/<details[^>]*class="event"[^>]*\bopen\b/.test(card),
+  check(!/<details[^>]*class="card"[^>]*\bopen\b/.test(card),
     'closed to begin with: a body is prose, and several open at once is a wall');
 
   // No body, no chevron -- the rule the events already follow. A `defxdoc`
   // with a short and no long is an ordinary thing to write.
   const bare = doc({ docs: [{ name: 'terse', short: 'all there is' }] });
-  check(!/<details[^>]*class="event"/.test(bare), 'a topic with no body gets no fold');
+  check(!/<details[^>]*class="card"/.test(bare), 'a topic with no body gets no fold');
   check(/all there is/.test(bare), 'and still says what it is');
 
   // A documented name that *is* an event keeps its body under its own card,
@@ -1151,7 +1151,7 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
     .test(onCard), 'the label is beside the chevron and the short below it');
   check(/counts[\s\S]*<\/summary>/.test(onCard), 'the short is readable collapsed');
   check(/at length/.test(onCard), 'and the body is there to open');
-  check(/class="docfold"/.test(onCard), 'the whole of it is boxed');
+  check(/class="card"/.test(onCard), 'the whole of it is boxed');
   // Once as a heading, and that is the event card's own. Fold ids carry it
   // too, which is not the reader seeing it twice.
   check(onCard.split('class=\"ename\"').length === 2,
@@ -1271,7 +1271,7 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   const { readFileSync } = require('fs');
   const css = readFileSync(new URL('./src/webviewParts.ts', import.meta.url), 'utf8');
   // The selector followed by its own brace: several of these names also
-  // appear inside *other* selectors (`.event.bare .esum code,` styles code),
+  // appear inside *other* selectors (`.card.bare .csum code,` styles code),
   // and matching the first occurrence reads the wrong rule.
   const rule = (sel) => {
     const at = css.indexOf(sel + ' {');
@@ -1288,13 +1288,11 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   check(/:root\s*\{\s*--twist:/.test(css), 'the indent is a single declared number');
   for (const [sel, what] of [
     ['details[data-fold] > summary::before', "the chevron's slot"],
-    ['.einside', "a fold's body"],
+    ['.cinside', "a card's body"],
     ['.efacts', "the facts line inside a summary"],
     ['.dsum', "a topic's summary inside one"],
-    ['.docfold.bare > .esum', "an event's documentation with no chevron"],
-    ['.docfold > .dinside', "an event's documentation body"],
-    ['.event.bare .esum', "an event with no chevron at all"],
-    ['details[data-fold]:not(.event) > *:not(summary)', "a nested fold's body"],
+        ['.card.bare > .csum', "a card with no chevron at all"],
+    ['details[data-fold]:not(.card) > *:not(summary)', "a nested fold's body"],
   ]) {
     const r = rule(sel);
     check(r !== null, `${what} has a rule`);
@@ -1309,8 +1307,8 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   // at 8+14. Both rules reference `--twist`, so the check above passed while
   // the sum was wrong; only the pairing catches it.
   for (const [box, block, what] of [
-    ['.event.bare .esum', '.event.bare > .esum > .efacts', "a bare event's facts"],
-    ['.docfold.bare > .esum', '.docfold.bare > .esum > .dsum',
+    ['.card.bare > .csum', '.card.bare > .csum > .efacts', "a bare card's facts"],
+    ['.card.bare > .csum', '.card.bare > .csum > .dsum',
      "a bare documentation card's short"],
   ]) {
     const outer = rule(box);

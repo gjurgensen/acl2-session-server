@@ -84,7 +84,7 @@ h3 { margin: 14px 0 4px; font-size: 11px; text-transform: uppercase;
      letter-spacing: 0.05em; opacity: 0.75; }
 pre, code { font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; }
 /* A block of ACL2's own text -- a checkpoint term, the live log, a value --
-   in an outlined box. The same box an event card uses (same border colour,
+   in an outlined box. The same box a card uses (same border colour,
    same radius), on purpose: a box is this page's grouping idiom, so a block
    of output reads as one more grouped unit rather than a new kind of thing.
    An outline rather than a fill keeps it light where several stack in a
@@ -107,8 +107,8 @@ pre code { background: none; padding: 0; }
    live tail -- and those are pre blocks, which keep it. */
 ul.rules code,
 table.inner code,
-details.event > summary code,
-.event.bare .esum code,
+details.card > summary code,
+.card.bare .csum code,
 .failed-what code { background: none; padding: 0; }
 button { background: var(--vscode-button-secondaryBackground);
          color: var(--vscode-button-secondaryForeground); border: none;
@@ -180,18 +180,22 @@ details[data-fold][open] > summary::before { content: "\\eab4"; }
 table.inner { border-collapse: collapse; font-size: 12px; }
 table.inner td { padding: 1px 10px 1px 0; vertical-align: baseline; }
 .failtag { color: var(--vscode-terminal-ansiRed, #cc6666); font-weight: 600; }
-/* One event a form recorded. Classed "event" and not "ev": the console
-   already uses "ev" for a whole eval entry, and these pages share a
-   stylesheet. */
-details.event, .event.bare {
+/* A card: a section with an outline that opens and closes. Every grouped
+   thing on this page is one -- an event, a function of a clique, a topic's
+   documentation -- and they are one class because they are one idea, not
+   three that happen to look alike.
+
+   "card" and not "ev": the console already uses "ev" for a whole eval entry,
+   and these pages share a stylesheet. */
+details.card, .card.bare {
   border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
   border-radius: 4px; margin: 6px 0;
 }
-details.event > summary { padding: 5px 8px; }
-/* An event with nothing under it has no chevron, and still reserves the slot:
+details.card > summary { padding: 5px 8px; }
+/* A card with nothing under it has no chevron, and still reserves the slot:
    otherwise its name sits a chevron's width left of every name around it. */
-.event.bare .esum { padding: 5px 8px 5px calc(8px + var(--twist)); }
-.einside { padding: 2px 9px 8px calc(8px + var(--twist)); }
+.card.bare > .csum { padding: 5px 8px 5px calc(8px + var(--twist)); }
+.cinside { padding: 2px 9px 8px calc(8px + var(--twist)); }
 .ekind { font-size: 11px; opacity: 0.65; margin-right: 6px; }
 .ename { font-weight: 600; }
 /* On its own line: a signature and four facts do not fit beside each other
@@ -216,25 +220,15 @@ details.event > summary { padding: 5px 8px; }
    different webview. They read as what \`@(tsee ...)\` is in xdoc anyway, a
    name in code font, rather than as a link that goes nowhere when clicked. */
 .dsum a.see, .doclong a.see { color: inherit; text-decoration: none; }
-/* An event's documentation, boxed like the card it describes and like the
-   standalone card for a topic with no event. A box is this page's grouping
-   idiom, and a block of prose sitting loose among an event's facts was the
-   one thing inside a card that had no edge of its own. */
-details.docfold, .docfold.bare {
-  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
-  border-radius: 4px; margin: 4px 0;
-}
-details.docfold > summary { padding: 4px 8px; }
-.docfold.bare > .esum { padding: 4px 8px 4px calc(8px + var(--twist)); }
-.docfold > .dinside { padding: 0 9px 6px calc(8px + var(--twist)); }
+
 /* A block beside a chevron indents by the chevron's slot, because the chevron
    is drawn inline and only offsets the first run. Where there is no chevron
    the slot is reserved by the container's own padding instead -- so indenting
    again puts the block a slot to the *right* of the label it belongs to.
    That is what a bare event's facts line had been doing: 8+14 from the box
    and 14 more of its own, against a name at 8+14. */
-.event.bare > .esum > .efacts { padding-left: 0; }
-.docfold.bare > .esum > .dsum { padding-left: 0; }
+.card.bare > .csum > .efacts { padding-left: 0; }
+.card.bare > .csum > .dsum { padding-left: 0; }
 /* A rendered body. Code inside it is the page's own \`pre\`/\`code\` -- an
    outlined box and a faint chip -- because a term is a term wherever it is
    written, and a documented topic should not introduce a third way of
@@ -244,9 +238,9 @@ details.docfold > summary { padding: 4px 8px; }
    A name, so it is drawn as one. */
 code.xname { background: none; padding: 0; }
 /* And the same for a fold nested inside one: its body lines up under its own
-   label, not under its own chevron. \`.einside\` says this for itself, having a
+   label, not under its own chevron. \`.cinside\` says this for itself, having a
    padding on all four sides. */
-details[data-fold]:not(.event) > *:not(summary) { padding-left: var(--twist); }
+details[data-fold]:not(.card) > *:not(summary) { padding-left: var(--twist); }
 /* A rule that exists but is off. Blue, not red: a disabled rule is a fact
    worth surfacing -- it is the field most likely to explain a proof that did
    not fire -- but it is a state, not a fault, and red reads as something
@@ -339,6 +333,12 @@ function foldScopeIs(scope) {
 
 /**
  * A \`<details>\` whose open state survives the next render.
+ *
+ * A *fold* is this: anything that opens and closes. A *card* is a fold with
+ * an outline -- an event, a function of a clique, a topic's documentation --
+ * and takes the \`card\` class for it. The two words are used that way
+ * throughout, and a section heading that folds is a fold and not a card,
+ * having no outline of its own.
  *
  * \`id\` must be derived from what is inside it -- \`4:event:my-app:introduced\`
  * -- and never from its position. A positional id is wrong the moment a list
@@ -541,7 +541,7 @@ function cliqueTitle(names) {
 /**
  * One function of a recursion clique, as a block inside its event's.
  *
- * Built like an event card and not like one: a member is not an event -- ACL2
+ * Its own card, and not an event's: a member is not an event -- ACL2
  * recorded one for the clique, not one apiece -- so it has no kind, no time
  * and no steps of its own. What it does have is its own record: its
  * signature, its guard and measure, and the rules it wrote, which is the half
@@ -572,12 +572,12 @@ function memberHtml(d, p) {
   }
   return body
     ? fold(p + 'mem:' + d.name, false, head,
-           '<div class="einside">' + body + '</div>', 'event')
-    : '<div class="event bare"><div class="esum">' + head + '</div></div>';
+           '<div class="cinside">' + body + '</div>', 'card')
+    : '<div class="card bare"><div class="csum">' + head + '</div></div>';
 }
 
 /**
- * One event a form recorded, as a block of its own.
+ * One event a form recorded, as a card of its own.
  *
  * The probe reads event-data-fal, which records *every* event, so a plain
  * defun arrives here exactly as a defines does and there is no
@@ -676,10 +676,10 @@ function eventHtml(e, p, openByDefault, at) {
       (d.short ? '<div class="dsum">' + withCode(d.short, d.shortCode) + '</div>' : '');
     body = (d.long
       ? fold(p + 'ev:' + key + ':documentation', false, head,
-             '<div class="dinside doclong">' + withCode(d.long, d.longCode) + '</div>',
-             'docfold')
+             '<div class="cinside doclong">' + withCode(d.long, d.longCode) + '</div>',
+             'card')
       // Nothing to open: a chevron onto nothing is worse than no chevron.
-      : '<div class="docfold bare"><div class="esum">' + head + '</div></div>') + body;
+      : '<div class="card bare"><div class="csum">' + head + '</div></div>') + body;
   }
 
   // The formals sit beside the name because together they are the signature,
@@ -707,8 +707,8 @@ function eventHtml(e, p, openByDefault, at) {
   // nothing is worse than no chevron.
   return body
     ? fold(p + 'ev:' + key, openByDefault, head,
-           '<div class="einside">' + body + '</div>', 'event')
-    : '<div class="event bare"><div class="esum">' + head + '</div></div>';
+           '<div class="cinside">' + body + '</div>', 'card')
+    : '<div class="card bare"><div class="csum">' + head + '</div></div>';
 }
 
 /**
@@ -776,9 +776,9 @@ function docCard(d, p) {
     (d.short ? '<div class="dsum">' + withCode(d.short, d.shortCode) + '</div>' : '');
   return d.long
     ? fold(p + 'doc:' + d.name, false, head,
-           '<div class="einside doclong">' + withCode(d.long, d.longCode) + '</div>',
-           'event')
-    : '<div class="event bare"><div class="esum">' + head + '</div></div>';
+           '<div class="cinside doclong">' + withCode(d.long, d.longCode) + '</div>',
+           'card')
+    : '<div class="card bare"><div class="csum">' + head + '</div></div>';
 }
 
 /**
