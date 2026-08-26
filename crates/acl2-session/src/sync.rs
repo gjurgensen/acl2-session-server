@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::capability::{Capabilities, Capability};
 use crate::session::{Outcome, Session, SessionControl};
 use crate::output::{OutputRef, OutputSlice, OutputStore, Slice};
 use crate::split::{split, Form, SplitError};
@@ -35,6 +36,7 @@ use probe::{
     inner_events_probe, is_nil, is_safe_symbol, items, keyed_block, parse_census,
     parse_checkpoints, parse_event_data, parse_inner, parse_value, rules_probe,
     sexp_elements, sexp_field, strip_symbol_acl2, symbol_name_of, unquote, CENSUS_PROBE, CHECKPOINT_PROBE, CLEAR_STALE,
+    capability_probe, parse_capabilities,
     CMD_PROBE, DEPS_PROBE, DOC_INDEX_PROBE, EVENT_DATA_PROBE, INTERRUPT_PROBE, OWN_OUTPUT,
 };
 
@@ -323,6 +325,91 @@ pub struct InnerEvent {
     pub time: Option<String>,
     /// Signed for the same reason as [`EventData::prover_steps`].
     pub prover_steps: Option<i64>,
+    /// The inductions this event performed, newest first.
+    ///
+    /// Empty for the overwhelming majority of events, which never induct, and
+    /// empty past the detail slots -- the same "not read" ambiguity every
+    /// other per-event field here carries, resolved by `inner_total`.
+    ///
+    /// Per *event*, which is the whole point and was the thing the old
+    /// log-parsing module could not do. See [`Induction`].
+    pub induction: Vec<Induction>,
+}
+
+/// One induction ACL2 performed, from `get-event-data`'s `INDUCTION-RECORDS`.
+///
+/// ACL2 gained this in commit `31b8c8aff5` (2026-08-25, "Induction information
+/// is now returned by get-event-data"), which builds an `induction-record` at
+/// the point the winning candidate is chosen and files it in the event's ttree
+/// -- the same values `induct-msg/continue` prints, kept instead of dropped.
+/// `books/tools/show-induction-records.lisp` is ACL2's own reader for it, and
+/// [`crate::capability::Capability::InductionRecords`] is how a session learns
+/// whether the image in front of it has any of this.
+///
+/// This crate carried a *parser* for the printed narrative until `fb7bf7f`.
+/// What killed it was not fragility but attribution: an announcement never
+/// names the event that printed it, and a form is often many events each
+/// numbering its goals from `*1`. The records come out of `event-data-fal`
+/// keyed by event name, so that defect is gone rather than mitigated --
+/// measured on a `progn` of three theorems, each carrying its own records,
+/// and on one theorem carrying two (`*1` and its sub-induction `*1.1`, which
+/// ACL2 does not print at all under default settings).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Induction {
+    /// The goal this induction was for -- `*1`, `*1.1`, `[2]*1.3`.
+    ///
+    /// ACL2 holds this as a `msgp`, not a string: a format string plus its
+    /// arguments, carrying the pool list as numbers and the forcing round
+    /// separately. The probe has ACL2 print it with `~@` rather than
+    /// reassembling the name here, so the spelling stays ACL2's (P2) --
+    /// including the `[round]` prefix, which only appears off round zero.
+    pub goal: String,
+    /// The term that suggested the scheme, untranslated: `(revappend x z)`.
+    pub suggested: String,
+    /// The other terms merged into the scheme alongside `suggested`.
+    /// Untranslated, and usually empty.
+    pub accommodating: Vec<String>,
+    /// The `:induction` runes that produced the suggestion.
+    ///
+    /// A list, not a phrase. The old parser could offer only ACL2's English
+    /// ("the :induction rules BINARY-APPEND and REVAPPEND") because that is
+    /// what `tilde-*-simp-phrase` renders; this is the rune list itself.
+    ///
+    /// Excludes splitter and forcing-round information, which ACL2's record
+    /// deliberately leaves out.
+    pub runes: Vec<String>,
+    /// `(:p x y z)` -- the conjecture's variables, in ACL2's term order.
+    /// This is what `:p` stands for inside [`Self::scheme`].
+    pub p_formula: String,
+    /// The scheme itself, with `:p` for the conjecture.
+    ///
+    /// Empty only when the probe could not read the record at all. When
+    /// [`Self::scheme_cases`] is `Some`, this is the *first case* rather than
+    /// the whole scheme -- see that field for why.
+    pub scheme: String,
+    /// `Some(n)` when `scheme` holds one case out of `n`, rather than all of
+    /// them; `None` when it is whole.
+    ///
+    /// A mutual recursion inducts over its entire clique, and one such scheme
+    /// measured 6,831,709 characters. That is a *transport* problem before it
+    /// is a display one -- it crosses a pty and is parsed on every admission
+    /// -- so the probe bounds it, and the surfaces cut again to their own
+    /// budgets on top.
+    ///
+    /// The bound is structural rather than by character count, and that was
+    /// forced rather than chosen: `fmt1-to-string` has no badge, so it cannot
+    /// be called from the `loop$` the probe is built on, and a character-exact
+    /// prefix is therefore not available in ACL2. Keeping whole cases is the
+    /// better failure anyway -- what arrives is a readable term rather than a
+    /// term cut off mid-symbol.
+    pub scheme_cases: Option<usize>,
+}
+
+impl Induction {
+    /// Whether [`Self::scheme`] is the whole scheme rather than one case.
+    pub fn scheme_complete(&self) -> bool {
+        self.scheme_cases.is_none()
+    }
 }
 
 /// One key checkpoint: the goal's name and its term.
@@ -1208,6 +1295,10 @@ pub struct Book {
     /// The inner-events probe, generated for this book's detail depth. See
     /// [`Book::set_inner_detail`].
     inner_probe: String,
+    /// Kept alongside `inner_probe` because the probe is a function of this
+    /// *and* the capabilities; see `rebuild_inner_probe`.
+    inner_detail: usize,
+    capabilities: Capabilities,
     /// `inhibit-output-lst` as inherited, before the server removed PROVE.
     inherited_inhibit: Option<String>,
     /// The handle handed out for a form that outran its deadline.
@@ -1341,7 +1432,12 @@ impl Book {
             base_package: None,
             dirty: false,
             mode: SyncMode::StopAtFailure,
-            inner_probe: inner_events_probe(INNER_DETAIL_SLOTS),
+            // Rebuilt in `post_start_setup` once the image's capabilities are
+            // known; until then the induction streams stay out, which is the
+            // safe direction (see `induction_streams`).
+            inner_probe: inner_events_probe(INNER_DETAIL_SLOTS, false),
+            inner_detail: INNER_DETAIL_SLOTS,
+            capabilities: Capabilities::default(),
             inherited_inhibit: None,
             books_dir: None,
             in_flight_output: None,
@@ -1362,6 +1458,14 @@ impl Book {
     /// reintroduced by the recovery path -- and kept reporting the
     /// pre-rebuild environment answers.
     fn post_start_setup(&mut self) -> Result<(), SyncError> {
+        // First, because it decides how other probes are *built*: an image
+        // without `InductionRecords` must never be sent a probe that names
+        // `weak-induction-record-p`, which would fail to translate and take
+        // the whole inner-event probe with it.
+        if let Ok(sub) = self.session.submit(&capability_probe(), Duration::from_secs(60)) {
+            self.capabilities = parse_capabilities(&sub);
+        }
+        self.rebuild_inner_probe();
         let sub = self.session.submit(OWN_OUTPUT, Duration::from_secs(60))?;
         if let Some(body) = sub.block("env") {
             let pairs = keyed_block(body, &["inhibit", "sbd"]);
@@ -1412,7 +1516,25 @@ impl Book {
     /// because an `include-book` unit can hold thousands of events whose
     /// per-event runes would flood every admission's capture.
     pub fn set_inner_detail(&mut self, n: usize) {
-        self.inner_probe = inner_events_probe(n);
+        self.inner_detail = n;
+        self.rebuild_inner_probe();
+    }
+
+    /// What the image can do. See [`crate::capability`].
+    pub fn capabilities(&self) -> &Capabilities {
+        &self.capabilities
+    }
+
+    /// Regenerate the inner probe from the detail depth *and* the image's
+    /// capabilities, which is why both are kept rather than only the probe:
+    /// either can change without the other, and the probe is a function of
+    /// both. Raising the detail depth used to silently drop the induction
+    /// streams, because it rebuilt the probe from the depth alone.
+    fn rebuild_inner_probe(&mut self) {
+        self.inner_probe = inner_events_probe(
+            self.inner_detail,
+            self.capabilities.has(Capability::InductionRecords),
+        );
     }
 
     /// The output store, shared for the same reason as the control block:

@@ -450,6 +450,101 @@ fn raised_inner_detail_reaches_every_event() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Each event of a compound form carries *its own* inductions.
+///
+/// This is the test the old log-parsing module could not have passed, and the
+/// reason it was deleted (`fb7bf7f`): an induction announcement never names
+/// the event that printed it, every event numbers its goals from `*1`, and the
+/// announcements arrive in source order while the inner events arrive
+/// newest-first -- so the only association available to a caller attached
+/// every scheme to the wrong theorem. `get-event-data`'s `INDUCTION-RECORDS`
+/// are filed per event in `event-data-fal`, so the association is ACL2's.
+///
+/// Needs the ACL2 that introduced the field; see `Capability::InductionRecords`.
+#[test]
+#[ignore = "needs ACL2"]
+fn each_event_carries_its_own_inductions() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("induction-per-event");
+    let book = dir.join("demo.lisp");
+    write(&book, &["(in-package \"ACL2\")",
+                   "(defun app (x y) (if (consp x) (cons (car x) (app (cdr x) y)) y))",
+                   "(defun rev (x) (if (consp x) (app (rev (cdr x)) (cons (car x) nil)) nil))",
+                   "(progn\n\
+                      (defthm tl-rev (true-listp (rev x)))\n\
+                      (defthm app-assoc (equal (app (app x y) z) (app x (app y z)))))"]);
+    let mut b = Book::open(&acl2, &book).expect("open");
+    let o = b.sync(None, D).expect("sync");
+    assert!(o.failed.is_none(), "{:?}", o.failed);
+
+    let u = o.admitted.last().expect("the progn");
+    let by = |n: &str| {
+        u.inner.iter().find(|e| e.name == n).unwrap_or_else(|| panic!("no {n} in {:?}", u.inner))
+    };
+
+    // `app-assoc` inducts once, on the term that suggested the scheme, while
+    // accommodating the other. Both terms untranslated, the runes structural.
+    let a = by("app-assoc");
+    assert_eq!(a.induction.len(), 1, "{:?}", a.induction);
+    assert_eq!(a.induction[0].goal, "*1");
+    assert_eq!(a.induction[0].suggested, "(app x y)");
+    assert_eq!(a.induction[0].accommodating, vec!["(app x (app y z))"]);
+    assert_eq!(a.induction[0].runes, vec!["(:induction app)"]);
+    assert_eq!(a.induction[0].p_formula, "(:p x y z)");
+    assert!(a.induction[0].scheme_complete(), "a small scheme arrives whole");
+    assert!(a.induction[0].scheme.contains("(:p x y z)"), "{}", a.induction[0].scheme);
+
+    // `tl-rev` inducts *twice*, and the second is the interesting one: ACL2
+    // does not print `*1.1` at all under default output settings, so this is
+    // detail the log itself would not have carried. Newest first, as
+    // `event-data-fal` orders everything.
+    let t = by("tl-rev");
+    let goals: Vec<&str> = t.induction.iter().map(|i| i.goal.as_str()).collect();
+    assert_eq!(goals, vec!["*1.1", "*1"], "both inductions, newest first");
+    assert_eq!(t.induction[1].suggested, "(rev x)");
+    assert_eq!(t.induction[1].runes, vec!["(:induction rev)"]);
+    assert_eq!(t.induction[0].suggested, "(app rv (list x1))");
+    assert_eq!(t.induction[0].accommodating, vec!["(true-listp rv)"]);
+
+    // The association is the whole point: neither event's records leaked into
+    // the other, though both are `*1` and both name `app`.
+    assert!(t.induction.iter().all(|i| i.suggested != "(app x y)"), "{:?}", t.induction);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The image reports what it can do, and the version string cannot say it.
+///
+/// The second assertion is the point. `acl2-version` reads `"ACL2 Version
+/// 8.7"` on an image that has `INDUCTION-RECORDS` *and* on one built days
+/// earlier that does not, because the global bumps at release while the
+/// feature landed in the development stream. If this suite is ever run on an
+/// image old enough to lack the capability, the version will still say 8.7 --
+/// so a version gate would have been wrong in both directions.
+#[test]
+#[ignore = "needs ACL2"]
+fn the_image_reports_its_capabilities() {
+    use acl2_session::Capability;
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("capabilities");
+    let book = dir.join("demo.lisp");
+    write(&book, &["(in-package \"ACL2\")"]);
+    let b = Book::open(&acl2, &book).expect("open");
+    let caps = b.capabilities();
+
+    let v = caps.version.as_deref().expect("every ACL2 has a version string");
+    assert!(v.starts_with("ACL2 Version"), "{v:?}");
+
+    // This developer's image has both; an older one legitimately has neither,
+    // and the point of the probe is that it says so instead of failing.
+    for c in [Capability::InductionRecords, Capability::RuleDetail] {
+        assert!(caps.has(c), "{c:?} missing on {v}: witness {}", c.witness());
+    }
+    assert_eq!(caps.missing().count(), 0, "nothing else is expected to be absent");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A rebuild replays a skipped unit under skip-proofs too -- replaying it
 /// plainly would re-run the failed proof and read as an unreachable world.
 #[test]

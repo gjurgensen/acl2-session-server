@@ -87,6 +87,7 @@
 //! failure: the session then holds a valid shorter prefix plus one form in
 //! flight, which is the ordinary shape of an expiry, and `resume` finishes it.
 
+pub mod capability;
 pub mod cert;
 pub mod image;
 pub mod output;
@@ -105,6 +106,7 @@ pub use split::{
     IncludeSite, SplitError,
 };
 pub use registry::{Registry, RegistryError, SessionId};
+pub use capability::{Capabilities, Capability};
 pub use cert::{Build, CertError, CertReport, CertStatus};
 pub use image::{find_checkout, ImageError, ImagePolicy};
 pub use output::{OutputRef, OutputSlice, OutputStore, Slice, SliceRequest};

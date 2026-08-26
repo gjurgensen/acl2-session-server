@@ -54,8 +54,9 @@
 //! enumerates.
 
 use super::{
-    CensusEntry, Checkpoint, Checkpoints, EventData, FormValue, InnerEvent, NameKind,
+    CensusEntry, Checkpoint, Checkpoints, EventData, FormValue, Induction, InnerEvent, NameKind,
 };
+use crate::capability::{Capabilities, Capability};
 use crate::split::split;
 
 // ---- Setting up, and asking where we are ---------------------------------------
@@ -95,6 +96,63 @@ pub(super) const CMD_PROBE: &str = "(acl2::prog2$ \
       (acl2::len (acl2::global-val 'acl2::include-book-alist-all \
         (acl2::w acl2::state)))) \
     (acl2::value :invisible))";
+
+/// Ask the world which optional features this ACL2 has.
+///
+/// `getpropc` with a quoted symbol and a default, which is *total*: a symbol
+/// this ACL2 never defined answers `:absent` instead of failing to translate.
+/// That distinction is the whole reason this probe exists rather than each
+/// caller simply trying the thing it wants -- see [`crate::capability`].
+///
+/// Generated from [`Capability::ALL`] so a new capability is one edit, and so
+/// the probe cannot fall out of step with the enum it fills in.
+pub(super) fn capability_probe() -> String {
+    let symbols = Capability::ALL
+        .iter()
+        .map(|(_, sym)| format!("acl2::{sym}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        r#"(acl2::let ((acl2::wrld (acl2::w acl2::state)))
+  (acl2::prog2$
+    (acl2::cw "~%<<<PROBE-BEGIN cap>>>~%version ~x0~%" (acl2::@ acl2::acl2-version))
+    (acl2::prog2$
+      (acl2::cw "~*0" (acl2::list "" "cap ~x*~%" "cap ~x*~%" "cap ~x*~%"
+        (acl2::loop$ acl2::for acl2::s acl2::in '({symbols}) acl2::collect
+          (acl2::list acl2::s
+            (acl2::if (acl2::eq :absent
+                        (acl2::getpropc acl2::s 'acl2::formals :absent acl2::wrld))
+                      'acl2::no 'acl2::yes)))))
+      (acl2::prog2$
+        (acl2::cw "<<<PROBE-END cap>>>~%")
+        (acl2::value :invisible)))))"#
+    )
+}
+
+pub(super) fn parse_capabilities(sub: &crate::session::Submission) -> Capabilities {
+    let mut caps = Capabilities::default();
+    let Some(body) = sub.block("cap") else { return caps };
+    let pairs = keyed_block(body, &["version", "cap"]);
+    caps.version = pairs
+        .iter()
+        .find(|(k, _)| k == "version")
+        .and_then(|(_, v)| unquote(v.trim()));
+    for entry in items(&pairs, "cap") {
+        // `(symbol yes)` / `(symbol no)`. Yes/no rather than t/nil for the
+        // reason the event-data probe uses them: a `nil` here would be
+        // indistinguishable from the value having gone missing.
+        let f = sexp_elements(&entry);
+        let (Some(sym), Some(verdict)) = (f.first(), f.get(1)) else { continue };
+        if symbol_name_of(verdict) != "yes" {
+            continue;
+        }
+        let sym = symbol_name_of(sym);
+        if let Some((c, _)) = Capability::ALL.iter().find(|(_, w)| *w == sym) {
+            caps.insert(*c);
+        }
+    }
+    caps
+}
 
 // ---- What the session was handed, and what it rests on -------------------------
 //
@@ -225,7 +283,8 @@ pub(super) const DEPS_PROBE: &str = r#"(acl2::prog2$
 /// (`from-to-by-ac`), so `to 1000000000` allocated a billion conses -- some
 /// thirty gigabytes -- on every admission. "Heap exhausted, game over",
 /// measured the hard way.
-pub(super) fn inner_events_probe(limit: usize) -> String {
+pub(super) fn inner_events_probe(limit: usize, induction: bool) -> String {
+    let (ind_body, ind_close) = induction_streams(induction);
     format!(
         r#"(acl2::let*
   ((acl2::fal0 (acl2::true-list-fix (acl2::@ acl2::event-data-fal)))
@@ -296,16 +355,140 @@ pub(super) fn inner_events_probe(limit: usize) -> String {
                               (acl2::and (acl2::alistp acl2::d)
                                          (acl2::cdr (acl2::assoc-equal 'acl2::rules acl2::d))))
                           acl2::collect (acl2::cons acl2::i acl2::r)))))
-                  (acl2::prog2$
+{ind_body}                  (acl2::prog2$
                     (acl2::cw "<<<PROBE-END inner>>>~%")
-                    (acl2::value :invisible)))))))))))))"#
+                    (acl2::value :invisible))))))))))))){ind_close}"#
     )
 }
+
+
+/// The induction streams of `inner_events_probe`, or nothing.
+///
+/// Nothing, and not an empty result, when the image lacks
+/// [`Capability::InductionRecords`]: `weak-induction-record-p` and the
+/// `induction-record` accessor macro would both fail to *translate* there, and
+/// a probe is one form -- so naming them unconditionally would not thin this
+/// probe's answer, it would delete it, taking every unit's inner events with
+/// it. Silently, which is the failure mode this crate has been bitten by
+/// before (`rules_probe`, and see [`crate::capability`]).
+///
+/// Returns the block and the extra closing parens it owes, because the two
+/// have to move together and a mismatch between them is a probe that makes
+/// ACL2 read past the end of its own file.
+fn induction_streams(induction: bool) -> (String, &'static str) {
+    if !induction {
+        return (String::new(), "");
+    }
+    (
+        IND_STREAMS.replace("{scheme_ceiling}", &SCHEME_CEILING.to_string()),
+        ")))",
+    )
+}
+
+/// See [`induction_streams`]. Held apart from the probe body so the
+/// capability-off path is plainly the same probe with a hole where these go.
+const IND_STREAMS: &str = r#"                  (acl2::prog2$
+                    (acl2::cw "~*0" (acl2::list "" "~@*~%" "~@*~%" "~@*~%"
+                      (acl2::loop$ acl2::for acl2::d acl2::in acl2::ds
+                                   acl2::as acl2::i acl2::from 0 acl2::to (acl2::len acl2::ds)
+                        acl2::append
+                          (acl2::loop$ acl2::for acl2::r acl2::in
+                              (acl2::true-list-fix
+                                (acl2::and (acl2::alistp acl2::d)
+                                  (acl2::cdr (acl2::assoc-equal 'acl2::induction-records acl2::d))))
+                            acl2::as acl2::j acl2::from 0 acl2::to (acl2::len
+                              (acl2::true-list-fix
+                                (acl2::and (acl2::alistp acl2::d)
+                                  (acl2::cdr (acl2::assoc-equal 'acl2::induction-records acl2::d)))))
+                            acl2::collect
+                              (acl2::cons "ipool ~x0 ~x1 ~@2"
+                                (acl2::list (acl2::cons #\0 acl2::i)
+                                            (acl2::cons #\1 acl2::j)
+                                            (acl2::cons #\2
+                                              (acl2::and (acl2::weak-induction-record-p acl2::r)
+                                                (acl2::access acl2::induction-record acl2::r
+                                                              :pool-name)))))))))
+                  (acl2::prog2$
+                    (acl2::cw "~*0" (acl2::list "" "irec ~x*~%" "irec ~x*~%" "irec ~x*~%"
+                      (acl2::loop$ acl2::for acl2::d acl2::in acl2::ds
+                                   acl2::as acl2::i acl2::from 0 acl2::to (acl2::len acl2::ds)
+                        acl2::append
+                          (acl2::loop$ acl2::for acl2::r acl2::in
+                              (acl2::true-list-fix
+                                (acl2::and (acl2::alistp acl2::d)
+                                  (acl2::cdr (acl2::assoc-equal 'acl2::induction-records acl2::d))))
+                            acl2::as acl2::j acl2::from 0 acl2::to (acl2::len
+                              (acl2::true-list-fix
+                                (acl2::and (acl2::alistp acl2::d)
+                                  (acl2::cdr (acl2::assoc-equal 'acl2::induction-records acl2::d)))))
+                            acl2::collect
+                              (acl2::list acl2::i acl2::j
+                                (acl2::and (acl2::weak-induction-record-p acl2::r)
+                                  (acl2::access acl2::induction-record acl2::r :suggested))
+                                (acl2::and (acl2::weak-induction-record-p acl2::r)
+                                  (acl2::access acl2::induction-record acl2::r :accommodating))
+                                (acl2::and (acl2::weak-induction-record-p acl2::r)
+                                  (acl2::access acl2::induction-record acl2::r :runes))
+                                (acl2::and (acl2::weak-induction-record-p acl2::r)
+                                  (acl2::access acl2::induction-record acl2::r :p-formula)))))))
+                  (acl2::prog2$
+                    (acl2::cw "~*0" (acl2::list "" "isch ~x*~%" "isch ~x*~%" "isch ~x*~%"
+                      (acl2::loop$ acl2::for acl2::d acl2::in acl2::ds
+                                   acl2::as acl2::i acl2::from 0 acl2::to (acl2::len acl2::ds)
+                        acl2::append
+                          (acl2::loop$ acl2::for acl2::r acl2::in
+                              (acl2::true-list-fix
+                                (acl2::and (acl2::alistp acl2::d)
+                                  (acl2::cdr (acl2::assoc-equal 'acl2::induction-records acl2::d))))
+                            acl2::as acl2::j acl2::from 0 acl2::to (acl2::len
+                              (acl2::true-list-fix
+                                (acl2::and (acl2::alistp acl2::d)
+                                  (acl2::cdr (acl2::assoc-equal 'acl2::induction-records acl2::d)))))
+                            acl2::collect
+                              (acl2::if (acl2::< {scheme_ceiling}
+                                          (acl2::acl2-count
+                                            (acl2::and (acl2::weak-induction-record-p acl2::r)
+                                              (acl2::access acl2::induction-record acl2::r :scheme))))
+                                (acl2::list acl2::i acl2::j
+                                  (acl2::len (acl2::cdr (acl2::true-list-fix
+                                    (acl2::access acl2::induction-record acl2::r :scheme))))
+                                  (acl2::car (acl2::cdr (acl2::true-list-fix
+                                    (acl2::access acl2::induction-record acl2::r :scheme)))))
+                                (acl2::list acl2::i acl2::j 0
+                                  (acl2::and (acl2::weak-induction-record-p acl2::r)
+                                    (acl2::access acl2::induction-record acl2::r :scheme))))))))
+"#;
+
+/// The largest `acl2-count` of an induction scheme the probe will carry whole.
+///
+/// Above it the probe sends the scheme's *first case* and says how many there
+/// were, which is [`Induction::scheme_cases`].
+///
+/// Calibrated, not guessed. Measured on this ACL2: a scheme of `acl2-count` 26
+/// prints as 104 characters and one of 29 prints as 118 -- four characters per
+/// unit, twice, exactly. So this ceiling is about 80,000 printed characters:
+/// some thirty-five times what the MCP surface will show of a scheme, and two
+/// orders of magnitude below the 6,831,709-character clique that motivated
+/// cutting at all. Anything a reader would have been shown whole still arrives
+/// whole; only the pathological case is trimmed, and it is told.
+const SCHEME_CEILING: usize = 20_000;
+
+/// Every key `inner_events_probe` prints, in one place because both readers
+/// must name *all* of them.
+///
+/// `keyed_block` treats a line it does not recognise as a continuation of the
+/// previous value, so a reader naming a subset does not merely miss the rest
+/// -- it silently glues them onto whatever key came last. `inner_names` wants
+/// two of these fields and still has to name all twelve; that is the trap,
+/// and this constant is what stops the two lists drifting apart.
+const INNER_KEYS: [&str; 12] = [
+    "iname", "iclq", "ik", "igoal", "ia", "inx", "it", "is", "irune", "ipool", "irec", "isch",
+];
 
 pub(super) fn parse_inner(sub: &crate::session::Submission) -> (Vec<InnerEvent>, usize, Vec<String>) {
     let Some(body) = sub.block("inner") else { return (Vec::new(), 0, Vec::new()) };
     let pairs =
-        keyed_block(body, &["iname", "iclq", "ik", "igoal", "ia", "inx", "it", "is", "irune"]);
+        keyed_block(body, &INNER_KEYS);
     // Every name, not a sample of them. A `defines` clique introduces far more
     // than three events, and a list of three that looks complete is worse than
     // a long one: the reporter found two of a clique's own functions in the
@@ -365,9 +548,11 @@ pub(super) fn parse_inner(sub: &crate::session::Submission) -> (Vec<InnerEvent>,
             slot.push(format!("({rune})"));
         }
     }
+    let induction = parse_induction(&pairs, names.len());
     let mut out = Vec::new();
     for (i, name) in names.iter().enumerate() {
         out.push(InnerEvent {
+            induction: induction.get(i).cloned().unwrap_or_default(),
             name: name.clone(),
             abort_causes: failure_causes(aborts.get(i).cloned().flatten()),
             rules: rules.get(i).cloned().unwrap_or_default(),
@@ -388,6 +573,82 @@ pub(super) fn parse_inner(sub: &crate::session::Submission) -> (Vec<InnerEvent>,
     (out, total, clique)
 }
 
+/// Join the three induction streams into per-event records.
+///
+/// Each stream tags its items `(event-index, record-ordinal)` rather than
+/// relying on position, which the other per-event fields here can afford and
+/// this cannot: an event contributes *zero or more* records, so a positional
+/// stream would have no way to say which event a missing entry belonged to.
+/// Most events contribute none, so most units carry three empty streams.
+///
+/// Three streams and not one because the pool name is a `msgp` -- ACL2's
+/// format-string-plus-arguments, which `~x` would print as its own innards.
+/// It travels in a stream of its own printed with `~@`, so the name that
+/// arrives is the name ACL2 would have shown. The scheme travels separately
+/// again because it is the one field with a size bound (`SCHEME_CEILING`).
+///
+/// A `BTreeMap` so the ordinals come back in ACL2's own order within an
+/// event: newest first, matching `event-data-fal` itself.
+fn parse_induction(pairs: &[(String, String)], events: usize) -> Vec<Vec<Induction>> {
+    let mut by_key: std::collections::BTreeMap<(usize, usize), Induction> = Default::default();
+    // `ipool <i> <j> <name>`; the name is a single token ACL2 chose.
+    for line in items(pairs, "ipool") {
+        let mut it = line.split_whitespace();
+        let (Some(i), Some(j), Some(name)) = (it.next(), it.next(), it.next()) else { continue };
+        let (Ok(i), Ok(j)) = (i.parse::<usize>(), j.parse::<usize>()) else { continue };
+        if i < events {
+            by_key.entry((i, j)).or_default().goal = name.to_string();
+        }
+    }
+    // `irec (<i> <j> <suggested> <accommodating> <runes> <p-formula>)`.
+    for tuple in items(pairs, "irec") {
+        let f = sexp_elements(&tuple);
+        let [Some(i), Some(j)] = [f.first(), f.get(1)].map(|x| x.and_then(|v| v.parse().ok()))
+        else {
+            continue;
+        };
+        let (i, j): (usize, usize) = (i, j);
+        if i >= events {
+            continue;
+        }
+        let rec = by_key.entry((i, j)).or_default();
+        rec.suggested = f.get(2).filter(|v| !is_nil(v)).cloned().unwrap_or_default();
+        rec.accommodating =
+            f.get(3).filter(|v| !is_nil(v)).map(|v| sexp_elements(v)).unwrap_or_default();
+        rec.runes = f.get(4).filter(|v| !is_nil(v)).map(|v| sexp_elements(v)).unwrap_or_default();
+        rec.p_formula = f.get(5).filter(|v| !is_nil(v)).cloned().unwrap_or_default();
+    }
+    // `isch (<i> <j> <cases> <scheme>)`, where a `cases` of 0 means the
+    // scheme is whole -- ACL2 cannot report a real scheme of zero cases, so
+    // the sentinel costs nothing and keeps the tuple one shape.
+    for tuple in items(pairs, "isch") {
+        let f = sexp_elements(&tuple);
+        let [Some(i), Some(j)] = [f.first(), f.get(1)].map(|x| x.and_then(|v| v.parse().ok()))
+        else {
+            continue;
+        };
+        let (i, j): (usize, usize) = (i, j);
+        if i >= events {
+            continue;
+        }
+        let rec = by_key.entry((i, j)).or_default();
+        rec.scheme = f.get(3).filter(|v| !is_nil(v)).cloned().unwrap_or_default();
+        rec.scheme_cases = f
+            .get(2)
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|n| *n > 0);
+    }
+    let mut out: Vec<Vec<Induction>> = vec![Vec::new(); events];
+    for ((i, _), rec) in by_key {
+        // Guarded on insert, so the index is in range; `if let` rather than
+        // an index to keep it that way if the guard ever moves.
+        if let Some(slot) = out.get_mut(i) {
+            slot.push(rec);
+        }
+    }
+    out
+}
+
 /// Just the names a unit's events introduced, without the rest of the parse.
 ///
 /// The scrape wants names and nothing else, and runs on every admitted unit;
@@ -401,7 +662,7 @@ pub(super) fn inner_names(sub: &crate::session::Submission) -> Vec<String> {
     // treats an unrecognised line as a continuation of the previous value,
     // so naming a subset silently glues the other fields onto the names.
     let pairs =
-        keyed_block(body, &["iname", "iclq", "ik", "igoal", "ia", "inx", "it", "is", "irune"]);
+        keyed_block(body, &INNER_KEYS);
     let mut names = items(&pairs, "iname");
     for c in items(&pairs, "iclq") {
         if !names.contains(&c) {
@@ -1320,10 +1581,40 @@ mod tests {
         // The generated inner-events probe, at the bounds its callers use and
         // at the ones that shape its `loop$`: none, one, and the editor's
         // effectively unbounded default.
+        //
+        // Both capability shapes, because both are real probes: an image
+        // without `InductionRecords` is sent the one without the induction
+        // streams, and it owes three fewer closing parens. Checking only the
+        // shape this developer's ACL2 happens to produce would leave the
+        // other to fail on someone else's image, where an unbalanced probe
+        // makes ACL2 read past the end of its own file and kills every later
+        // admission.
         for limit in [0, 1, 3, 620, usize::MAX] {
-            all.push(("inner_events_probe", super::inner_events_probe(limit)));
+            for induction in [false, true] {
+                all.push(("inner_events_probe", super::inner_events_probe(limit, induction)));
+            }
         }
+        all.push(("capability_probe", super::capability_probe()));
         all
+    }
+
+    /// An image without the capability must not be *named* the symbols it
+    /// lacks. This is the property, and it is separate from balance: a
+    /// perfectly balanced probe that says `weak-induction-record-p` to ACL2
+    /// 8.6 fails to translate, and a probe is one form, so it takes every
+    /// inner event down with it and says nothing about why.
+    #[test]
+    fn the_probe_without_induction_names_nothing_it_lacks() {
+        for limit in [0, 1, 3, usize::MAX] {
+            let off = super::inner_events_probe(limit, false);
+            for sym in ["induction-record", "induction-records", "weak-induction-record-p"] {
+                assert!(!off.contains(sym), "capability-off probe names {sym}: {off}");
+            }
+            // And the streams really are the only difference.
+            let on = super::inner_events_probe(limit, true);
+            assert!(on.contains("weak-induction-record-p"), "capability-on probe lost them");
+            assert!(on.len() > off.len());
+        }
     }
 
     #[test]
