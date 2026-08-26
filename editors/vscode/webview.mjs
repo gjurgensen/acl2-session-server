@@ -1020,6 +1020,20 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   check(!/class="ename"/.test(thm), 'and draws no chip where the name would be');
   check(/40 steps/.test(thm) && /car-cons/.test(thm), 'and says what it cost and used');
 
+  // And what it proved. A `defthm` gets that row from the world under its
+  // name; a `thm` writes no name, so the form ACL2 recorded is the only place
+  // its statement survives -- without it the card said a proof had run and
+  // not what it was about.
+  const goal = one({ name: '', kind: 'thm', rules: [],
+                     goal: '(equal (zz-f (cons a b)) (zz-f b))' });
+  check(/proved/.test(goal), 'a thm says what it proved');
+  check(/zz-f \(cons a b\)/.test(goal), 'and that is the term it was given');
+
+  // Only a thm. Every other event writes a name, and its statement is a fact
+  // about that name rather than about the event.
+  const df = one({ name: 'zz-t', kind: 'defthm', rules: [] });
+  check(!/proved/.test(df), 'a named event has no such row');
+
   // Two of them in one form must not share a fold: keyed by name, they would
   // both key on the empty string and open and close together.
   const two = envelope({ checkpoints: [], rules: [], inner: [
@@ -1286,6 +1300,17 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   // pixels. Two is the worst possible amount: too small to read as
   // indentation, too large to read as aligned.
   check(/:root\s*\{\s*--twist:/.test(css), 'the indent is a single declared number');
+  // And a *relative* one. The slot holds a glyph, the glyph is sized by the
+  // font, and every indent on the page derives from this: fixed in pixels it
+  // would keep its width while the text around it grew.
+  check(/--twist:\s*[\d.]+rem/.test(css), 'and it scales with the text');
+  // The text scales because one number does, on the root. Anything written
+  // in pixels here would sit still while the rest of the page moved.
+  check(/html\s*\{[^}]*font-size:\s*var\(--vscode-font-size/.test(css),
+    'and the text follows the size the reader configured');
+  const sizes = [...css.matchAll(/font-size:\s*([^;]+);/g)].map((m) => m[1].trim());
+  check(sizes.every((v) => !/^\d+px$/.test(v)),
+    `no size is written in pixels (${sizes.filter((v) => /^\d+px$/.test(v))})`);
   for (const [sel, what] of [
     ['details[data-fold] > summary::before', "the chevron's slot"],
     ['.cinside', "a card's body"],
@@ -1610,6 +1635,15 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
     'skip-proofs, the sibling of uncertified, is elaborated too');
   check(warningMessage('Non-rec').startsWith('Rule unlikely to fire'),
     'non-rec says why the rule may never trigger');
+  check(warningMessage('Use') === 'Unusual to :use an enabled rule; consider disabling it',
+    'use says what is unusual about it, not just the word "Use"');
+  check(warningMessage('Guards') === 'Includes a book with guards unverified',
+    'guards is about the book it came in with, like uncertified');
+  // The line has to be true of *every* instance, which is the test for
+  // whether a kind gets one at all. `Equiv` is emitted about the particular
+  // rule it names, so no single line covers it: it stays as its label.
+  check(warningMessage('Equiv') === 'Equiv',
+    'a kind whose point is the rule it names stays a label');
   check(warningMessage('Free') === 'Free variables limit where this rule applies',
     'free says what the free variables cost');
   check(warningMessage('Subsume') === 'Probably subsumes an existing rule',

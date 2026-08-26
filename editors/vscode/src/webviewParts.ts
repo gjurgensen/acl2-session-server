@@ -70,8 +70,18 @@ export function pageHtml(html: string, webview: vscode.Webview): string {
 
 /** Typography, status chips, code blocks and folds -- the shared look. */
 export const SHARED_CSS = `
+/* Every size on this page is a fraction of one number, and that number is the
+   font size the reader configured. It used to be 13px written out, with 12,
+   11 and 10 beside it -- so a workbench set larger for legibility left this
+   page alone, and only a window zoom moved it.
+
+   \`rem\` and not \`em\` throughout: the sizes below nest -- a \`.meta\` inside a
+   \`table.inner\` inside a card -- and \`em\` would compound at each step, which
+   is how a label two levels down ends up unreadable. Anchored here, on the
+   root, so one setting moves the page and the proportions hold. */
+html { font-size: var(--vscode-font-size, 13px); }
 body { font-family: var(--vscode-font-family); color: var(--vscode-foreground);
-       font-size: 13px; }
+       font-size: 1rem; }
 .h { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; margin: 10px 0 4px; }
 .status { font-weight: 600; padding: 1px 8px; border-radius: 9px; }
 .status.admitted, .status.ok { background: rgba(46, 125, 50, 0.25); }
@@ -79,10 +89,11 @@ body { font-family: var(--vscode-font-family); color: var(--vscode-foreground);
 .status.skipped, .status.failed { background: rgba(198, 40, 40, 0.25); }
 .status.running { background: rgba(90, 140, 210, 0.3); }
 .status.pending, .status.queued, .status.beyond { background: rgba(136, 136, 136, 0.2); }
-.meta { opacity: 0.7; font-size: 12px; }
-h3 { margin: 14px 0 4px; font-size: 11px; text-transform: uppercase;
+.meta { opacity: 0.7; font-size: 0.92rem; }
+h3 { margin: 14px 0 4px; font-size: 0.85rem; text-transform: uppercase;
      letter-spacing: 0.05em; opacity: 0.75; }
-pre, code { font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; }
+pre, code { font-family: var(--vscode-editor-font-family, monospace);
+           font-size: 0.92rem; }
 /* A block of ACL2's own text -- a checkpoint term, the live log, a value --
    in an outlined box. The same box a card uses (same border colour,
    same radius), on purpose: a box is this page's grouping idiom, so a block
@@ -112,14 +123,14 @@ details.card > summary code,
 .failed-what code { background: none; padding: 0; }
 button { background: var(--vscode-button-secondaryBackground);
          color: var(--vscode-button-secondaryForeground); border: none;
-         padding: 2px 9px; border-radius: 3px; cursor: pointer; font-size: 11px; }
+         padding: 2px 9px; border-radius: 3px; cursor: pointer; font-size: 0.85rem; }
 button:hover { background: var(--vscode-button-secondaryHoverBackground); }
 .note { background: rgba(198, 40, 40, 0.15); padding: 6px 9px; border-radius: 4px;
-        margin: 8px 0; font-size: 12px; }
+        margin: 8px 0; font-size: 0.92rem; }
 /* The form view speaking for itself rather than about a form. Neutral on purpose:
    red in here already means a form went red. */
 .notice { border-left: 3px solid var(--vscode-focusBorder, #888); padding: 4px 9px;
-          margin: 8px 0; font-size: 12px; opacity: 0.85; }
+          margin: 8px 0; font-size: 0.92rem; opacity: 0.85; }
 /* Rules one per line, the way :pr prints them. No chip behind each: the
    line break delimits them, which is all the chip was ever doing. */
 ul.rules { list-style: none; margin: 3px 0 0; padding: 0; }
@@ -154,14 +165,18 @@ details[data-fold] > summary::-webkit-details-marker { display: none; }
  * different direction. They had drifted: the chevron's slot was 14px and the
  * body's indent 20px, so a card's title and its contents missed each other by
  * two pixels, which is the worst amount to be out by. Tied together they
- * cannot drift again, and nesting needs no new number. */
-:root { --twist: 14px; }
+ * cannot drift again, and nesting needs no new number.
+ *
+ * In \`rem\`, because the slot holds a glyph and the glyph is sized by the
+ * font: fixed at 14px it would have kept its width while the text around it
+ * grew, and every indent on the page is derived from it. */
+:root { --twist: 1.08rem; }
 details[data-fold] > summary::before {
   font-family: "codicon";
   content: "\\eab6";
   display: inline-block;
   width: var(--twist);
-  font-size: 13px;
+  font-size: 1rem;
   line-height: 1;
   /* Middle, not baseline, and the font's own metrics say why: codicon is
      unitsPerEm 300 with ascender 300 and descender 0, so its baseline is the
@@ -177,7 +192,7 @@ details[data-fold] > summary::before {
   opacity: 0.75;
 }
 details[data-fold][open] > summary::before { content: "\\eab4"; }
-table.inner { border-collapse: collapse; font-size: 12px; }
+table.inner { border-collapse: collapse; font-size: 0.92rem; }
 table.inner td { padding: 1px 10px 1px 0; vertical-align: baseline; }
 .failtag { color: var(--vscode-terminal-ansiRed, #cc6666); font-weight: 600; }
 /* A card: a section with an outline that opens and closes. Every grouped
@@ -196,7 +211,7 @@ details.card > summary { padding: 5px 8px; }
    otherwise its name sits a chevron's width left of every name around it. */
 .card.bare > .csum { padding: 5px 8px 5px calc(8px + var(--twist)); }
 .cinside { padding: 2px 9px 8px calc(8px + var(--twist)); }
-.ekind { font-size: 11px; opacity: 0.65; margin-right: 6px; }
+.ekind { font-size: 0.85rem; opacity: 0.65; margin-right: 6px; }
 .ename { font-weight: 600; }
 /* On its own line: a signature and four facts do not fit beside each other
    in a pane this narrow, and wrapping them mid-phrase reads worse. Indented
@@ -248,7 +263,7 @@ details[data-fold]:not(.card) > *:not(summary) { padding-left: var(--twist); }
    palette. */
 .off {
   background: rgba(90, 140, 210, 0.3); border-radius: 3px; padding: 0 5px;
-  font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em;
+  font-size: 0.77rem; text-transform: uppercase; letter-spacing: 0.06em;
   margin-left: 5px;
 }
 .failed-what { margin: 10px 0 2px; }
@@ -637,6 +652,13 @@ function eventHtml(e, p, openByDefault, at) {
   const used = e.rules || [];
 
   let body = d ? nameFacts(d) : '';
+  // What a \`thm\` proved. A \`defthm\` gets the same row from the world, under
+  // its name; a \`thm\` writes no name, so the form ACL2 recorded is the only
+  // place it survives -- and without it the card said a proof had run and not
+  // what it was about.
+  if (e.goal) {
+    body = '<table class="inner">' + factRow('proved', e.goal) + '</table>' + body;
+  }
   // The count in parens, like every other section heading -- Events (2),
   // Rules (5). How many are disabled is not repeated here: the event's own
   // facts line above already says "N rules, M off", and each disabled rule
