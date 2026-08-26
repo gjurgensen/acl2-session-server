@@ -83,6 +83,21 @@ function dedent(text: string): string {
   return lines.map((l) => l.slice(cut)).join('\n');
 }
 
+/**
+ * A symbol as a reader writes it, from a symbol as ACL2 prints it.
+ *
+ * `|TREESET|::|ROTATE-LEFT$INLINE|` is one name. The bars are quoting, the
+ * qualifier is the package, and neither is what someone reading a sentence
+ * about the function wants to see -- every other name on this page is
+ * `rotate-left`, so this one is too. Case is folded down because ACL2 prints
+ * symbols upcased while the source that wrote them is lower.
+ */
+function symName(raw: string): string {
+  const bare = raw.replace(/\|/g, '').trim();
+  const last = bare.includes('::') ? bare.slice(bare.lastIndexOf('::') + 2) : bare;
+  return last === last.toUpperCase() ? last.toLowerCase() : last;
+}
+
 function link(target: string, text: string): string {
   return `<a href="#" class="see" data-topic="${esc(target.trim())}">${esc(text.trim())}</a>`;
 }
@@ -157,6 +172,17 @@ export function xdocHtml(src: string): DocHtml {
     holdInline(link(String(a), String(a)))
   );
   t = t.replace(/@\(url\s+([^)]*)\)/gi, (_m, a) => holdInline(esc(String(a).trim())));
+  // The world-reading directives -- `@(def foo)`, `@(def? foo)`, `@(gdef
+  // foo)`, `@(thm foo)`, `@(body foo)` and friends -- take a name and print
+  // what the world holds under it. We do not print it; naming it is what we
+  // can honestly do without a query per directive. The name itself is the
+  // useful half, so it is shown as a name rather than as the directive with
+  // its argument: ACL2 writes these package-qualified and vertical-bar
+  // quoted, and `[def? |TREESET|::|ROTATE-LEFT$INLINE|]` is not something to
+  // put in front of a reader.
+  t = t.replace(/@\(\s*(def\??|gdef|thm|body|formals|measure|srclink)\s+([^)]*)\)/gi,
+    (_m, _d, a) => holdInline(`<code class="xname">${esc(symName(String(a)))}</code>`)
+  );
   t = t.replace(/@\(\s*(\S+)\s+([^)]*)\)/g, (_m, d, a) =>
     holdInline(
       `<span class="unresolved">[${esc(`${String(d).trim()} ${String(a).trim()}`)}]</span>`
