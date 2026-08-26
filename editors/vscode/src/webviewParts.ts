@@ -210,6 +210,21 @@ details.event > summary { padding: 5px 8px; }
    \`@(tsee ...)\` is in xdoc anyway, a name in code font, rather than as a
    link that goes nowhere when clicked. */
 .doc a.see { color: inherit; text-decoration: none; }
+/* The summary on a documented card's face. Dimmer than the name and set off
+   from it, the way an event's facts are -- it is a line about the thing, not
+   the thing. Wraps rather than clipping: a short is a sentence. */
+.dsum { font-style: italic; opacity: 0.85; margin-left: 6px; }
+.dsum a.see { color: inherit; text-decoration: none; }
+.dsum a.see, .dsum code, .doclong a.see, .doclong code {
+  font-family: var(--vscode-editor-font-family), monospace; font-style: normal;
+  font-size: 0.95em; }
+.doclong a.see { color: inherit; text-decoration: none; }
+/* A rendered body. Its code blocks arrive as \`<pre>\` carrying their own
+   escaped source, uncoloured -- this page fills spans from a token map the
+   host sends, and it has none for these. Plain but readable beats blank. */
+.doclong p { margin: 4px 0; }
+.doclong pre { white-space: pre-wrap; margin: 4px 0; padding: 4px 6px;
+  background: var(--vscode-textCodeBlock-background); border-radius: 3px; }
 .doc a.see, .doc code { font-family: var(--vscode-editor-font-family), monospace;
   font-style: normal; font-size: 0.95em; }
 /* And the same for a fold nested inside one: its body lines up under its own
@@ -552,6 +567,15 @@ function eventHtml(e, p, openByDefault) {
       '<span class="meta">used (' + used.length + ')</span>',
       usedHtml(used));
   }
+  // A name that carries a topic keeps its body here rather than only in the
+  // Documented section below, which holds the topics belonging to no event.
+  // Otherwise a documented \`define\` shows its summary in the facts table with
+  // no way to read the rest.
+  if (d && d.long) {
+    body += fold(p + 'ev:' + e.name + ':documentation', false,
+      '<span class="meta">documentation</span>',
+      '<div class="doclong">' + d.long + '</div>');
+  }
 
   // The formals sit beside the name because together they are the signature,
   // which is what a reader looking a function up came for -- and for a
@@ -579,17 +603,42 @@ function eventHtml(e, p, openByDefault) {
  * documentation -- a standalone defxdoc -- has nothing above at all, which is
  * why this is reachable from both paths.
  *
- * The short and not the long. A short is one sentence and reads in place; a
- * long is a document, and there is a view for those. The name opens it.
+ * A card each, the same shape the events above use: the name and its summary
+ * on the face of it, the body inside. A topic reads like an event here --
+ * something the form produced, with a line about it and more underneath --
+ * so it is built out of the same fold rather than a list that looks like a
+ * different kind of thing.
+ *
+ * The summary is the whole of the collapsed card, and it is where the short
+ * belongs: one sentence, which is what a short is for. The body is the
+ * rendered long, which is a document.
  */
-function docsHtml(m) {
+function docsHtml(m, p) {
   const docs = m.docs || [];
   if (!docs.length) { return ''; }
-  return '<h3>Documented (' + docs.length + ')</h3><ul class="rules">' +
-    docs.map((d) =>
-      '<li><code class="lisp">' + hl(d.name) + '</code>' +
-      '<div class="doc">' + d.short + '</div></li>').join('') +
-    '</ul>';
+  return '<h3>Documented (' + docs.length + ')</h3>' +
+    docs.map((d) => docCard(d, p)).join('');
+}
+
+/**
+ * One documented topic.
+ *
+ * Closed by default however few there are, unlike an event: an event's block
+ * is a handful of facts, and a topic's is prose written to be read on its
+ * own. Several open at once is a wall of text where the reader wanted a list
+ * of what this form documents.
+ *
+ * A topic with no body gets no fold, on the same rule the events follow: a
+ * chevron that opens onto nothing is worse than no chevron. A \`defxdoc\` with
+ * a \`:short\` and no \`:long\` is an ordinary thing to write.
+ */
+function docCard(d, p) {
+  const head = '<code class="ename">' + esc(d.name) + '</code>' +
+    (d.short ? '<span class="dsum">' + d.short + '</span>' : '');
+  return d.long
+    ? fold(p + 'doc:' + d.name, false, head,
+           '<div class="einside doclong">' + d.long + '</div>', 'event')
+    : '<div class="event bare"><div class="esum">' + head + '</div></div>';
 }
 
 /**
@@ -611,7 +660,7 @@ function productiveHtml(m, p) {
     head += '<h3>Value</h3><pre>' + hl(m.value) + '</pre>';
   }
   const inner = (m.inner || []).slice().reverse();
-  if (!inner.length) { return head + docsHtml(m); }
+  if (!inner.length) { return head + docsHtml(m, p); }
   const total = m.innerTotal != null && m.innerTotal > inner.length
     ? inner.length + ' shown of ' + m.innerTotal
     : String(inner.length);
@@ -622,7 +671,7 @@ function productiveHtml(m, p) {
   const openByDefault = inner.length <= limit;
   let h = head + '<h3>Events (' + total + ')</h3>';
   h += inner.map((e) => eventHtml(e, p, openByDefault)).join('');
-  h += docsHtml(m);
+  h += docsHtml(m, p);
   const detailed = inner.filter(
     (e) => e.kind || e.time || e.proverSteps != null || (e.rules || []).length || e.detail
   ).length;

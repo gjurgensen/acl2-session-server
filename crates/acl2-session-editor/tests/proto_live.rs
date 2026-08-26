@@ -2115,7 +2115,8 @@ fn a_forms_documentation_is_findable_by_name() {
     let text = "(in-package \"ACL2\")\n\
                 (include-book \"std/util/define\" :dir :system)\n\
                 (defxdoc lone-topic :short \"documented by itself\")\n\
-                (define shown ((x natp)) :returns (y natp) :short \"a define\" (nfix x))\n\
+                (define shown ((x natp)) :returns (y natp) :short \"a define\" \
+                  :long \"<p>Described at length here.</p>\" (nfix x))\n\
                 (defun undocumented-fn (x) x)\n";
     std::fs::write(&book_path, text).expect("write book");
 
@@ -2166,6 +2167,20 @@ fn a_forms_documentation_is_findable_by_name() {
                "documented without introducing a rule: {got:?}");
     assert_eq!(short("shown").as_deref(), Some("a define"), "{got:?}");
     assert_eq!(short("undocumented-fn"), None, "an undocumented name says nothing: {got:?}");
+
+    // The body rides along with the summary, so the form view's card has
+    // something to open onto without a second round trip. A topic written
+    // with a `:short` and no `:long` sends none, which is what tells the card
+    // it has nothing to open.
+    let long = |n: &str| -> Option<String> {
+        got.iter()
+            .find(|r| r["name"].as_str().is_some_and(|s| s.eq_ignore_ascii_case(n)))
+            .and_then(|r| r["long"].as_str().map(str::to_string))
+    };
+    assert!(long("shown").is_some_and(|l| l.contains("at length")),
+            "a documented name carries its body: {got:?}");
+    assert_eq!(long("lone-topic"), None, "a short with no long sends none: {got:?}");
+    assert_eq!(long("undocumented-fn"), None, "and an undocumented name none: {got:?}");
 
     // Now the case the index cannot see by watching the include set: a topic
     // written into the file under the cursor. No dependency moves, so the

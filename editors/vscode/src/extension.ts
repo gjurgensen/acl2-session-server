@@ -3201,6 +3201,11 @@ async function followRules(s: BookSession, index: number): Promise<void> {
         // this stays one implementation rather than a second approximate one
         // inside the webview.
         short: r.short === undefined ? undefined : xdocHtml(r.short).html,
+        // The body, rendered the same way. Its code blocks arrive as `<pre>`
+        // holding their own escaped source, so an uncoloured one reads as
+        // plain text rather than as a blank -- the form view has no slot to
+        // fill them from, the way the doc view does.
+        long: r.long === undefined ? undefined : xdocHtml(r.long).html,
         symbolClass: r.symbol_class,
         measure: r.measure,
         relation: r.relation,

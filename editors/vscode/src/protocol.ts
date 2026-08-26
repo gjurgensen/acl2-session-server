@@ -389,6 +389,13 @@ export interface RulesReply {
    * before reading this drops exactly the case documentation exists for.
    */
   short?: string;
+  /**
+   * This name's xdoc body, when it has one -- raw markup, like `short`.
+   *
+   * Sent only alongside `short`, and absent when the topic is a summary and
+   * nothing more, so its presence is what says a card has anything to open.
+   */
+  long?: string;
   symbol_class?: string;
   measure?: string;
   relation?: string;

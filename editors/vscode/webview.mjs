@@ -391,7 +391,7 @@ const envelope = lift('esc', 'strip', 'causes', 'spans', 'hl', 'rat',
                       'fmtSecs', 'timeParts', 'proveSecs', 'fmtTime', 'guardNote',
                       'folds', 'foldScope', 'foldScopeIs', 'fold',
                       'factRow', 'nameFacts', 'introducedHtml', 'usedHtml',
-                      'eventHtml', 'docsHtml', 'productiveHtml', 'failureHtml', 'warningsHtml',
+                      'eventHtml', 'docCard', 'docsHtml', 'productiveHtml', 'failureHtml', 'warningsHtml',
                       'envelope');
 {
   const fn = {
@@ -981,6 +981,33 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   const lone = doc({ docs: [{ name: 'lone-topic', short: 'documented by itself' }] });
   check(/lone-topic/.test(lone), 'a form with no events still shows its topic');
   check(/documented by itself/.test(lone), 'with its summary');
+
+  // A documented topic reads as a card, the shape the events use: the name
+  // and its one-line summary on the face, the body inside.
+  const card = doc({ docs: [{ name: 'topic', short: 'a summary',
+                              long: '<p>the whole document</p>' }] });
+  check(/<details[^>]*class="event"/.test(card), 'a documented topic is a card');
+  check(/<summary>[\s\S]*topic[\s\S]*a summary[\s\S]*<\/summary>/.test(card),
+    'with the name and the summary on its face');
+  check(/the whole document/.test(card), 'and the body inside');
+  check(!/<details[^>]*\bopen\b/.test(card),
+    'closed to begin with: a body is prose, and several open at once is a wall');
+
+  // No body, no chevron -- the rule the events already follow. A `defxdoc`
+  // with a short and no long is an ordinary thing to write.
+  const bare = doc({ docs: [{ name: 'terse', short: 'all there is' }] });
+  check(!/<details/.test(bare), 'a topic with no body gets no fold');
+  check(/all there is/.test(bare), 'and still says what it is');
+
+  // A documented name that *is* an event keeps its body under its own card,
+  // rather than only in the section for topics belonging to no event.
+  const onCard = doc({
+    inner: [{ name: 'shown', kind: 'define',
+              detail: { name: 'shown', short: 'counts', long: '<p>at length</p>',
+                        runes: [] } }],
+  });
+  check(/documentation<\/span>/.test(onCard), 'an event offers its documentation');
+  check(/at length/.test(onCard), 'and it is there to open');
 
   // ...and it comes last when the form did do something as well.
   const both = doc({

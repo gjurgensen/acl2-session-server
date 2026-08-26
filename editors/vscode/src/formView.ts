@@ -132,6 +132,11 @@ export interface FormNameRules {
    * than escaping it.
    */
   short?: string;
+  /**
+   * This name's rendered xdoc body, when the topic has one. Its presence is
+   * what gives a documented name something to open onto.
+   */
+  long?: string;
   symbolClass?: string;
   measure?: string;
   relation?: string;

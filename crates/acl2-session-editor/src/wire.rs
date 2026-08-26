@@ -895,6 +895,12 @@ pub struct RulesReply {
     /// take one as a precondition for the other.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub short: Option<String>,
+    /// This name's xdoc body, when it has one -- raw markup, like `short`.
+    ///
+    /// Sent only where `short` is, since a topic is what carries both, and
+    /// absent when the topic has a summary and nothing else.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub long: Option<String>,
     pub found: bool,
     pub name: String,
     /// `:common-lisp-compliant` (guards verified), `:ideal` (logic mode,
@@ -919,6 +925,7 @@ pub struct RulesReply {
 pub fn rules_reply(name: &str, r: Option<&acl2_session::NameRules>) -> RulesReply {
     match r {
         None => RulesReply {
+            long: None,
             found: false,
             name: name.to_string(),
             symbol_class: None,
@@ -931,6 +938,7 @@ pub fn rules_reply(name: &str, r: Option<&acl2_session::NameRules>) -> RulesRepl
             short: None,
         },
         Some(r) => RulesReply {
+            long: None,
             found: true,
             name: r.name.clone(),
             symbol_class: r.symbol_class.clone(),
