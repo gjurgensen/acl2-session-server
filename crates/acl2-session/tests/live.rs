@@ -513,6 +513,89 @@ fn each_event_carries_its_own_inductions() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A *failed* proof carries the induction it tried, which is the case that
+/// matters most: the panel is being read because something went wrong.
+///
+/// The record is filed when ACL2 picks a scheme, not when the proof works out,
+/// so the two are independent. Measured across the whole range: a theorem
+/// false for improper lists, one that hits the induction depth limit, a
+/// translate error that never reached the prover, and a proof that needed no
+/// induction. The last two record nothing, and that is right -- no scheme was
+/// ever chosen.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_failed_proof_still_reports_what_it_inducted_on() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("induction-failed");
+    let book = dir.join("demo.lisp");
+    write(&book, &["(in-package \"ACL2\")",
+                   "(defun d-app (x y) (if (consp x) (cons (car x) (d-app (cdr x) y)) y))",
+                   "(defun d-rev (x) (if (consp x) (d-app (d-rev (cdr x)) (cons (car x) nil)) nil))",
+                   "(set-induction-depth-limit 1)",
+                   "(defthm d-tl-rev (true-listp (d-rev x)))"]);
+    let mut b = Book::open(&acl2, &book).expect("open");
+    let o = b.sync(None, D).expect("sync");
+    let f = o.failed.expect("the depth limit stops this proof");
+    assert_eq!(f.status, acl2_session::sync::Status::ProofFailure, "{f:?}");
+
+    // The failing event is at index 0 -- failing is what puts it there.
+    let e = &f.inner[0];
+    assert_eq!(e.name, "d-tl-rev", "{:?}", f.inner);
+    // A list, kept in ACL2's own printing -- an event can abort for more than
+    // one reason.
+    assert_eq!(
+        e.abort_causes.as_deref(),
+        Some("(induction-depth-limit-exceeded)"),
+        "the classic failure, and the one a reader most wants the scheme for: {e:?}"
+    );
+    assert_eq!(e.induction.len(), 1, "and it still says what it inducted on: {e:?}");
+    assert_eq!(e.induction[0].goal, "*1");
+    assert_eq!(e.induction[0].suggested, "(d-rev x)");
+    assert_eq!(e.induction[0].runes, vec!["(:induction d-rev)"]);
+    assert!(e.induction[0].scheme.contains("(:p x)"), "{}", e.induction[0].scheme);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Nothing is invented for a form that chose no scheme.
+///
+/// The pair that makes the rule above a rule rather than a coincidence: a
+/// record exists exactly when ACL2 picked a scheme. A form ACL2 refused before
+/// any proof ran has none, and neither does a proof that simply did not need
+/// to induct -- and neither is a gap in the read.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_form_that_chose_no_scheme_reports_none() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("induction-absent");
+    let book = dir.join("demo.lisp");
+    write(&book, &["(in-package \"ACL2\")",
+                   "(defthm n-car-cons (equal (car (cons a b)) a) :rule-classes nil)"]);
+    let mut b = Book::open(&acl2, &book).expect("open");
+    let o = b.sync(None, D).expect("sync");
+    assert!(o.failed.is_none(), "{:?}", o.failed);
+    let u = o.admitted.last().expect("the defthm");
+    assert!(
+        u.inner.iter().all(|e| e.induction.is_empty()),
+        "a proof that needed no induction reports none: {:?}",
+        u.inner
+    );
+
+    // And a form the prover never saw at all.
+    write(&book, &["(in-package \"ACL2\")",
+                   "(defthm n-bogus (equal (no-such-function-here x) x))"]);
+    let o = b.sync(None, D).expect("sync");
+    let f = o.failed.expect("no-such-function-here does not translate");
+    assert_eq!(f.status, acl2_session::sync::Status::Rejected, "{f:?}");
+    assert!(
+        f.inner.iter().all(|e| e.induction.is_empty()),
+        "nothing is invented for a form that never reached the prover: {:?}",
+        f.inner
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The image reports what it can do, and the version string cannot say it.
 ///
 /// The second assertion is the point. `acl2-version` reads `"ACL2 Version
