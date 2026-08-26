@@ -54,6 +54,8 @@ export interface InnerEventWire {
   prover_steps?: number;
   rules?: string[];
   abort_causes?: string;
+  hint_events?: string[];
+  splitter_rules?: string[];
 }
 
 /**

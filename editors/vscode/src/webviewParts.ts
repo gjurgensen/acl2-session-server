@@ -676,6 +676,39 @@ function usedHtml(rules) {
     '</ul>';
 }
 
+/**
+ * What the failing form's proof drew on: used, supplied, and what split it.
+ *
+ * ACL2's own name for this block, and its own grouping -- \`print-summary\`
+ * calls \`print-rules-and-hint-events-summary\`, which prints runes, then hint
+ * events, then splitter rules, in that order. One fold rather than three
+ * headings, and not called "Rules" because the event cards already carry two
+ * rune lists (\`introduced\`, \`used\`) and a third top-level one under that name
+ * says nothing about which sense it means.
+ *
+ * **Sourced from the failing event first, and that is the point.** The
+ * form-level fields come from \`get-event-data\` on the *outer* event, which
+ * ACL2 leaves empty for every compound form -- so a failing \`define\` showed no
+ * rules, no hints and no splitters at all, while its events had all three.
+ * \`failureHtml\` draws no card for the failing event, so this section is that
+ * card flattened, and it reads the event's own data. The form-level value is
+ * the fallback, for a failure with no identifiable event to attribute to.
+ */
+function summaryHtml(m, bad, p) {
+  const pick = (fromEvent, fromForm) =>
+    (fromEvent && fromEvent.length ? fromEvent : fromForm) || [];
+  const used = pick(bad && bad.rules, m.rules);
+  const supplied = pick(bad && bad.hintEvents, m.hintEvents);
+  const splits = pick(bad && bad.splitterRules, m.splitterRules);
+  const total = used.length + supplied.length + splits.length;
+  if (!total) { return ''; }
+  const part = (label, lst) => lst.length
+    ? '<div class="meta">' + label + ' (' + lst.length + ')</div>' + usedHtml(lst)
+    : '';
+  return fold(p + 'summary', 'summary', true, '<h3>Summary (' + total + ')</h3>',
+    part('used', used) + part('supplied', supplied) + part('splits', splits));
+}
+
 /** How many of a clique's names fit on its title line before the count. */
 const TITLE_NAMES = 3;
 
@@ -793,6 +826,9 @@ function eventHtml(e, p, openByDefault, at) {
     facts.push((e.inductions.length === 1 ? 'inducted' :
                 e.inductions.length + ' inductions'));
   }
+  const supplied = e.hintEvents || [];
+  const splits = e.splitterRules || [];
+  if (supplied.length) { facts.push('hinted'); }
   const used = e.rules || [];
 
   let body = d ? nameFacts(d) : '';
@@ -837,6 +873,21 @@ function eventHtml(e, p, openByDefault, at) {
     body += fold(p + 'ev:' + key + ':used', 'ev:used', false,
       '<span class="meta">used (' + used.length + ')</span>',
       usedHtml(used));
+  }
+  // What the author handed the prover, and what made it branch. Both are
+  // short -- one or two entries where \`used\` is dozens -- and both are read
+  // per event because ACL2 reports neither on the outer event of a compound
+  // form. Open by default for that reason: a fold that is nearly always
+  // absent, and tiny when present, costs nothing open and is easy to miss shut.
+  if (supplied.length) {
+    body += fold(p + 'ev:' + key + ':supplied', 'ev:supplied', true,
+      '<span class="meta">supplied (' + supplied.length + ')</span>',
+      usedHtml(supplied));
+  }
+  if (splits.length) {
+    body += fold(p + 'ev:' + key + ':splits', 'ev:splits', true,
+      '<span class="meta">splits (' + splits.length + ')</span>',
+      usedHtml(splits));
   }
   // Boxed, and labelled on the line the chevron is on. The summary used to be
   // the short itself, which is a block -- so it began on the line *after* the
@@ -1083,16 +1134,7 @@ function failureHtml(m, p, on, goals) {
     h += fold(p + 'inducted', 'failed:inducted', true,
       '<h3>Induction (' + failedInd.length + ')</h3>', inductionHtml(failedInd));
   }
-  if ((m.rules || []).length) {
-    h += fold(p + 'rules', 'rules', true, '<h3>Rules (' + m.rules.length + ')</h3>',
-      usedHtml(m.rules));
-  }
-  if ((m.hintEvents || []).length) {
-    h += '<h3>Hints that fired</h3>' + usedHtml(m.hintEvents);
-  }
-  if ((m.splitterRules || []).length) {
-    h += '<h3>Splitter rules</h3>' + usedHtml(m.splitterRules);
-  }
+  h += summaryHtml(m, bad, p);
   if (m.time) { h += '<h3>Time</h3><p class="meta">' + fmtTime(m.time) + '</p>'; }
 
   if (m.errorLine || m.abortCause) {

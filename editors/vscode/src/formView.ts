@@ -48,6 +48,10 @@ export interface FormInnerEvent {
   time?: string;
   proverSteps?: number;
   rules?: string[];
+  /** `(:use l)`, `(:by t)`, `(:clause-processor f)` -- and only those three. */
+  hintEvents?: string[];
+  /** Rules that split this event's proof into cases. */
+  splitterRules?: string[];
   abortCauses?: string;
   /**
    * What this event left in the world, if it is known.
@@ -271,6 +275,8 @@ export function highlightable(m: FormEnvelope): string[] {
     ...(m.hintEvents ?? []),
     ...(m.splitterRules ?? []),
     ...(m.inner ?? []).flatMap((e) => e.rules ?? []),
+    ...(m.inner ?? []).flatMap((e) => e.hintEvents ?? []),
+    ...(m.inner ?? []).flatMap((e) => e.splitterRules ?? []),
   ];
 }
 

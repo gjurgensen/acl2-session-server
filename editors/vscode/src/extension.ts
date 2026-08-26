@@ -3436,6 +3436,8 @@ function toPanelEnvelope(e: Envelope): FormEnvelope {
     time: i.time,
     proverSteps: i.prover_steps,
     rules: i.rules ?? [],
+    hintEvents: i.hint_events ?? [],
+    splitterRules: i.splitter_rules ?? [],
     abortCauses: i.abort_causes,
   }));
   return {

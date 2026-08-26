@@ -474,6 +474,7 @@ const envelope = lift('esc', 'strip', 'causes', 'spans', 'hl', 'rat',
                       'folds', 'foldMemory', 'foldOrder', 'foldScope', 'FOLD_SCOPES',
                       'kindFolds', 'foldKindsAre', 'foldsForget', 'foldScopeIs', 'fold',
                       'factRow', 'nameFacts', 'introducedHtml', 'inductionHtml', 'usedHtml',
+                      'summaryHtml',
                       'withCode', 'TITLE_NAMES', 'cliqueTitle', 'memberHtml', 'eventHtml', 'docCard', 'docsHtml', 'productiveHtml', 'failureHtml', 'warningsHtml',
                       'envelope');
 {
@@ -611,7 +612,8 @@ check(!pages[1][1].includes('Introduced ('),
   const at = (t) => h.indexOf(t);
   check(at('true-listp-of-app') < at('Checkpoints'),
         'a failure names what failed before it shows a single goal');
-  check(at('Checkpoints') < at('Rules ('), 'the goals come before the rules');
+  check(at('Checkpoints') < at('Summary ('),
+        'the goals come before what the proof drew on');
   check(at('Rules (') < at('abort cause'), 'and the cause comes after both');
   check(at('abort cause') < at('Admitted before the failure'),
         'while what already worked is last of all');
@@ -1028,7 +1030,7 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   check(h.includes('(d-app x nil)') && h.includes('(:induction d-app)'),
         'with the suggesting term and the runes behind it');
   check(h.indexOf('Checkpoints (') < h.indexOf('Induction (') &&
-        h.indexOf('Induction (') < h.indexOf('Rules ('),
+        h.indexOf('Induction (') < h.indexOf('Summary ('),
         'directly under the checkpoints, whose *1 names it explains');
 
   // A form that failed before the prover ran has no scheme and must not
@@ -1039,6 +1041,72 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   };
   check(!envelope(rejected, 'g-').includes('Induction ('),
         'and a form that never reached the prover grows no section for one');
+}
+
+// ---- hints and splits sit on the event that had them ----
+//
+// Read per event because ACL2 reports neither on the outer event of a
+// compound form: a progn of hinted theorems reports no hint events at all, so
+// a form-level list would be empty for most real code.
+{
+  globalThis.toks = {};
+  const h = envelope({
+    checkpoints: [], rules: [], inner: [
+      { name: 'p-one', kind: 'defthm', hintEvents: ['(:use p-assoc)'] },
+      { name: 'p-two', kind: 'defthm', hintEvents: ['(:by p-nil)'],
+        splitterRules: ['(:rewrite p-split)'] },
+      { name: 'p-three', kind: 'defthm' },
+    ],
+  }, 'g-');
+
+  check(h.includes('supplied (1)'), 'an event shows what its proof was handed');
+  check(h.includes('splits (1)'), 'and what made it branch');
+  check(h.includes('data-fold="g-ev:p-one:supplied"') &&
+        h.includes('data-fold="g-ev:p-two:supplied"'),
+        'keyed by the event, so one event’s hints are not another’s');
+  check(h.split('supplied (').length === 3 && h.split('splits (').length === 2,
+        'and an event with neither grows no fold');
+  // Each event's own: p-one was handed a :use, p-two a :by.
+  const one = h.indexOf('g-ev:p-one:supplied');
+  const two = h.indexOf('g-ev:p-two:supplied');
+  const first = h.slice(Math.min(one, two), Math.max(one, two));
+  const second = h.slice(Math.max(one, two));
+  const [oneP, twoP] = one < two ? [first, second] : [second, first];
+  check(oneP.includes('(:use p-assoc)') && !oneP.includes('(:by p-nil)'), 'p-one keeps its own');
+  check(twoP.includes('(:by p-nil)'), 'and p-two keeps its own');
+}
+
+// ---- the failing form's Summary comes from the failing event ----
+//
+// The regression this exists for: the three sections it replaces read
+// form-level fields, and `get-event-data` leaves those empty for every
+// compound form -- so a failing `define` showed no rules, no hints and no
+// splitters while its own event had all three.
+{
+  globalThis.toks = {};
+  const summaryHtml = lift('esc', 'strip', 'spans', 'hl', 'folds', 'foldMemory', 'foldOrder',
+                           'foldScope', 'FOLD_SCOPES', 'kindFolds', 'foldKindsAre',
+                           'foldsForget', 'foldScopeIs', 'fold', 'usedHtml', 'summaryHtml');
+  // A compound failure: nothing at form level, everything on the event.
+  const bad = { name: 'd-thm', abortCauses: '(empty-clause)',
+                rules: ['(:definition d-app)'], hintEvents: ['(:use d-assoc)'],
+                splitterRules: ['(:rewrite d-split)'] };
+  const compound = summaryHtml({ rules: [], hintEvents: [], splitterRules: [] }, bad, 'g-');
+  check(compound.includes('Summary (3)'), 'the section counts all three parts');
+  check(compound.includes('used (1)') && compound.includes('supplied (1)') &&
+        compound.includes('splits (1)'), 'and labels each part');
+  check(compound.includes('(:use d-assoc)'),
+        'sourced from the failing event, which is where a compound form keeps it');
+
+  // A bare theorem: the form-level values are the fallback and still work.
+  const bare = summaryHtml({ rules: ['(:definition b-app)'], hintEvents: [], splitterRules: [] },
+                           undefined, 'g-');
+  check(bare.includes('Summary (1)') && bare.includes('used (1)'),
+        'with no identifiable event, the form-level values still render');
+
+  // Nothing at all draws nothing.
+  check(summaryHtml({ rules: [], hintEvents: [], splitterRules: [] }, undefined, 'g-') === '',
+        'and a form with none of the three grows no section');
 }
 
 // ---- a cut scheme says which cut, because there are two ----
