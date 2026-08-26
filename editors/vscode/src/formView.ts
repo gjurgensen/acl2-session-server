@@ -121,7 +121,16 @@ export interface FormNameRules {
   name: string;
   /** Whether this name introduced anything. A name may be documented and not. */
   found?: boolean;
-  /** This name's xdoc summary, when a topic of this name exists. */
+  /**
+   * This name's xdoc summary, when a topic of this name exists -- as an HTML
+   * fragment, already rendered and escaped by `xdocHtml`, not as the raw
+   * markup the wire carries.
+   *
+   * Rendered before it gets here because a short is xdoc markup like any
+   * other body: most of them carry `@('...')`, `@(see ...)` or `@(tsee ...)`,
+   * which a reader should not be looking at. The page inserts this rather
+   * than escaping it.
+   */
   short?: string;
   symbolClass?: string;
   measure?: string;

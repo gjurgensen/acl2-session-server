@@ -3192,7 +3192,15 @@ async function followRules(s: BookSession, index: number): Promise<void> {
       .map((r) => ({
         name: r.name,
         found: r.found,
-        short: r.short,
+        // Rendered here rather than in the page: a short is xdoc markup, and
+        // 59% of them carry some (measured over 2,067 topics under `std/top`
+        // and `centaur/fty/top`) -- overwhelmingly `@('...')`, `@(see ...)`,
+        // `@(tsee ...)` and `<see topic=...>`. Shown raw, the reader gets
+        // `@(tsee foo)` in the middle of a sentence. `xdocHtml` is the
+        // renderer the doc view already uses, and it escapes as it goes, so
+        // this stays one implementation rather than a second approximate one
+        // inside the webview.
+        short: r.short === undefined ? undefined : xdocHtml(r.short).html,
         symbolClass: r.symbol_class,
         measure: r.measure,
         relation: r.relation,

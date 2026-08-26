@@ -203,6 +203,15 @@ details.event > summary { padding: 5px 8px; }
 /* An xdoc short: the one thing on this page a person wrote, so it reads as
    prose rather than as a term -- no monospace, and it wraps. */
 .doc { font-style: italic; opacity: 0.85; margin: 1px 0 3px; }
+/* A short is xdoc markup, rendered by the same pass the doc view uses, so it
+   arrives carrying whatever that pass emits -- including topic links. This
+   page has nothing to open one with: the doc view listens for a click on
+   \`a.see\`, and this is a different webview. So they read as what
+   \`@(tsee ...)\` is in xdoc anyway, a name in code font, rather than as a
+   link that goes nowhere when clicked. */
+.doc a.see { color: inherit; text-decoration: none; }
+.doc a.see, .doc code { font-family: var(--vscode-editor-font-family), monospace;
+  font-style: normal; font-size: 0.95em; }
 /* And the same for a fold nested inside one: its body lines up under its own
    label, not under its own chevron. \`.einside\` says this for itself, having a
    padding on all four sides. */
@@ -447,7 +456,7 @@ function nameFacts(d) {
   // only row written by a person -- the rest is what ACL2 made of the form.
   if (d.short) {
     rows += '<tr><td class="meta">documented</td><td class="doc">' +
-      esc(d.short) + '</td></tr>';
+      d.short + '</td></tr>';
   }
   if (d.guard) { rows += factRow('guard', d.guard); }
   if (d.measure) { rows += factRow('measure', d.measure); }
@@ -579,7 +588,7 @@ function docsHtml(m) {
   return '<h3>Documented (' + docs.length + ')</h3><ul class="rules">' +
     docs.map((d) =>
       '<li><code class="lisp">' + hl(d.name) + '</code>' +
-      '<div class="doc">' + esc(d.short) + '</div></li>').join('') +
+      '<div class="doc">' + d.short + '</div></li>').join('') +
     '</ul>';
 }
 

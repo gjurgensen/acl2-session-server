@@ -986,10 +986,14 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   check(!/Documented/.test(doc({ inner: [{ name: 'ev' }], docs: [] })),
     'no topics, no section');
 
-  // The short is xdoc markup, which routinely carries angle brackets, and
-  // this is a page.
-  check(!/<script>/.test(doc({ docs: [{ name: 'x', short: '<script>a</script>' }] })),
-    'a summary cannot carry markup into the page');
+  // A short arrives as *rendered* HTML: xdoc markup is turned into a page
+  // fragment by the host, in the same pass the doc view uses, because 59% of
+  // real shorts carry markup and raw ones read as `@(tsee foo)` mid-sentence.
+  // So the page inserts rather than escapes -- and what it inserts has to
+  // survive.
+  const rendered = doc({ docs: [{ name: 'x', short: 'about <code>foo</code>' }] });
+  check(/<code>foo<\/code>/.test(rendered), 'rendered markup reaches the page');
+  check(!/&lt;code&gt;/.test(rendered), 'and is not escaped a second time');
 }
 
 // ---- a failure the extension can name, it can also offer to fix ----
