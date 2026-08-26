@@ -83,6 +83,14 @@ export interface Envelope {
    * topic's name appears.
    */
   names?: string[];
+  /**
+   * The rest of any recursion clique this unit's events belong to.
+   *
+   * ACL2 records a whole clique as one event, keyed under the first
+   * definition in it, so the other members appear in no `inner` entry. They
+   * are read from the world's `recursivep` instead.
+   */
+  clique?: string[];
   inner?: InnerEventWire[];
   inner_total?: number;
   n_top?: number;

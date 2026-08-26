@@ -2211,3 +2211,68 @@ fn a_forms_documentation_is_findable_by_name() {
     assert_eq!(after.first().and_then(|r| r["short"].as_str()), Some("written just now"),
                "documentation written into this file is findable at once: {after:?}");
 }
+
+/// A recursion clique reaches the client whole, even where the source split
+/// cannot read it.
+///
+/// ACL2 records a clique as one event keyed under its first definition, so the
+/// members after that one are named in no `inner` entry. The form view gives
+/// each member a row of the event's card, and it needs their names to ask for
+/// their records -- which is what `clique` carries.
+///
+/// `defuns` is the case that needs it. A `mutual-recursion` leaves its `defun`s
+/// in place -- ACL2's own documentation says that is why the macro exists, so
+/// that Emacs `tags` can find them -- and the split reads the names from those.
+/// A `defuns` writes bare tuples, the split reads nothing, and without the
+/// world's `recursivep` the second function would be invisible.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_clique_carries_the_members_no_event_names() {
+    let Some(acl2) = acl2() else {
+        eprintln!("ACL2 not set; skipping");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("acl2-editord-clq-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let book_path: PathBuf = dir.join("clq.lisp");
+    let text = "(in-package \"ACL2\")\n\
+                (mutual-recursion\n\
+                \x20 (defun zz-m1 (x) (if (consp x) (zz-m2 (cdr x)) nil))\n\
+                \x20 (defun zz-m2 (x) (if (consp x) (zz-m1 (cdr x)) nil)))\n\
+                (defuns (zz-u1 (x) (if (consp x) (zz-u2 (cdr x)) nil))\n\
+                \x20       (zz-u2 (x) (if (consp x) (zz-u1 (cdr x)) nil)))\n";
+    std::fs::write(&book_path, text).expect("write book");
+
+    let mut d = Daemon::start(&acl2);
+    let opened = d.request("open", json!({ "path": book_path.to_str().unwrap() }));
+    let book = opened["book"].as_str().expect("book id").to_string();
+    d.notify("update", json!({ "book": book, "text": text, "revision": 1 }));
+    let events = d.events_until_settled();
+
+    let unit = |i: usize| -> Value {
+        events.iter().filter(|(m, _)| m == "unit").map(|(_, p)| p.clone())
+            .find(|p| p["index"] == i).unwrap_or_else(|| panic!("no unit {i}"))
+    };
+    let strs = |v: &Value| -> Vec<String> {
+        v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .unwrap_or_default()
+    };
+
+    for (i, first, rest) in [(1usize, "zz-m1", "zz-m2"), (2, "zz-u1", "zz-u2")] {
+        let u = unit(i);
+        let inner = u["inner"].as_array().cloned().unwrap_or_default();
+        assert_eq!(inner.len(), 1, "a clique is one event: {u}");
+        assert!(inner[0]["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(first)),
+                "keyed under the first definition: {u}");
+        assert_eq!(strs(&u["clique"]), vec![rest.to_string()],
+                   "and the rest of the clique rides along: {u}");
+    }
+
+    // The point of carrying them: their records can be asked for by name, and
+    // it is the *second* member that has no other way to be known.
+    let r = d.request("rules", json!({ "book": book, "names": ["zz-u2"] }))["rules"]
+        .as_array().cloned().unwrap_or_default();
+    assert!(r.first().is_some_and(|x| x["found"] == json!(true)),
+            "the member no event named still has a record: {r:?}");
+}

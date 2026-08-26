@@ -391,7 +391,7 @@ const envelope = lift('esc', 'strip', 'causes', 'spans', 'hl', 'rat',
                       'fmtSecs', 'timeParts', 'proveSecs', 'fmtTime', 'guardNote',
                       'folds', 'foldScope', 'foldScopeIs', 'fold',
                       'factRow', 'nameFacts', 'introducedHtml', 'usedHtml',
-                      'withCode', 'eventHtml', 'docCard', 'docsHtml', 'productiveHtml', 'failureHtml', 'warningsHtml',
+                      'withCode', 'memberHtml', 'eventHtml', 'docCard', 'docsHtml', 'productiveHtml', 'failureHtml', 'warningsHtml',
                       'envelope');
 {
   const fn = {
@@ -946,6 +946,40 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   check(pinnedIndex(at(3, 9), units) === undefined,
         'a position merely *inside* a form is not that form starting -- let go');
   check(pinnedIndex(at(4, 1), units) === undefined, 'and neither is a line with no form on it');
+}
+
+// ---- a clique is one event, and every function in it has a record ----
+{
+  const mem = (n) => ({ name: n, formals: '(x)', measure: '(acl2-count x)',
+    symbolClass: ':common-lisp-compliant',
+    runes: [{ rune: '(:definition ' + n + ')', class: ':definition',
+              enabled: true, fields: [] }] });
+  const clique = envelope({ checkpoints: [], rules: [], inner: [{
+    name: 'zz-m1', kind: 'mutual-recursion', proverSteps: 220,
+    rules: ['(:definition zp)'], detail: mem('zz-m1'),
+    members: [mem('zz-m1'), mem('zz-m2')],
+  }] }, 'p:');
+
+  // ACL2 records the whole clique as one event keyed under its first
+  // definition. Naming that one reads as though the form defined it alone,
+  // and the others' rules appeared nowhere at all -- half the rules a
+  // two-function clique writes were simply missing from the page.
+  check(/zz-m1, zz-m2/.test(clique), 'the card names every function in the clique');
+  check(/:definition zz-m2/.test(clique), "and the last one's rules are there too");
+  check(/introduced \(1\)[\s\S]*introduced \(1\)/.test(clique),
+    'each member introducing its own');
+
+  // The termination proof is the clique's, not any member's: one argument
+  // admits all of them, so it stays on the event above rather than being
+  // copied under each.
+  check(clique.split('(:definition zp)').length === 2,
+    'the proof it used is said once, by the event');
+
+  // The record filed under the event's own name is the first member's, and
+  // that member has a row of its own now -- so the event must not also show
+  // it as though it were the event's.
+  check(clique.split('acl2-count').length === 3,
+    'the first member is a row, not the card and a row both');
 }
 
 // ---- an event that did not define the name shows none of its record ----

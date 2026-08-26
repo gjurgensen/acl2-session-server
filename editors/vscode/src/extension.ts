@@ -3181,7 +3181,15 @@ async function followRules(s: BookSession, index: number): Promise<void> {
   // and documentation is the case that tells them apart: a standalone
   // `defxdoc` records no event at all, so asking only about `inner` would
   // never ask about the one name a form whose purpose is documentation has.
-  const all = [...(e?.inner ?? []).map((i) => i.name), ...(e?.names ?? [])]
+  const all = [
+    ...(e?.inner ?? []).map((i) => i.name),
+    ...(e?.names ?? []),
+    // The clique members ACL2 recorded no event for. `names` covers them when
+    // the split could read them -- a `mutual-recursion` leaves its `defun`s in
+    // place, so it can -- but a `defuns` writes bare tuples and it cannot, so
+    // without this the members of one have no record to show.
+    ...(e?.clique ?? []),
+  ]
     .filter((n) => n)
     .filter((n, i, xs) => xs.indexOf(n) === i);
   if (!all.length) {
@@ -3316,6 +3324,7 @@ function toPanelEnvelope(e: Envelope): FormEnvelope {
     preRevert: e.pre_revert ?? false,
     forced: e.forced ?? false,
     inner,
+    clique: e.clique ?? [],
     innerTotal: e.inner_total ?? inner.length,
     nTop: e.n_top ?? 0,
     nSub: e.n_sub ?? 0,

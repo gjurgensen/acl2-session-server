@@ -729,6 +729,16 @@ pub struct UnitEvent {
     /// whose whole purpose is documentation looks empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub names: Vec<String>,
+    /// The rest of any recursion clique this unit's events belong to.
+    ///
+    /// ACL2 records a whole clique as *one* event, keyed under the first
+    /// definition in it -- `event-data-name` picks that deliberately -- so
+    /// the other members appear in no `inner` entry. Asking the world for
+    /// `recursivep` is the only way to learn they exist, and without them a
+    /// `mutual-recursion` reads as though it defined one function and wrote
+    /// only that one's rules.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub clique: Vec<String>,
     /// Events inside a compound unit (encapsulate, progn, defines ...).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub inner: Vec<InnerEventWire>,
@@ -1048,6 +1058,7 @@ pub fn unit_admitted(book: &str, revision: u64, u: &UnitReport) -> UnitEvent {
         pre_revert: false,
         forced: false,
         names: u.names.clone(),
+        clique: u.clique.clone(),
         inner: inner_wire(&u.inner),
         inner_total: u.inner_total,
         n_top: 0,
@@ -1076,6 +1087,9 @@ pub fn unit_failure(
 ) -> UnitEvent {
     let checkpoints = checkpoint_wire(&f.checkpoints);
     UnitEvent {
+        // A failure reports no clique: the form did not get in, so the world
+        // has no recursivep to ask about.
+        clique: Vec::new(),
         book: book.to_string(),
         revision,
         index: f.index,

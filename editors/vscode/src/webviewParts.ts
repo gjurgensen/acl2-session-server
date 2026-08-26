@@ -522,6 +522,44 @@ function usedHtml(rules) {
 }
 
 /**
+ * One function of a recursion clique, as a block inside its event's.
+ *
+ * Built like an event card and not like one: a member is not an event -- ACL2
+ * recorded one for the clique, not one apiece -- so it has no kind, no time
+ * and no steps of its own. What it does have is its own record: its
+ * signature, its guard and measure, and the rules it wrote, which is the half
+ * a clique event used to lose.
+ *
+ * The proof is the clique's and stays on the event above: one termination
+ * argument admits all of them, so a copy under each member would be the same
+ * list said twice over.
+ */
+function memberHtml(d, p) {
+  const runes = d.runes || [];
+  const off = runes.filter((u) => u.enabled === false).length;
+  const facts = [];
+  const note = guardNote(d.symbolClass);
+  if (note) { facts.push(note); }
+  if (runes.length) {
+    facts.push(runes.length + ' rule' + (runes.length === 1 ? '' : 's') +
+               (off ? ', ' + off + ' off' : ''));
+  }
+  const head = '<code class="ename">' + esc(d.name) + '</code>' +
+    (d.formals ? ' <code class="lisp">' + hl(d.formals) + '</code>' : '') +
+    (facts.length ? '<span class="efacts meta">' + facts.join(' \u00b7 ') + '</span>' : '');
+  let body = nameFacts(d);
+  if (runes.length) {
+    body += fold(p + 'mem:' + d.name + ':introduced', false,
+      '<span class="meta">introduced (' + runes.length + ')</span>',
+      introducedHtml(d));
+  }
+  return body
+    ? fold(p + 'mem:' + d.name, false, head,
+           '<div class="einside">' + body + '</div>', 'event')
+    : '<div class="event bare"><div class="esum">' + head + '</div></div>';
+}
+
+/**
  * One event a form recorded, as a block of its own.
  *
  * The probe reads event-data-fal, which records *every* event, so a plain
@@ -545,7 +583,12 @@ function eventHtml(e, p, openByDefault) {
   // Reported here, all of that is the defun's card said a second time under a
   // heading that did none of it. What belongs to this event is what its own
   // proof consumed -- the used fold -- and what that cost.
-  const d = /^verify-guards\+?$/i.test(e.kind || '') ? undefined : e.detail;
+  const members = e.members || [];
+  // \`verify-guards\` proves about a name it did not define, and a clique event
+  // has a row per member below -- either way the record filed under this
+  // event's own name is not this card's to show.
+  const d = (/^verify-guards\+?$/i.test(e.kind || '') || members.length)
+    ? undefined : e.detail;
   // A probed event has *something* -- kind, time, rules. Saying "no steps"
   // where the probe never reached is a claim we cannot make, so a blank cell
   // keeps meaning "not looked at".
@@ -579,6 +622,11 @@ function eventHtml(e, p, openByDefault) {
       '<span class="meta">introduced (' + runes.length + ')</span>',
       introducedHtml(d));
   }
+  // One row per function the clique admitted. ACL2 records the whole clique
+  // as a single event keyed under its first definition, so without this a
+  // \`mutual-recursion\` read as though it had defined that one function and
+  // written only its rules -- the others' rules appeared nowhere at all.
+  body += members.map((mem) => memberHtml(mem, p + 'ev:' + e.name + ':')).join('');
   if (used.length) {
     body += fold(p + 'ev:' + e.name + ':used', false,
       '<span class="meta">used (' + used.length + ')</span>',
@@ -613,8 +661,16 @@ function eventHtml(e, p, openByDefault) {
   // The formals sit beside the name because together they are the signature,
   // which is what a reader looking a function up came for -- and for a
   // macro-generated one there is nothing in the buffer to read it off.
+  // A clique event is keyed under its first definition, but it admitted all
+  // of them, and naming one of the several reads as though the form defined
+  // that one. Every member, so the collapsed card says what the form did --
+  // uncapped, because a clique of ten is ten functions and a list that
+  // stopped at three would look complete.
+  const title = members.length
+    ? members.map((mem) => esc(mem.name)).join(', ')
+    : esc(e.name);
   const head = '<span class="ekind">' + esc(e.kind || '') + '</span>' +
-    '<code class="ename">' + esc(e.name) + '</code>' +
+    '<code class="ename">' + title + '</code>' +
     (d && d.formals ? ' <code class="lisp">' + hl(d.formals) + '</code>' : '') +
     causes(e.abortCauses || '')
       .map((c) => ' <span class="failtag">' + esc(c) + '</span>').join('') +

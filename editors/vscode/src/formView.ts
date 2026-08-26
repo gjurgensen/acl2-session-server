@@ -89,6 +89,14 @@ export interface FormEnvelope {
   forced?: boolean;
   inner?: FormInnerEvent[];
   innerTotal?: number;
+  /**
+   * The rest of any recursion clique this form's events belong to.
+   *
+   * ACL2 records a clique as one event under the first definition in it, so
+   * the members after that one appear in no event. The page uses these to
+   * give a clique event a row per member.
+   */
+  clique?: string[];
   nTop?: number;
   nSub?: number;
 }
@@ -657,6 +665,15 @@ window.addEventListener('message', (ev) => {
 
 
 /**
+ * Events that record a whole recursion clique as one.
+ *
+ * \`mutual-recursion\` is a macro over \`defuns\`, and ACL2 records whichever
+ * the source wrote. Both admit several functions under one event, keyed under
+ * the first definition in it -- \`event-data-name\` picks that deliberately.
+ */
+const CLIQUE_KINDS = /^(defuns|mutual-recursion|defuns-std)$/i;
+
+/**
  * Hang what each name turned out to be on the event that introduced it.
  *
  * The two arrive separately -- the envelope with the model, the scrape a
@@ -670,6 +687,13 @@ function withDetail(m) {
   if (!ruleEntries.length) { return m; }
   const by = new Map(ruleEntries.map((e) => [String(e.name).toLowerCase(), e]));
   const named = new Set(inner.map((e) => String(e.name).toLowerCase()));
+  // A clique is recorded as one event under its first definition, so the
+  // members after that one are named in no event. They get a row of the
+  // event's own card, which means their records are wanted here and their
+  // names count as named -- otherwise a documented member would be filed
+  // under "topics belonging to no event", which is not where it belongs.
+  const rest = (m.clique || []).map((n) => String(n));
+  for (const n of rest) { named.add(n.toLowerCase()); }
   // Documentation belonging to no event of this form. A standalone defxdoc
   // records no event at all -- it writes a table -- so its topic matches
   // nothing above and would vanish if this only ever decorated events. It is
@@ -680,7 +704,14 @@ function withDetail(m) {
   );
   return { ...m, docs, inner: inner.map((e) => {
     const d = by.get(String(e.name).toLowerCase());
-    return d ? { ...e, detail: d } : e;
+    const withD = d ? { ...e, detail: d } : e;
+    if (!CLIQUE_KINDS.test(String(e.kind || ''))) { return withD; }
+    // The event's own name first: it is the clique's first definition, which
+    // is what ACL2 keyed the record under, and the source wrote it first too.
+    const members = [String(e.name), ...rest]
+      .map((n) => by.get(n.toLowerCase()))
+      .filter(Boolean);
+    return members.length ? { ...withD, members } : withD;
   }) };
 }
 
