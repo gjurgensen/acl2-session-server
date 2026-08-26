@@ -44,6 +44,12 @@ export interface CheckpointEvent {
 export interface InnerEventWire {
   name: string;
   kind?: string;
+  /**
+   * What a `thm` set out to prove, laid out. Only a `thm` has one: every
+   * other event writes a name, and what it proved is in the world under that
+   * name. A `thm` writes nothing, so this is the only record of it.
+   */
+  goal?: string;
   time?: string;
   prover_steps?: number;
   rules?: string[];

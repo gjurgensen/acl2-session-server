@@ -304,6 +304,14 @@ pub struct InnerEvent {
     /// what ACL2 recorded, so a failure can say *what kind of thing* failed
     /// without touching prover prose.
     pub kind: Option<String>,
+    /// What a `thm` set out to prove, as ACL2 recorded the form.
+    ///
+    /// Only a `thm` has one, and only a `thm` needs one: every other event
+    /// writes a name, and what it proved can be looked up in the world under
+    /// that name. A `thm` writes nothing, so this is the only record of what
+    /// it was about -- the `form` field ACL2 keeps for it is the elided
+    /// string "( THM ...)".
+    pub goal: Option<String>,
     /// Whether ACL2 recorded a `namex` for this event. The failing event is
     /// the one *without* one -- it never got far enough to name anything --
     /// which identifies it even when no proof aborted (a translate-level

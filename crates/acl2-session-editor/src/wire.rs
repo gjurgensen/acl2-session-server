@@ -759,6 +759,11 @@ pub struct InnerEventWire {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// What a `thm` set out to prove, laid out. Only a `thm` carries one:
+    /// every other event writes a name, and what it proved is in the world
+    /// under that name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goal: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1021,6 +1026,7 @@ fn inner_wire(inner: &[acl2_session::InnerEvent]) -> Vec<InnerEventWire> {
         .map(|e| InnerEventWire {
             name: e.name.clone(),
             kind: e.kind.clone(),
+            goal: e.goal.as_deref().map(laid),
             time: e.time.clone(),
             prover_steps: e.prover_steps,
             rules: e.rules.clone(),

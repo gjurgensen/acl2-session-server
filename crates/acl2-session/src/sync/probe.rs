@@ -257,6 +257,15 @@ pub(super) fn inner_events_probe(limit: usize) -> String {
                                  (acl2::symbolp (acl2::car (acl2::cdr (acl2::assoc-equal 'acl2::form acl2::d))))
                                  (acl2::car (acl2::cdr (acl2::assoc-equal 'acl2::form acl2::d))))))))
         (acl2::prog2$
+        (acl2::cw "~*0" (acl2::list "" "igoal ~x*~%" "igoal ~x*~%" "igoal ~x*~%"
+          (acl2::loop$ acl2::for acl2::d acl2::in acl2::ds acl2::collect
+            (acl2::and (acl2::alistp acl2::d)
+                       (acl2::consp (acl2::cdr (acl2::assoc-equal 'acl2::event acl2::d)))
+                       (acl2::eq (acl2::car (acl2::cdr (acl2::assoc-equal 'acl2::event acl2::d)))
+                                 'acl2::thm)
+                       (acl2::car (acl2::cdr (acl2::cdr
+                         (acl2::assoc-equal 'acl2::event acl2::d))))))))
+        (acl2::prog2$
           (acl2::cw "~*0" (acl2::list "" "ia ~x*~%" "ia ~x*~%" "ia ~x*~%"
             (acl2::loop$ acl2::for acl2::d acl2::in acl2::ds acl2::collect
               (acl2::and (acl2::alistp acl2::d)
@@ -289,14 +298,14 @@ pub(super) fn inner_events_probe(limit: usize) -> String {
                           acl2::collect (acl2::cons acl2::i acl2::r)))))
                   (acl2::prog2$
                     (acl2::cw "<<<PROBE-END inner>>>~%")
-                    (acl2::value :invisible))))))))))))"#
+                    (acl2::value :invisible)))))))))))))"#
     )
 }
 
 pub(super) fn parse_inner(sub: &crate::session::Submission) -> (Vec<InnerEvent>, usize, Vec<String>) {
     let Some(body) = sub.block("inner") else { return (Vec::new(), 0, Vec::new()) };
     let pairs =
-        keyed_block(body, &["iname", "iclq", "ik", "ia", "inx", "it", "is", "irune"]);
+        keyed_block(body, &["iname", "iclq", "ik", "igoal", "ia", "inx", "it", "is", "irune"]);
     // Every name, not a sample of them. A `defines` clique introduces far more
     // than three events, and a list of three that looks complete is worse than
     // a long one: the reporter found two of a clique's own functions in the
@@ -329,6 +338,14 @@ pub(super) fn parse_inner(sub: &crate::session::Submission) -> (Vec<InnerEvent>,
     // never misses it. Beyond the probed prefix the fields are simply absent,
     // which is how a consumer tells "no rules" from "rules not read".
     let kinds = items_positional(&pairs, "ik");
+    // Only a `thm` fills this: the probe emits `nil` for every other event.
+    // A `thm` is the one event whose statement is nowhere else -- it writes no
+    // name, so there is nothing in the world to look it up under, and the
+    // `form` ACL2 records for it is the elided string "( THM ...)". Collected
+    // for that kind alone rather than for all: the `event` of a `defines` is
+    // the whole source of the clique, and this rides on a probe every form
+    // already pays for.
+    let goals = items_positional(&pairs, "igoal");
     let aborts = items_positional(&pairs, "ia");
     let namexes = items_positional(&pairs, "inx");
     let times = items_positional(&pairs, "it");
@@ -355,6 +372,7 @@ pub(super) fn parse_inner(sub: &crate::session::Submission) -> (Vec<InnerEvent>,
             abort_causes: failure_causes(aborts.get(i).cloned().flatten()),
             rules: rules.get(i).cloned().unwrap_or_default(),
             kind: kinds.get(i).cloned().flatten().map(|v| symbol_name_of(&v)),
+            goal: goals.get(i).cloned().flatten(),
             // Printed as yes/no rather than t/nil, because a nil would be
             // indistinguishable here from the value having gone missing.
             has_namex: namexes
@@ -383,7 +401,7 @@ pub(super) fn inner_names(sub: &crate::session::Submission) -> Vec<String> {
     // treats an unrecognised line as a continuation of the previous value,
     // so naming a subset silently glues the other fields onto the names.
     let pairs =
-        keyed_block(body, &["iname", "iclq", "ik", "ia", "inx", "it", "is", "irune"]);
+        keyed_block(body, &["iname", "iclq", "ik", "igoal", "ia", "inx", "it", "is", "irune"]);
     let mut names = items(&pairs, "iname");
     for c in items(&pairs, "iclq") {
         if !names.contains(&c) {

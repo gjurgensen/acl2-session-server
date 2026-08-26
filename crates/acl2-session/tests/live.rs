@@ -2990,6 +2990,16 @@ fn the_kinds_an_event_can_have_are_few() {
         .expect("the thm event");
     assert_eq!(thm.name, "", "a thm is recorded under no name");
     assert!(thm.time.is_some(), "and still says what it cost: {thm:?}");
+    // Naming nothing, it is the one event whose statement is nowhere else:
+    // there is no world entry to look it up under, and the `form` ACL2 keeps
+    // for it is the elided string "( THM ...)". So the event form carries it.
+    assert_eq!(thm.goal.as_deref(), Some("(equal (zz-f x) x)"),
+               "and what it set out to prove: {thm:?}");
+    let named = o.admitted.iter().flat_map(|u| u.inner.iter())
+        .filter(|e| !e.name.is_empty());
+    assert!(named.clone().all(|e| e.goal.is_none()),
+            "no named event carries one -- its statement is a fact about the name: {:?}",
+            named.filter(|e| e.goal.is_some()).collect::<Vec<_>>());
     // ...and naming nothing, it is named among the form's names by nothing.
     let names = o.admitted.iter().find(|u| u.inner.iter().any(|e| e.kind.as_deref() == Some("thm")))
         .map(|u| u.display_names()).unwrap_or_default();

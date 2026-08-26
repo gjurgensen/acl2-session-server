@@ -3303,6 +3303,7 @@ function toPanelEnvelope(e: Envelope): FormEnvelope {
   const inner = (e.inner ?? []).map((i) => ({
     name: i.name,
     kind: i.kind,
+    goal: i.goal,
     time: i.time,
     proverSteps: i.prover_steps,
     rules: i.rules ?? [],

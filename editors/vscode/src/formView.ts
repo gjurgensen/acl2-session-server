@@ -43,6 +43,8 @@ export interface FormCheckpoint {
 export interface FormInnerEvent {
   name: string;
   kind?: string;
+  /** What a `thm` set out to prove. Only a `thm` has one -- see the wire. */
+  goal?: string;
   time?: string;
   proverSteps?: number;
   rules?: string[];
@@ -213,6 +215,8 @@ export function rulesStrings(entries: FormNameRules[], docCode = true): string[]
 /** The strings in an envelope that are ACL2 code rather than prose. */
 export function highlightable(m: FormEnvelope): string[] {
   return [
+    // A thm's goal is a term, and the only one an event carries directly.
+    ...(m.inner ?? []).flatMap((e) => (e.goal === undefined ? [] : [e.goal])),
     ...(m.value === undefined ? [] : [m.value]),
     ...m.checkpoints.map((c) => c.term),
     ...(m.rules ?? []),
