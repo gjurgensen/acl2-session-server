@@ -227,7 +227,14 @@ details.docfold, .docfold.bare {
 details.docfold > summary { padding: 4px 8px; }
 .docfold.bare > .esum { padding: 4px 8px 4px calc(8px + var(--twist)); }
 .docfold > .dinside { padding: 0 9px 6px calc(8px + var(--twist)); }
-.docfold .dsum { padding-left: 0; }
+/* A block beside a chevron indents by the chevron's slot, because the chevron
+   is drawn inline and only offsets the first run. Where there is no chevron
+   the slot is reserved by the container's own padding instead -- so indenting
+   again puts the block a slot to the *right* of the label it belongs to.
+   That is what a bare event's facts line had been doing: 8+14 from the box
+   and 14 more of its own, against a name at 8+14. */
+.event.bare > .esum > .efacts { padding-left: 0; }
+.docfold.bare > .esum > .dsum { padding-left: 0; }
 /* A rendered body. Code inside it is the page's own \`pre\`/\`code\` -- an
    outlined box and a faint chip -- because a term is a term wherever it is
    written, and a documented topic should not introduce a third way of
@@ -580,17 +587,19 @@ function eventHtml(e, p, openByDefault) {
   // is there a "documented" row above it any more, which said the summary a
   // second time.
   if (d && (d.short || d.long)) {
-    const label = '<span class="meta">documentation</span>';
-    const inside =
-      (d.short ? '<div class="dsum">' + withCode(d.short, d.shortCode) + '</div>' : '') +
-      (d.long ? '<div class="doclong">' + withCode(d.long, d.longCode) + '</div>' : '');
+    // The same face the standalone card has, with a label where that one has
+    // a name: something beside the chevron on its line, then the short on its
+    // own beneath. Both parts are the *summary*, so the short is readable
+    // without opening anything -- a sentence is what the reader wants first,
+    // and having to open a fold to learn it is the thing worth avoiding.
+    const head = '<span class="meta">documentation</span>' +
+      (d.short ? '<div class="dsum">' + withCode(d.short, d.shortCode) + '</div>' : '');
     body = (d.long
-      ? fold(p + 'ev:' + e.name + ':documentation', false, label,
-             '<div class="dinside">' + inside + '</div>', 'docfold')
-      // A summary and nothing else is one sentence, and a chevron that opens
-      // onto one sentence is a click to learn what a line would have said.
-      : '<div class="docfold bare"><div class="esum">' + label + '</div>' +
-        '<div class="dinside">' + inside + '</div></div>') + body;
+      ? fold(p + 'ev:' + e.name + ':documentation', false, head,
+             '<div class="dinside doclong">' + withCode(d.long, d.longCode) + '</div>',
+             'docfold')
+      // Nothing to open: a chevron onto nothing is worse than no chevron.
+      : '<div class="docfold bare"><div class="esum">' + head + '</div></div>') + body;
   }
 
   // The formals sit beside the name because together they are the signature,

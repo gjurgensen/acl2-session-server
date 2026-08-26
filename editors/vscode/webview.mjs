@@ -1006,13 +1006,13 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
               detail: { name: 'shown', short: 'counts', long: '<p>at length</p>',
                         runes: [] } }],
   });
-  // Labelled on the chevron's own line. The summary was the short itself,
-  // which is a block: it began on the line after the chevron, so the box
-  // opened with a blank line and the chevron pointed at nothing.
-  check(/<summary><span class="meta">documentation<\/span><\/summary>/.test(onCard),
-    'the chevron has a label on its own line');
-  check(/class="dinside"><div class="dsum">counts/.test(onCard),
-    'and the short is the first line of the contents, not the face');
+  // The same face the standalone card has: a label beside the chevron, the
+  // short on its own line beneath, and both of them in the *summary* -- so
+  // the sentence reads without opening anything, and the chevron still has a
+  // word beside it rather than pointing at a blank line.
+  check(/<summary><span class="meta">documentation<\/span><div class="dsum">counts/
+    .test(onCard), 'the label is beside the chevron and the short below it');
+  check(/counts[\s\S]*<\/summary>/.test(onCard), 'the short is readable collapsed');
   check(/at length/.test(onCard), 'and the body is there to open');
   check(/class="docfold"/.test(onCard), 'the whole of it is boxed');
   // Once as a heading, and that is the event card's own. Fold ids carry it
@@ -1165,6 +1165,25 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
       `${what} is derived from it, not written out`);
   }
 
+  // The other half of the same number: where there is *no* chevron the slot
+  // is reserved by the container's padding, so a block inside must not indent
+  // again. A bare event's facts line did, putting it a slot right of the name
+  // it is about -- 8+14 from the box and 14 more of its own, against a name
+  // at 8+14. Both rules reference `--twist`, so the check above passed while
+  // the sum was wrong; only the pairing catches it.
+  for (const [box, block, what] of [
+    ['.event.bare .esum', '.event.bare > .esum > .efacts', "a bare event's facts"],
+    ['.docfold.bare > .esum', '.docfold.bare > .esum > .dsum',
+     "a bare documentation card's short"],
+  ]) {
+    const outer = rule(box);
+    check(outer !== null && /calc\(8px \+ var\(--twist\)\)/.test(outer),
+      `${what} sits in a box that already reserves the slot`);
+    const inner = rule(block);
+    check(inner !== null && /padding-left:\s*0/.test(inner),
+      `${what} does not then indent by it a second time`);
+  }
+
   // Vertically, the chevron must not be baseline-aligned. The codicon font is
   // unitsPerEm 300 with ascender 300 and descender 0 -- its baseline is the
   // bottom of the em box -- so a baseline-aligned glyph puts its ink centre
@@ -1253,6 +1272,35 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
     check(!/^ACL2\s*:/.test(c.title),
       `${c.command}'s title does not repeat the category`);
   }
+}
+
+// ---- one switch for code inside a topic, and both views obey it ----
+{
+  const { readFileSync } = require('fs');
+  const ext = readFileSync(new URL('./src/extension.ts', import.meta.url), 'utf8');
+  const fv = readFileSync(new URL('./src/formView.ts', import.meta.url), 'utf8');
+  const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
+  const key = 'acl2-session.highlightDocCode';
+
+  const decl = pkg.contributes.configuration.properties[key];
+  check(!!decl, 'the setting is declared');
+  check(decl && decl.default === true,
+    'and on by default: a book\u2019s code blocks are its own forms nearly always');
+
+  // The failure this guards, which the pin already made once: two views show
+  // the same thing, and only one of them consults the setting that governs
+  // it. The form view colours from a token map it builds; the doc view
+  // colours slots it fills itself. Neither reads the other's code.
+  check(fv.includes('highlightDocCode'), 'the form view reads it');
+  check(ext.includes("get<boolean>('highlightDocCode'"), 'and so does the doc view');
+
+  // Changing it has to repaint what is already on screen. Both views hold
+  // their content, so neither needs the daemon -- but both need telling.
+  const at = ext.indexOf(`affectsConfiguration('${key}')`);
+  check(at !== -1, 'a change is noticed');
+  const arm = ext.slice(at, ext.indexOf('\n      }', at));
+  check(/formView\.refresh\(\)/.test(arm), 'and repaints the form view');
+  check(/paintDocs\(\)/.test(arm), 'and the documentation view');
 }
 
 // ---- the pin governs both views, and both can take it ----
