@@ -112,9 +112,15 @@ identically either way; only what the log captures differs.
 
 The wire is covered end to end by
 [`tests/wire_live.rs`](tests/wire_live.rs), which spawns the built binary and
-drives it over real stdio JSON against a real ACL2. Run it with the workspace
-live suite:
+drives it over real stdio JSON against a real ACL2. Like the rest of the live
+suite it is `#[ignore]`d, so running it means selecting the ignored tests:
 
 ```sh
-ACL2=/path/to/saved_acl2 cargo test -p acl2-session-mcp -- --ignored --test-threads=1
+ACL2=/path/to/saved_acl2 cargo test -p acl2-session-mcp -- --ignored
 ```
+
+`--ignored` runs *only* those, which is what is wanted here.
+`--include-ignored` runs them **and** the unit tests, and is what
+[INSTALL.md](../../INSTALL.md#running-the-tests) uses for the whole workspace.
+The two are easy to mistake for each other: `--ignored` is a filter, not an
+addition.

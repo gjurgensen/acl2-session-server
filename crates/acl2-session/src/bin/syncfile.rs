@@ -1,6 +1,10 @@
 //! Sync a real book and print the structured report for every unit.
 //!
-//!   acl2-session-syncfile <acl2-binary> <book.lisp> [--output <ref>] [--find <text>]
+//!   acl2-session-syncfile <acl2-binary> <book.lisp> [--find <text>] [--goal <name>]
+//!
+//! Keep this line, `USAGE` and the argument parsing below in agreement. All
+//! three drifted apart once: this comment advertised an `--output` that was
+//! never parsed, and `USAGE` omitted the `--goal` that was.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -40,10 +44,14 @@ fn wrap(label: &str, s: &str, indent: usize, width: usize) {
     }
 }
 
+/// What this takes, in one place, so the message and the parse cannot drift.
+const USAGE: &str = "usage: acl2-session-syncfile <acl2-binary> <book.lisp> \
+[--find <text>] [--goal <name>]";
+
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     if a.len() < 3 {
-        eprintln!("usage: acl2-session-syncfile <acl2-binary> <book.lisp> [--find <text>]");
+        eprintln!("{USAGE}");
         std::process::exit(2);
     }
     let acl2 = PathBuf::from(&a[1]);
