@@ -345,18 +345,21 @@ certification chases dependencies, a failure names *which* book failed.
 
 ## Installation
 
+The extension is a client of the `acl2-session-editor` daemon, so that comes
+first — from the **repository root**, not from this directory:
+
+```sh
+cargo install --path crates/acl2-session-editor
+```
+
+Or point `acl2-session.daemonPath` at a built binary instead of installing it.
+
+Then build and install the extension itself:
+
 ```sh
 cd editors/vscode
 npm install
 npm run compile
-```
-
-Install the daemon first (`cargo install --path crates/acl2-session-editor`),
-or point `acl2-session.daemonPath` at a built binary.
-
-Then package and install it:
-
-```sh
 npx @vscode/vsce package
 code --install-extension acl2-session-*.vsix
 ```
