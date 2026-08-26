@@ -7,25 +7,10 @@ of its own beyond the protocol.
 
 ## Install
 
-Install the MCP server with the following `cargo` command, run from the
-repository root. This builds the server and installs it to
-`~/.cargo/bin/acl2-session-mcp`.
-
-```sh
-cargo install --path crates/acl2-session-mcp
-```
-
-Then register it with your MCP client. With Claude Code (user scoped):
-```sh
-claude mcp add -s user acl2 -- ~/.cargo/bin/acl2-session-mcp --default <saved_acl2> --trusted <dir>
-```
-
-or with Codex:
-```sh
-codex mcp add acl2 -- ~/.cargo/bin/acl2-session-mcp --default <saved_acl2> --trusted <dir>
-```
-See the [top-level README](../../README.md#choosing-the-acl2-image) for
-explanation of the `--default` and `--trusted` arguments.
+See [INSTALL.md](../../INSTALL.md#the-mcp-server) — the prerequisites, the
+`cargo install`, and registering the server with an MCP client. Which ACL2
+image a book runs under is
+[Choosing the ACL2 image](../../README.md#choosing-the-acl2-image).
 
 ## Tools
 

@@ -345,29 +345,9 @@ certification chases dependencies, a failure names *which* book failed.
 
 ## Installation
 
-The extension is a client of the `acl2-session-editor` daemon, so that comes
-first — from the **repository root**, not from this directory:
-
-```sh
-cargo install --path crates/acl2-session-editor
-```
-
-Or point `acl2-session.daemonPath` at a built binary instead of installing it.
-
-Then build and install the extension itself:
-
-```sh
-cd editors/vscode
-npm install
-npm run compile
-npx @vscode/vsce package
-code --install-extension acl2-session-*.vsix
-```
-
-`code` installs into whatever VSCode variant is on your `PATH` — stock,
-Insiders, or VSCodium — and the glob takes the version `vsce` wrote into the
-`.vsix` name, so nothing is pinned to a version or a fixed extensions path.
-Repackage and reinstall to pick up later changes.
+See [INSTALL.md](../../INSTALL.md#the-vscode-extension) — the prerequisites,
+the `acl2-session-editor` daemon this extension is a client of, and building
+and installing the `.vsix`.
 
 ## Commands
 

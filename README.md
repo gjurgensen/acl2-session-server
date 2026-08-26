@@ -56,33 +56,21 @@ The MCP server takes these as `args`; the VSCode extension takes them as the
 reports which image a session actually got, and the MCP `acl2_images` tool
 lists what is permitted.
 
-## Trying it without a client
+## Installing
 
-To see the structured output directly, with no MCP or editor in the loop:
+Both front-ends need **Rust 1.88+** and an **ACL2 image, version 8.7 or
+later**; the VSCode extension additionally needs **Node 22+** to build. They
+are independent — install either one without the other.
 
-```
+**[INSTALL.md](INSTALL.md)** has all of it: the prerequisites in full, the MCP
+server, the extension, and the tests.
+
+The shortest way to see whether this works on your machine needs neither
+front-end:
+
+```sh
 cargo build
-./target/debug/acl2-session-syncfile <acl2-binary> <book.lisp>
+./target/debug/acl2-session-syncfile <saved_acl2> <book.lisp>
 ```
 
-Syncs a book and prints the structured report for each top-level form. Add
-`--find <text>` or `--goal "Subgoal *1/2"` to slice a form's captured log.
-
-## Tests
-
-```
-cargo test
-ACL2=/path/to/saved_acl2 cargo test -- --ignored --test-threads=1
-```
-
-The first runs the unit tests. The second adds the integration tests, which
-drive a real ACL2 — the prefix invariant, deadlines and interrupts, eval, and
-the splitter across every book in a tree if `ACL2_BOOKS` is also set.
-
-The image must be **ACL2 8.7 or later** — a library requirement, not a
-testing one. The probes read system internals, and the rules scrape needs a
-function 8.7 introduced; on an older image a real session silently returns
-nothing for every form's rules, and these tests are what notices. The suite
-also depends on things ACL2's version does not pin, such as the community
-books' layout, so a failure here is not by itself a verdict on the library.
-`crates/acl2-session/tests/live.rs` separates the two.
+That syncs a book and prints the structured report for each top-level form.
