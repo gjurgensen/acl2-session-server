@@ -465,6 +465,11 @@
           "default": true,
           "description": "Highlight ACL2's output log: goal headers, errors and Q.E.D. as markers, and the terms inside goals, rune lists and `pe` forms as Lisp. Best effort -- the log is prose with Lisp embedded in it, so a misread is possible; off, the log is plain text."
         },
+        "acl2-session.highlightDocCode": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Highlight code inside documentation as ACL2, in the form view and the documentation view.\n\nA topic's `<code>` blocks and `@('...')` spans are ACL2 nearly always, and are coloured with the editor's own grammar. Turn this off where they are not — a book documenting a language of its own, or shell commands — and they are shown as plain text. Nothing is hidden either way."
+        },
         "acl2-session.eventsOpenLimit": {
           "type": "number",
           "default": 4,

@@ -642,6 +642,14 @@ export function activate(context: vscode.ExtensionContext): void {
         void outputView.refreshLanguage();
         void evalView.refreshLanguage();
       }
+      if (e.affectsConfiguration('acl2-session.highlightDocCode')) {
+        // Both views hold what they are showing, so neither has to ask the
+        // daemon again: the form view re-posts its model, which carries the
+        // rules and so the topic code with them, and the doc view repaints
+        // the topic it already has.
+        formView.refresh();
+        paintDocs();
+      }
     })
   );
   refreshContext();
@@ -1406,8 +1414,15 @@ function paintDocs(): void {
   if (!lastDoc) {
     return;
   }
+  // Not every book's code blocks are ACL2 -- one documenting a language of
+  // its own writes blocks that are not -- and a Lisp grammar over those is
+  // worse than none. `plainSpans` is the same fallback used when the grammar
+  // has not loaded yet, so off is a state this path already knew how to be in.
+  const asAcl2 =
+    highlighter.ready &&
+    vscode.workspace.getConfiguration('acl2-session').get<boolean>('highlightDocCode', true);
   const code = lastDoc.rendered.code.map((c) =>
-    highlighter.ready ? { slot: c.slot, lines: highlighter.tokenize(c.text) } : plainSpans(c)
+    asAcl2 ? { slot: c.slot, lines: highlighter.tokenize(c.text) } : plainSpans(c)
   );
   docs.show({
     name: lastDoc.name,

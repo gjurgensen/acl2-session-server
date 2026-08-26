@@ -184,12 +184,15 @@ function same(a: unknown, b: unknown): boolean {
 }
 
 /** The strings in a rules record that are ACL2 code rather than prose. */
-export function rulesStrings(entries: FormNameRules[]): string[] {
+export function rulesStrings(entries: FormNameRules[], docCode = true): string[] {
   return entries.flatMap((e) => [
     // Code lifted out of a topic is code like any other on this page, and the
-    // map is keyed by source text, so it is coloured by being listed here.
-    ...(e.shortCode ?? []).map((c) => c.text),
-    ...(e.longCode ?? []).map((c) => c.text),
+    // map is keyed by source text, so listing it here is what colours it.
+    // Withholding it is therefore the whole of the off switch: a hole whose
+    // text the map does not hold is filled with the escaped source instead,
+    // which is the fallback an oversized term already uses.
+    ...(docCode ? (e.shortCode ?? []).map((c) => c.text) : []),
+    ...(docCode ? (e.longCode ?? []).map((c) => c.text) : []),
     ...(e.formals === undefined ? [] : [e.formals]),
     ...(e.guard === undefined ? [] : [e.guard]),
     ...(e.measure === undefined ? [] : [e.measure]),
@@ -221,6 +224,19 @@ export function highlightable(m: FormEnvelope): string[] {
  * escaped text, so an oversized term arrives uncolored rather than as half a
  * million `<span>` elements. Nothing downstream has to know.
  */
+/**
+ * Whether code inside a topic is ACL2, as far as this workspace is concerned.
+ *
+ * It nearly always is -- a book's `<code>` blocks are its own forms -- but a
+ * book documenting a language of its own writes blocks that are not, and
+ * colouring those with a Lisp grammar is worse than leaving them alone.
+ */
+function highlightDocCode(): boolean {
+  return vscode.workspace
+    .getConfiguration('acl2-session')
+    .get<boolean>('highlightDocCode', true);
+}
+
 export function tokenizeAll(
   strings: string[],
   tokenizer?: (text: string) => TokLines | undefined
@@ -424,7 +440,7 @@ export class FormView {
       book: r.book,
       index: r.index,
       entries: r.entries,
-      toks: tokenizeAll(rulesStrings(r.entries), this.tokenizer),
+      toks: tokenizeAll(rulesStrings(r.entries, highlightDocCode()), this.tokenizer),
     });
   }
 
@@ -529,7 +545,10 @@ export class FormView {
       model: laid,
       entries,
       toks: tokenizeAll(
-        [...highlightable(laid), ...(entries ? rulesStrings(entries) : [])],
+        [
+          ...highlightable(laid),
+          ...(entries ? rulesStrings(entries, highlightDocCode()) : []),
+        ],
         this.tokenizer
       ),
     });
