@@ -356,9 +356,29 @@ pub(super) fn inner_events_probe(limit: usize, induction: bool) -> String {
                               (acl2::and (acl2::alistp acl2::d)
                                          (acl2::cdr (acl2::assoc-equal 'acl2::rules acl2::d))))
                           acl2::collect (acl2::cons acl2::i acl2::r)))))
+                (acl2::prog2$
+                  (acl2::cw "~*0" (acl2::list "" "ihint ~x*~%" "ihint ~x*~%" "ihint ~x*~%"
+                    (acl2::loop$ acl2::for acl2::d acl2::in acl2::ds
+                                 acl2::as acl2::i acl2::from 0 acl2::to (acl2::len acl2::ds)
+                      acl2::append
+                        (acl2::loop$ acl2::for acl2::r acl2::in
+                            (acl2::true-list-fix
+                              (acl2::and (acl2::alistp acl2::d)
+                                         (acl2::cdr (acl2::assoc-equal 'acl2::hint-events acl2::d))))
+                          acl2::collect (acl2::cons acl2::i acl2::r)))))
+                (acl2::prog2$
+                  (acl2::cw "~*0" (acl2::list "" "isplit ~x*~%" "isplit ~x*~%" "isplit ~x*~%"
+                    (acl2::loop$ acl2::for acl2::d acl2::in acl2::ds
+                                 acl2::as acl2::i acl2::from 0 acl2::to (acl2::len acl2::ds)
+                      acl2::append
+                        (acl2::loop$ acl2::for acl2::r acl2::in
+                            (acl2::true-list-fix
+                              (acl2::and (acl2::alistp acl2::d)
+                                         (acl2::cdr (acl2::assoc-equal 'acl2::splitter-rules acl2::d))))
+                          acl2::collect (acl2::cons acl2::i acl2::r)))))
 {ind_body}                  (acl2::prog2$
                     (acl2::cw "<<<PROBE-END inner>>>~%")
-                    (acl2::value :invisible))))))))))))){ind_close}"#
+                    (acl2::value :invisible))))))))))))))){ind_close}"#
     )
 }
 
@@ -482,8 +502,9 @@ const SCHEME_CEILING: usize = 20_000;
 /// -- it silently glues them onto whatever key came last. `inner_names` wants
 /// two of these fields and still has to name all twelve; that is the trap,
 /// and this constant is what stops the two lists drifting apart.
-const INNER_KEYS: [&str; 12] = [
-    "iname", "iclq", "ik", "igoal", "ia", "inx", "it", "is", "irune", "ipool", "irec", "isch",
+const INNER_KEYS: [&str; 14] = [
+    "iname", "iclq", "ik", "igoal", "ia", "inx", "it", "is", "irune", "ihint", "isplit", "ipool",
+    "irec", "isch",
 ];
 
 pub(super) fn parse_inner(sub: &crate::session::Submission) -> (Vec<InnerEvent>, usize, Vec<String>) {
@@ -534,26 +555,20 @@ pub(super) fn parse_inner(sub: &crate::session::Submission) -> (Vec<InnerEvent>,
     let namexes = items_positional(&pairs, "inx");
     let times = items_positional(&pairs, "it");
     let steps = items_positional(&pairs, "is");
-    // Runes arrive index-tagged -- `(3 :rewrite foo)` is event 3's
-    // `(:rewrite foo)` -- so the per-event lists survive one flat stream.
-    // The envelope is ours (index, space, rune, closing paren), so peeling
-    // it is sentinel parsing, not prose parsing.
-    let mut rules: Vec<Vec<String>> = vec![Vec::new(); names.len()];
-    for pair in items(&pairs, "irune") {
-        let Some(bare) = pair.strip_prefix('(').and_then(|p| p.strip_suffix(')')) else {
-            continue;
-        };
-        let Some((idx, rune)) = bare.split_once(' ') else { continue };
-        let Ok(i) = idx.parse::<usize>() else { continue };
-        if let Some(slot) = rules.get_mut(i) {
-            slot.push(format!("({rune})"));
-        }
-    }
+    // Three streams of the same shape: rune-like objects, index-tagged so the
+    // per-event lists survive one flat stream. `(3 :rewrite foo)` is event 3's
+    // `(:rewrite foo)`; ACL2 shapes a hint event as `(:use lemma)` on purpose,
+    // so the same peel serves all three.
+    let rules = tagged_runes(&pairs, "irune", names.len());
+    let hints = tagged_runes(&pairs, "ihint", names.len());
+    let splitters = tagged_runes(&pairs, "isplit", names.len());
     let induction = parse_induction(&pairs, names.len());
     let mut out = Vec::new();
     for (i, name) in names.iter().enumerate() {
         out.push(InnerEvent {
             induction: induction.get(i).cloned().unwrap_or_default(),
+            hint_events: hints.get(i).cloned().unwrap_or_default(),
+            splitter_rules: splitters.get(i).cloned().unwrap_or_default(),
             name: name.clone(),
             abort_causes: failure_causes(aborts.get(i).cloned().flatten()),
             rules: rules.get(i).cloned().unwrap_or_default(),
@@ -572,6 +587,28 @@ pub(super) fn parse_inner(sub: &crate::session::Submission) -> (Vec<InnerEvent>,
     }
     let total = out.len();
     (out, total, clique)
+}
+
+/// Peel one index-tagged stream of rune-like objects into per-event lists.
+///
+/// The envelope is ours -- open paren, index, space, the object, close paren --
+/// so this is sentinel parsing rather than prose parsing. An index past the
+/// events is dropped rather than trusted: the stream and the name list are
+/// produced by the same `loop$` over the same prefix, so a mismatch means the
+/// parse is wrong and inventing an event to hang it on would hide that.
+fn tagged_runes(pairs: &[(String, String)], key: &str, events: usize) -> Vec<Vec<String>> {
+    let mut out: Vec<Vec<String>> = vec![Vec::new(); events];
+    for pair in items(pairs, key) {
+        let Some(bare) = pair.strip_prefix('(').and_then(|p| p.strip_suffix(')')) else {
+            continue;
+        };
+        let Some((idx, rune)) = bare.split_once(' ') else { continue };
+        let Ok(i) = idx.parse::<usize>() else { continue };
+        if let Some(slot) = out.get_mut(i) {
+            slot.push(format!("({rune})"));
+        }
+    }
+    out
 }
 
 /// Join the three induction streams into per-event records.

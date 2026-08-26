@@ -916,6 +916,15 @@ pub struct InnerEventWire {
     /// slots (`INNER_DETAIL_SLOTS`), like the rest of the per-event detail.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<String>,
+    /// Hints this event's proof appealed to -- `(:use l)`, `(:by t)`,
+    /// `(:clause-processor f)`. Per event because the outer event of a
+    /// compound form reports none, which is most real code.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hint_events: Vec<String>,
+    /// Rules that split this event's proof into cases. Per event for the same
+    /// reason as `hint_events`, and empty on the outer event for the same one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub splitter_rules: Vec<String>,
     /// Non-empty when this inner event is the one that failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub abort_causes: Option<String>,
@@ -1174,6 +1183,8 @@ fn inner_wire(inner: &[acl2_session::InnerEvent]) -> Vec<InnerEventWire> {
             time: e.time.clone(),
             prover_steps: e.prover_steps,
             rules: e.rules.clone(),
+            hint_events: e.hint_events.clone(),
+            splitter_rules: e.splitter_rules.clone(),
             abort_causes: e.abort_causes.clone(),
         })
         .collect()

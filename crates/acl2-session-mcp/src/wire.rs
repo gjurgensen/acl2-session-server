@@ -38,6 +38,19 @@ pub struct InnerEvent {
     /// its log (see `Admitted`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<String>,
+    /// Hints this event's proof appealed to: `(:use l)`, `(:by t)`,
+    /// `(:clause-processor f)`. Exactly those three -- `:in-theory`,
+    /// `:expand` and `:induct` record nothing anywhere.
+    ///
+    /// Read per event because the *form-level* `hint_events` is empty for
+    /// every compound form, so on a failing `define` or `encapsulate` this is
+    /// the only place the hints appear at all.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hint_events: Vec<String>,
+    /// Rules that split this event's proof into cases -- the "why did this
+    /// explode" answer. Per event for the same reason as `hint_events`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub splitter_rules: Vec<String>,
     /// This event's own prove time, in milliseconds. For a clique, this is
     /// "which member was slow" -- the outer total cannot say. ACL2 records a
     /// `(prove print proof-tree other)` tuple of exact rationals; the prove
@@ -92,6 +105,8 @@ fn inner_failed(e: &core::InnerEvent) -> InnerEvent {
         abort_causes: e.abort_causes.clone(),
         kind: e.kind.clone(),
         rules: e.rules.clone(),
+        hint_events: e.hint_events.clone(),
+        splitter_rules: e.splitter_rules.clone(),
         prove_ms: prove_ms_of(e.time.as_deref()),
         prover_steps,
         step_limit_reached,

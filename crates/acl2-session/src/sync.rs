@@ -326,6 +326,29 @@ pub struct InnerEvent {
     pub time: Option<String>,
     /// Signed for the same reason as [`EventData::prover_steps`].
     pub prover_steps: Option<i64>,
+    /// Hints this event's proof appealed to -- `(:use lemma)`, `(:by thm)`,
+    /// `(:clause-processor fn)`.
+    ///
+    /// Exactly those three, which is narrower than "the hints you wrote":
+    /// `:in-theory`, `:expand`, `:induct` and the rest record nothing here,
+    /// measured. What the three have in common is that each makes the proof
+    /// depend on something *named and outside itself*, which is why ACL2
+    /// reports them beside the runes and shapes them like runes.
+    ///
+    /// Read per event, and that is the whole point of reading it here.
+    /// [`EventData::hint_events`] is the same field asked of the *outer*
+    /// event, and ACL2 leaves that empty for every compound form -- a `progn`
+    /// of hinted theorems reports nothing at all there, measured. So the
+    /// form-level field answers only for a form that is a single event, and
+    /// this one answers for the rest.
+    pub hint_events: Vec<String>,
+    /// Rules whose application split this event's proof into cases.
+    ///
+    /// Per event for the same reason as [`Self::hint_events`], and built by
+    /// ACL2 in the same breath: `print-rules-and-hint-events-summary` writes
+    /// both from one accumulated ttree and then clears it, which is why
+    /// neither survives to the outer event of a compound form.
+    pub splitter_rules: Vec<String>,
     /// The inductions this event performed, newest first.
     ///
     /// Empty for the overwhelming majority of events, which never induct, and

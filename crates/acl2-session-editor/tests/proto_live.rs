@@ -821,6 +821,68 @@ fn hover_answers_while_the_session_is_busy() {
 }
 
 /// What a form introduced, answered while the session is busy proving.
+/// A compound form's per-event hints reach the wire.
+///
+/// The form-level field is empty for every compound form, so without the
+/// per-event read the panel has nothing to show for a `define` or a `progn` --
+/// which is most real code.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_compound_forms_hints_reach_the_wire_per_event() {
+    let Some(acl2) = acl2() else {
+        eprintln!("ACL2 not set; skipping");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("acl2-editord-hints-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let book_path: PathBuf = dir.join("b.lisp");
+    let text = "(in-package \"ACL2\")\n\n\
+                (defun w-app (x y) (if (consp x) (cons (car x) (w-app (cdr x) y)) y))\n\n\
+                (defthm w-assoc (equal (w-app (w-app x y) z) (w-app x (w-app y z))))\n\n\
+                (progn\n\
+                  (defthm w-one\n\
+                    (equal (w-app (w-app a b) c) (w-app a (w-app b c)))\n\
+                    :hints ((\"Goal\" :use (:instance w-assoc (x a) (y b) (z c))))\n\
+                    :rule-classes nil)\n\
+                  (defthm w-two (equal (car (cons a b)) a) :rule-classes nil))\n";
+    std::fs::write(&book_path, text).expect("write book");
+
+    let mut d = Daemon::start(&acl2);
+    let opened = d.request("open", json!({ "path": book_path.to_str().unwrap() }));
+    let book = opened["book"].as_str().expect("book id").to_string();
+    d.notify("update", json!({ "book": book, "text": text, "revision": 1 }));
+    let events = d.events_until_settled();
+
+    let progn = events
+        .iter()
+        .filter(|(m, _)| m == "unit")
+        .find(|(_, p)| p["outcome"] == "admitted"
+              && p["names"].as_array().is_some_and(|n| n.len() == 2))
+        .map(|(_, p)| p.clone())
+        .expect("the progn's unit event");
+
+    // The form level has nothing -- that is what the per-event read is for.
+    assert!(
+        progn["hint_events"].is_null()
+            || progn["hint_events"].as_array().is_some_and(|a| a.is_empty()),
+        "the outer event of a compound form reports no hints: {progn}"
+    );
+
+    let inner = progn["inner"].as_array().expect("inner events");
+    let by = |n: &str| {
+        inner
+            .iter()
+            .find(|e| e["name"] == json!(n))
+            .unwrap_or_else(|| panic!("no {n} in {progn}"))
+    };
+    assert_eq!(by("w-one")["hint_events"][0], json!("(:use w-assoc)"), "{progn}");
+    // And only that event: the hint is not smeared across the form.
+    assert!(by("w-two").get("hint_events").is_none(), "{progn}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The failing unit's induction reaches the wire.
 ///
 /// The path a reader actually takes: a proof fails, the panel opens on it, and
@@ -862,7 +924,15 @@ fn a_failing_units_induction_reaches_the_wire() {
         "induction",
         json!({ "book": book, "output_ref": failed["output_ref"] }),
     );
-    assert_eq!(ind["supported"], json!(true), "{ind}");
+    // Induction records landed in ACL2 after the 8.7 release, so an image
+    // built from the release answers `supported: false` and an empty list --
+    // a fact about the image, not a failure. `supported` exists precisely so
+    // the two are told apart, here as well as in a client.
+    if ind["supported"] != json!(true) {
+        eprintln!("this ACL2 does not report induction records; skipping");
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
     let events_out = ind["events"].as_array().expect("events");
     assert_eq!(events_out.len(), 1, "the one event that inducted: {ind}");
     assert_eq!(events_out[0]["event"], json!("w-app-nil"), "{ind}");

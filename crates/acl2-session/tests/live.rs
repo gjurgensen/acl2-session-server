@@ -85,6 +85,30 @@ macro_rules! acl2_or_skip {
     };
 }
 
+/// Skip a test whose subject the image in front of us does not have.
+///
+/// The counterpart of `acl2_or_skip!`, and it exists for the same reason: a
+/// missing *optional* feature is a fact about the image, not a verdict on the
+/// library, so it must not read as a failure. Induction records are the case
+/// -- they landed in ACL2's development stream after 8.7, so an image built
+/// from the release has everything else this suite tests and not those.
+///
+/// This is also the only thing that notices. The version string is identical
+/// either way: measured on two images from the same checkout hours apart, one
+/// with the field and one without, both reporting "ACL2 Version 8.7".
+macro_rules! needs {
+    ($book:expr, $cap:expr) => {
+        if !$book.capabilities().has($cap) {
+            eprintln!(
+                "{:?} absent from {}; skipping",
+                $cap,
+                $book.capabilities().version.as_deref().unwrap_or("this image")
+            );
+            return;
+        }
+    };
+}
+
 /// A directory for one test's book, named after it.
 ///
 /// **The tag must be unique across the suite**, and that is enforced rather
@@ -474,6 +498,7 @@ fn each_event_carries_its_own_inductions() {
                       (defthm tl-rev (true-listp (rev x)))\n\
                       (defthm app-assoc (equal (app (app x y) z) (app x (app y z)))))"]);
     let mut b = Book::open(&acl2, &book).expect("open");
+    needs!(b, acl2_session::Capability::InductionRecords);
     let o = b.sync(None, D).expect("sync");
     assert!(o.failed.is_none(), "{:?}", o.failed);
 
@@ -534,6 +559,7 @@ fn a_failed_proof_still_reports_what_it_inducted_on() {
                    "(set-induction-depth-limit 1)",
                    "(defthm d-tl-rev (true-listp (d-rev x)))"]);
     let mut b = Book::open(&acl2, &book).expect("open");
+    needs!(b, acl2_session::Capability::InductionRecords);
     let o = b.sync(None, D).expect("sync");
     let f = o.failed.expect("the depth limit stops this proof");
     assert_eq!(f.status, acl2_session::sync::Status::ProofFailure, "{f:?}");
@@ -596,6 +622,95 @@ fn a_form_that_chose_no_scheme_reports_none() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A compound form's hints are reported per event, where ACL2 keeps them.
+///
+/// The outer event has none: `get-event-data`'s HINT-EVENTS is empty for every
+/// compound form, exactly as RULES is, because both are written from one
+/// accumulated ttree that each inner event's summary consumes and clears. So
+/// asking the outer event -- which is what `EventData::hint_events` does --
+/// answers only for a form that is a single event, and answers *nothing* for
+/// the `define`s and `encapsulate`s most real books are made of.
+///
+/// Measured before this test existed: a `progn` of two differently-hinted
+/// theorems reported no hint events at all.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_compound_forms_hints_are_reported_per_event() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("hints-per-event");
+    let book = dir.join("demo.lisp");
+    write(&book, &["(in-package \"ACL2\")",
+                   "(defun p-app (x y) (if (consp x) (cons (car x) (p-app (cdr x) y)) y))",
+                   "(defthm p-assoc (equal (p-app (p-app x y) z) (p-app x (p-app y z))))",
+                   "(defthm p-nil (equal (p-app nil y) y))",
+                   "(progn\n\
+                      (defthm p-one\n\
+                        (equal (p-app (p-app a b) c) (p-app a (p-app b c)))\n\
+                        :hints ((\"Goal\" :use (:instance p-assoc (x a) (y b) (z c))))\n\
+                        :rule-classes nil)\n\
+                      (defthm p-two\n\
+                        (equal (p-app nil q) q)\n\
+                        :hints ((\"Goal\" :use (:instance p-nil (y q))))\n\
+                        :rule-classes nil))"]);
+    let mut b = Book::open(&acl2, &book).expect("open");
+    let o = b.sync(None, D).expect("sync");
+    assert!(o.failed.is_none(), "{:?}", o.failed);
+
+    let u = o.admitted.last().expect("the progn");
+    // The outer event knows nothing, which is the whole reason for the rest.
+    assert!(
+        u.event_data.hint_events.is_empty(),
+        "ACL2 reports no hint events for the outer event of a compound form; \
+         if this ever starts passing, the per-event read is no longer the only \
+         source: {:?}",
+        u.event_data.hint_events
+    );
+
+    let by = |n: &str| {
+        u.inner.iter().find(|e| e.name == n).unwrap_or_else(|| panic!("no {n} in {:?}", u.inner))
+    };
+    assert_eq!(by("p-one").hint_events, vec!["(:use p-assoc)"], "{:?}", u.inner);
+    assert_eq!(by("p-two").hint_events, vec!["(:use p-nil)"], "{:?}", u.inner);
+    // Each event's own, not a union handed to both.
+    assert!(by("p-one").hint_events != by("p-two").hint_events);
+    // `rules` is empty on the outer event for the same reason, and is already
+    // read per event. Not asserted per event here: a theorem discharged
+    // outright by its `:use` records no runes at all -- p-one is one, which
+    // is a fact about that proof rather than about the read.
+    assert!(u.event_data.rules.is_empty(), "{:?}", u.event_data.rules);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A single-event form reports its hints in both places, and they agree.
+///
+/// The case the form-level field was built for, kept as the pair to the test
+/// above: it is what makes "the outer event is empty" a fact about *compound*
+/// forms rather than about hint events generally.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_bare_theorems_hints_agree_at_both_levels() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("hints-bare");
+    let book = dir.join("demo.lisp");
+    write(&book, &["(in-package \"ACL2\")",
+                   "(defun q-app (x y) (if (consp x) (cons (car x) (q-app (cdr x) y)) y))",
+                   "(defthm q-assoc (equal (q-app (q-app x y) z) (q-app x (q-app y z))))",
+                   "(defthm q-uses-it\n\
+                      (equal (q-app (q-app a b) c) (q-app a (q-app b c)))\n\
+                      :hints ((\"Goal\" :use (:instance q-assoc (x a) (y b) (z c))))\n\
+                      :rule-classes nil)"]);
+    let mut b = Book::open(&acl2, &book).expect("open");
+    let o = b.sync(None, D).expect("sync");
+    assert!(o.failed.is_none(), "{:?}", o.failed);
+
+    let u = o.admitted.last().expect("the defthm");
+    assert_eq!(u.event_data.hint_events, vec!["(:use q-assoc)"], "the outer event has them");
+    assert_eq!(u.inner[0].hint_events, vec!["(:use q-assoc)"], "and so does the event itself");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The image reports what it can do, and the version string cannot say it.
 ///
 /// The second assertion is the point. `acl2-version` reads `"ACL2 Version
@@ -618,12 +733,27 @@ fn the_image_reports_its_capabilities() {
     let v = caps.version.as_deref().expect("every ACL2 has a version string");
     assert!(v.starts_with("ACL2 Version"), "{v:?}");
 
-    // This developer's image has both; an older one legitimately has neither,
-    // and the point of the probe is that it says so instead of failing.
-    for c in [Capability::InductionRecords, Capability::RuleDetail] {
-        assert!(caps.has(c), "{c:?} missing on {v}: witness {}", c.witness());
-    }
-    assert_eq!(caps.missing().count(), 0, "nothing else is expected to be absent");
+    // `RuleDetail` is the library's hard floor -- `rules_probe` names a symbol
+    // ACL2 8.7 introduced, and below it every form's rule detail silently goes
+    // missing. So requiring it is requiring the suite's own premise.
+    assert!(
+        caps.has(Capability::RuleDetail),
+        "this suite needs an ACL2 8.7 or later: witness {}",
+        Capability::RuleDetail.witness()
+    );
+
+    // `InductionRecords` is *optional*, so this asserts the probe answers
+    // rather than that the answer is yes -- an image built from the 8.7
+    // release legitimately lacks it. Requiring it here made three tests fail
+    // the day the checkout underneath moved, which is the probe working and
+    // the assertion being wrong about what it was for.
+    let has = caps.has(Capability::InductionRecords);
+    assert_eq!(
+        has,
+        !caps.missing().any(|c| c == Capability::InductionRecords),
+        "has() and missing() must agree: {caps:?}"
+    );
+    eprintln!("induction records on {v}: {}", if has { "present" } else { "absent" });
 
     let _ = std::fs::remove_dir_all(&dir);
 }
