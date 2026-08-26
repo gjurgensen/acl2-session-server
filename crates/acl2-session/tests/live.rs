@@ -2882,3 +2882,99 @@ fn documented_forms_are_told_apart_from_undocumented_ones() {
     let _ = after;
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Which event kinds a card can carry, and which forms record no event at all.
+///
+/// The kind is `(car event)` from the entry `event-data-fal` holds, falling
+/// back to the head of `form` -- so it is whatever ACL2 recorded, and not a
+/// set this crate chooses. ACL2 does have a closed set, `(primitive-event-macros)`,
+/// 41 symbols in a current image; but that is the set of forms admissible in a
+/// book, and it is much wider than the set that reaches a card. Most of its
+/// members build nothing and are summarised with no event at all.
+///
+/// So this pins the narrow set empirically. It is the list a per-kind rule --
+/// like the one that stops `verify-guards` repeating a definition's record --
+/// has to be written against, and if a new ACL2 starts recording where it did
+/// not, this is where that shows up.
+///
+/// `defstobj` is the shape worth keeping in view: one form, five `defun`
+/// events, none of them named in the source. `make-event` likewise records
+/// its *expansion*, so the kind is what the expansion was.
+#[test]
+#[ignore = "needs ACL2"]
+fn the_kinds_an_event_can_have_are_few() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("event-kinds");
+    let book = dir.join("kinds.lisp");
+
+    // The ones that record nothing. Every one is a `primitive-event-macros`
+    // member, and every one is summarised without an event: they change a
+    // table, a theory or a label rather than building something the prover
+    // had to work on.
+    let quiet = [
+        "(defconst *zz-c* 7)",
+        "(defmacro zz-mac (x) (list 'list x))",
+        "(defaxiom zz-ax (equal (zz-q x) x) :rule-classes nil)",
+        "(defchoose zz-ch zz-w (zz-v) (equal zz-w zz-v))",
+        "(deflabel zz-label)",
+        "(deftheory zz-th '(zz-q))",
+        "(in-theory (disable zz-q))",
+        "(theory-invariant t)",
+        "(value-triple 3)",
+        "(table zz-table 'k 'v)",
+    ];
+    let mut forms: Vec<String> = vec![
+        "(in-package \"ACL2\")".into(),
+        "(defun zz-q (x) x)".into(),
+    ];
+    forms.extend(quiet.iter().map(|s| s.to_string()));
+    let noisy: Vec<(&str, Vec<&str>)> = vec![
+        ("(defun zz-f (x) (declare (xargs :guard t)) x)", vec!["defun"]),
+        ("(defuns (zz-u (x) x))", vec!["defuns"]),
+        ("(defthm zz-thm (equal (zz-f x) x))", vec!["defthm"]),
+        ("(defstobj zz-st (zz-fld :type integer :initially 0))",
+         vec!["defun", "defun", "defun", "defun", "defun"]),
+        ("(mutual-recursion\n  (defun zz-m1 (x) (if (consp x) (zz-m2 (cdr x)) nil))\n\
+            \x20 (defun zz-m2 (x) (if (consp x) (zz-m1 (cdr x)) nil)))",
+         vec!["mutual-recursion"]),
+        // A wrapper records what is inside it, not itself.
+        ("(progn (defun zz-p1 (x) x))", vec!["defun"]),
+        ("(encapsulate (((zz-h *) => *)) (local (defun zz-h (x) x)))", vec!["defun"]),
+        ("(make-event '(defun zz-me (x) x))", vec!["defun"]),
+        ("(defun zz-g (x) (declare (xargs :guard (natp x) :verify-guards nil)) (nfix x))",
+         vec!["defun"]),
+        // The one whose kind comes from the *form* rather than the event: its
+        // entry records the form as a fmt string, so the head is read there.
+        ("(verify-guards zz-g)", vec!["verify-guards"]),
+    ];
+    forms.extend(noisy.iter().map(|(f, _)| f.to_string()));
+    let refs: Vec<&str> = forms.iter().map(String::as_str).collect();
+    write(&book, &refs);
+
+    let mut b = Book::open(&acl2, &book).expect("open");
+    b.set_inner_detail(200);
+    let o = b.sync(None, Duration::from_secs(600)).expect("sync");
+    assert!(o.failed.is_none(), "every form admits: {:?}", o.failed);
+
+    let kinds = |i: usize| -> Vec<String> {
+        o.admitted[i].inner.iter()
+            .map(|e| e.kind.clone().unwrap_or_else(|| "<none>".into()))
+            .collect()
+    };
+    // in-package, the helper, then the quiet ones.
+    for (n, form) in quiet.iter().enumerate() {
+        assert!(kinds(n + 2).is_empty(), "{form} records no event: {:?}", kinds(n + 2));
+    }
+    for (n, (form, want)) in noisy.iter().enumerate() {
+        assert_eq!(kinds(n + 2 + quiet.len()), *want, "the events of {form}");
+    }
+
+    // And the whole set, so a kind appearing that none of these forms writes
+    // is noticed here rather than in a card nobody wrote a rule for.
+    let mut all: Vec<String> =
+        o.admitted.iter().flat_map(|u| u.inner.iter().filter_map(|e| e.kind.clone())).collect();
+    all.sort();
+    all.dedup();
+    assert_eq!(all, ["defthm", "defun", "defuns", "mutual-recursion", "verify-guards"],
+               "the kinds these forms can produce");
+}
