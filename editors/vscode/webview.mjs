@@ -948,6 +948,49 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   check(pinnedIndex(at(4, 1), units) === undefined, 'and neither is a line with no form on it');
 }
 
+// ---- an event that did not define the name shows none of its record ----
+{
+  const one = (kind) =>
+    envelope({ checkpoints: [], rules: [], inner: [{
+      name: 'foo', kind, proverSteps: 120, rules: ['(:rewrite natp-of-foo)'],
+      detail: { name: 'foo', formals: '(x)', guard: '(natp x)',
+                measure: '(acl2-count x)', short: 'does a thing',
+                symbolClass: ':common-lisp-compliant',
+                runes: [{ rune: '(:definition foo)', class: ':definition',
+                          enabled: true, fields: [] }] },
+    }] }, 'p:');
+
+  // `verify-guards` proves an obligation about a function some *earlier*
+  // event defined. The record under that name is the definition's, so every
+  // one of these was the defun's card repeated under a heading that had not
+  // done any of it.
+  const vg = one('verify-guards');
+  for (const [re, what] of [
+    [/\(x\)/, 'the arguments'],
+    [/does a thing/, 'the documentation'],
+    [/natp x/, 'the guard'],
+    [/acl2-count/, 'the measure'],
+    [/introduced/, 'what the definition introduced'],
+    [/1 rule/, 'and the count of it'],
+    [/guards verified/, 'and the class it left the name in'],
+  ]) {
+    check(!re.test(vg), `a verify-guards card does not repeat ${what}`);
+  }
+
+  // What is left is what the event did: its own cost, and the rules its own
+  // proof consumed.
+  check(/120 steps/.test(vg), 'it keeps what the proof cost');
+  check(/used \(1\)/.test(vg) && /natp-of-foo/.test(vg),
+    'and the rules that proof used, which are its own');
+
+  // The same detail on the event that *did* define the name is all shown --
+  // this is about which event a record belongs to, not about hiding records.
+  const df = one('defun');
+  for (const re of [/\(x\)/, /does a thing/, /natp x/, /acl2-count/, /introduced/]) {
+    check(re.test(df), 'a defun card still carries its own record');
+  }
+}
+
 // ---- documentation lands on the name it belongs to ----
 {
   // Through `envelope`, like every other rendering test here: it is the entry

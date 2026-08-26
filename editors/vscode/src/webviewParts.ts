@@ -537,7 +537,15 @@ function usedHtml(rules) {
  * and uses one is the case that makes it plain.
  */
 function eventHtml(e, p, openByDefault) {
-  const d = e.detail;
+  // What the name's own record says, where this event is the one that made
+  // the record. \`verify-guards\` is not: it proves a guard obligation about a
+  // function some earlier event defined, and the record it looks up under
+  // that name is the *definition's* -- its arguments, its documentation, its
+  // guard and measure, the rules it wrote, the class it left the name in.
+  // Reported here, all of that is the defun's card said a second time under a
+  // heading that did none of it. What belongs to this event is what its own
+  // proof consumed -- the used fold -- and what that cost.
+  const d = /^verify-guards\+?$/i.test(e.kind || '') ? undefined : e.detail;
   // A probed event has *something* -- kind, time, rules. Saying "no steps"
   // where the probe never reached is a claim we cannot make, so a blank cell
   // keeps meaning "not looked at".
