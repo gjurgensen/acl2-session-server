@@ -120,7 +120,12 @@ export function xdocHtml(src: string): DocHtml {
   /** A code block: lifted out whole, dedented, coloured by the host. */
   const holdBlock = (text: string): string => {
     const slot = code.length;
-    const body = dedent(text);
+    // Entities decoded here, as they are for inline code below: a block is
+    // lifted out before the pass that would otherwise do it, so left alone it
+    // keeps `&rarr;` as five characters. Every `define` writes one -- its
+    // generated signature line is `(f x) &rarr; y` -- so this is the common
+    // case, not a corner of the markup.
+    const body = dedent(ents(text));
     code.push({ slot, text: body });
     return holdInline(`<pre data-code="${slot}">${esc(body)}</pre>`);
   };

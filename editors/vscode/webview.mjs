@@ -804,6 +804,14 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   // Code. Blocks and inline code are lifted out before anything else and
   // handed to the host separately -- the host colours them with the editor's
   // grammar -- so both the copy in the page and the copy in `code` matter.
+  // A code block's entities are decoded, like an inline one's: it is lifted
+  // out ahead of the pass that would do it, and every `define` writes a
+  // signature line reading `(f x) &rarr; y`.
+  const arrow = xdocHtml('<code>(f x) &rarr; y</code>');
+  check(/\u2192/.test(arrow.html), 'an entity in a code block becomes its character');
+  check(arrow.code[0].text.includes('\u2192'),
+    'and the lifted copy the host colours has it too, so the two agree');
+
   const withCode = xdocHtml('@({ <script>alert(1)</script> })');
   check(withCode.html.includes('&lt;script&gt;') && !withCode.html.includes('<script>'),
         'a code block reaches the page escaped');

@@ -1768,7 +1768,13 @@ impl Book {
         }
         let bare = name.rsplit("::").next().unwrap_or(name).to_ascii_uppercase();
         let r = self.query(&doc_topic_probe(&bare), deadline)?;
-        Ok(r.block("topic").map(str::to_string).filter(|t| !t.trim().is_empty()))
+        // `nil` is ACL2 printing "this topic has no body", the same answer
+        // `doc_index` already reads that way for a missing summary. Passed
+        // through, it reaches a reader as the word "nil" at the top of a
+        // topic, and a caller asking "is there a body" as yes.
+        Ok(r.block("topic")
+            .map(str::to_string)
+            .filter(|t| !t.trim().is_empty() && !is_nil(t)))
     }
 
     /// Turn a completed (or timed-out) eval submission into a result, undoing
