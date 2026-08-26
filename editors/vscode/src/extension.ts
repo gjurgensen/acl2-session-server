@@ -287,6 +287,23 @@ function hoverWidth(): number {
   return vscode.workspace.getConfiguration('acl2-session').get<number>('hoverWidth', 60);
 }
 
+/** Workspace-state key for the fold kind defaults. See `fold` in `webviewParts`. */
+const FOLD_KINDS_KEY = 'acl2-session.foldKinds';
+
+/**
+ * Push a change to the fold kind defaults everywhere but its source.
+ *
+ * Set in `activate`, because only there is the extension context -- and so
+ * the workspace state -- in hand. Held at module scope because the consoles
+ * that need it are built lazily, long afterwards.
+ */
+let spreadFoldKinds:
+  | ((kinds: Record<string, boolean>, from: unknown) => void)
+  | undefined;
+
+/** The stored fold kind defaults, for a pane being built now. */
+let foldKinds: (() => Record<string, boolean>) | undefined;
+
 export function activate(context: vscode.ExtensionContext): void {
   decorations = new Decorations(context);
   outputView = new OutputView(
@@ -342,6 +359,31 @@ export function activate(context: vscode.ExtensionContext): void {
   channel = vscode.window.createOutputChannel('ACL2');
   problems = vscode.languages.createDiagnosticCollection('acl2');
   context.subscriptions.push(problems);
+
+  // Fold state that is *not* about one form -- which kinds of pane this
+  // reader wants open -- is a standing preference, so it lives in workspace
+  // state rather than dying with the window. The per-form half deliberately
+  // does not: it is a reading position, and a stale one is worse than none.
+  //
+  // Fed to both panes and collected from both, because a preference that held
+  // in the form view and not the console would not be a global one.
+  const storedFoldKinds = (): Record<string, boolean> =>
+    context.workspaceState.get<Record<string, boolean>>(FOLD_KINDS_KEY, {});
+  // Consoles are per book and built on first use, so the fan-out is over
+  // whichever exist right now; a console opened later is handed the stored
+  // state when it is built (`consoleFor`).
+  spreadFoldKinds = (kinds, from) => {
+    void context.workspaceState.update(FOLD_KINDS_KEY, kinds);
+    // Back to every pane *except* the one that sent it: that one already has
+    // it, and handing it back re-renders it under the reader's cursor.
+    if (from !== formView) { formView.setFoldKinds(kinds); }
+    for (const s of books.values()) {
+      if (s.console && s.console !== from) { s.console.setFoldKinds(kinds); }
+    }
+  };
+  foldKinds = storedFoldKinds;
+  formView.onFoldKinds = (kinds) => spreadFoldKinds?.(kinds, formView);
+  formView.setFoldKinds(storedFoldKinds());
 
   formView.onCols = (cols) => setLayout(cols);
   // Not the `showOutput` command: that resolves a book from the active text
@@ -423,6 +465,13 @@ export function activate(context: vscode.ExtensionContext): void {
     // Wrapped rather than passed bare, for the reason `webview.mjs` checks:
     // a bare registration receives whatever VSCode hands the command, and an
     // arrow that declares no parameters cannot quietly grow one.
+    vscode.commands.registerCommand('acl2-session.resetFolds', () => {
+      void context.workspaceState.update(FOLD_KINDS_KEY, {});
+      formView.resetFolds();
+      for (const s of books.values()) {
+        s.console?.resetFolds();
+      }
+    }),
     vscode.commands.registerCommand('acl2-session.indent', () => indentCommand()),
     // `:` triggers so keyword families appear without a word first; the rest
     // is VSCode's own 24x7 word completion.
@@ -2252,6 +2301,8 @@ function consoleFor(s: BookSession): Console {
     c.onEval = (seq, form) => void consoleEval(s, seq, form);
     c.onGoal = (seq, goal, slot) => void fetchEvalGoal(s, seq, goal, slot);
     c.onFullLog = (seq) => void showEvalLog(s, seq);
+    c.onFoldKinds = (kinds) => spreadFoldKinds?.(kinds, c);
+    c.setFoldKinds(foldKinds?.() ?? {});
     s.console = c;
   }
   return s.console;
@@ -3340,6 +3391,9 @@ function buildFormModel(s: BookSession, index: number): FormModel | undefined {
   if (!st || !u) {
     return undefined;
   }
+  // Read before the early return below, because the fold key is wanted even
+  // for a form with nothing else to show yet.
+  const ev = s.unitEvents.get(index);
   const model: FormModel = {
     book: s.id,
     index,
@@ -3349,6 +3403,11 @@ function buildFormModel(s: BookSession, index: number): FormModel | undefined {
     colStart: u.col_start,
     colEnd: u.col_end,
     status: u.status,
+    // What the form writes, as its identity for fold memory -- the split's
+    // names, not ACL2's, so re-admitting a form does not move its folds.
+    // Absent for a form that writes nothing, where the page falls back to the
+    // index.
+    foldKey: (ev?.names ?? []).length ? (ev?.names ?? []).join(',') : undefined,
     checkpoints: [],
     rules: [],
   };
@@ -3357,9 +3416,8 @@ function buildFormModel(s: BookSession, index: number): FormModel | undefined {
   if (u.status === 'pending' || u.status === 'beyond' || u.status === 'running') {
     return model;
   }
-  const e = s.unitEvents.get(index);
-  if (e) {
-    Object.assign(model, toPanelEnvelope(e), { elapsedMs: e.elapsed_ms });
+  if (ev) {
+    Object.assign(model, toPanelEnvelope(ev), { elapsedMs: ev.elapsed_ms });
   }
   return model;
 }

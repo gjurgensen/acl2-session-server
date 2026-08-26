@@ -402,6 +402,11 @@
         "command": "acl2-session.indent",
         "category": "ACL2",
         "title": "Indent Line or Selection"
+      },
+      {
+        "command": "acl2-session.resetFolds",
+        "category": "ACL2",
+        "title": "Reset Collapsed Sections"
       }
     ],
     "configuration": {

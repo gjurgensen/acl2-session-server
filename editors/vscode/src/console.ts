@@ -61,6 +61,10 @@ export class Console {
   onEval?: (seq: number, form: string) => void;
   onGoal?: (seq: number, goal: string, slot: number) => void;
   onFullLog?: (seq: number) => void;
+  /** The host's fold kind defaults, replayed onto every panel built. */
+  private foldKinds: Record<string, boolean> = {};
+  /** The reader moved a fold's kind default. See `FormView.onFoldKinds`. */
+  onFoldKinds?: (kinds: Record<string, boolean>) => void;
 
   tokenizer?: (text: string) => TokLines | undefined;
 
@@ -102,6 +106,7 @@ export class Console {
     );
     this.panel.iconPath = this.iconPath;
     this.panel.webview.html = pageHtml(html(this.title), this.panel.webview);
+    this.post({ kind: 'folds', kinds: this.foldKinds });
     this.panel.webview.onDidReceiveMessage(
       (m: {
         cmd?: string;
@@ -111,12 +116,21 @@ export class Console {
         slot?: number;
         gen?: number;
         text?: string;
+        kinds?: Record<string, boolean>;
       }) => {
         // Answered here rather than through the extension: the console
         // already holds the tokenizer, and a keystroke should not have to
         // travel any further than it must.
         if (m.cmd === 'hl' && typeof m.gen === 'number') {
           this.post({ kind: 'inputToks', gen: m.gen, lines: this.tokenizer?.(m.text ?? '') });
+          return;
+        }
+        // A fold's kind default is a preference about what this reader wants
+        // to look at, not about which pane they were looking at when they
+        // said so -- so it leaves here the same way it leaves the form view,
+        // and the host feeds it back to both.
+        if (m.cmd === 'folds' && m.kinds) {
+          this.onFoldKinds?.(m.kinds);
           return;
         }
         if (m.cmd === 'ready') {
@@ -144,6 +158,29 @@ export class Console {
       this.ready = false;
       this.queued = [];
     });
+  }
+
+  /**
+   * Hand the page the stored kind defaults, and keep them.
+   *
+   * Kept because a panel that does not exist yet cannot be told: the host
+   * reads workspace state once at activation, long before anyone opens this
+   * view, and a message sent to no panel is dropped. So the value is held
+   * here and replayed whenever a panel is built -- without which a stored
+   * preference would sit unused until the reader happened to toggle
+   * something, which is exactly when they would least expect it to change.
+   */
+  setFoldKinds(kinds: Record<string, boolean>): void {
+    this.foldKinds = kinds;
+    this.post({ kind: 'folds', kinds });
+  }
+
+  /** Forget every fold. See `FormView.resetFolds`. */
+  resetFolds(): void {
+    // The held copy too: a panel built after a reset would otherwise replay
+    // the very defaults the reset was asked to forget.
+    this.foldKinds = {};
+    this.post({ kind: 'foldsReset' });
   }
 
   private post(message: unknown): void {
@@ -337,6 +374,12 @@ window.addEventListener('message', (ev) => {
   } else if (m.kind === 'state') {
     const e = evalAt(m.seq);
     if (e) { e.state = m.state; e.ahead = m.ahead; render(); }
+  } else if (m.kind === 'folds') {
+    foldKindsAre(m.kinds);
+    render();
+  } else if (m.kind === 'foldsReset') {
+    foldsForget();
+    render();
   } else if (m.kind === 'tail') {
     const e = pending();
     if (e) { e.state = 'running'; e.tail = m.text || ''; e.elapsedMs = m.elapsedMs; render(); }
@@ -443,7 +486,7 @@ bindGoals(
 // reader left open on it. Its own per-entry details.ev is separate and stays
 // on e.open, which collapseOthers drives. (No backticks in here: this comment
 // lives inside a template literal, and one would end the string.)
-bindFolds(document);
+bindFolds(document, (kinds) => vscode.postMessage({ cmd: 'folds', kinds }));
 
 // A form is complete when its parens close. Strings, character literals,
 // bar-quoted symbols and both comment syntaxes all hide parens that must not

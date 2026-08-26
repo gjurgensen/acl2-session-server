@@ -343,8 +343,53 @@ function hl(src) {
  * closed, and never touched -- and only the last should take the section's
  * default.
  */
+// Explicit fold state for the form on show: what the reader has actually
+// clicked, on this form's own things. One map per form, kept so that leaving
+// a form and coming back finds it as it was left.
 let folds = {};
+let foldMemory = {};
+let foldOrder = [];
 let foldScope = '';
+
+/**
+ * How many forms' explicit fold state to keep.
+ *
+ * Browsing a large book end to end would otherwise accumulate a map per form
+ * for the life of the window. An LRU rather than a clear-on-overflow, since
+ * the forms worth remembering are the ones recently looked at.
+ */
+const FOLD_SCOPES = 100;
+
+/**
+ * The default for a *kind* of fold, set by the last one of that kind touched.
+ *
+ * Global on purpose, and the reason the whole scheme exists. What makes a
+ * reader collapse a fold is usually a property of the kind and not of the
+ * instance -- a \`used\` list is always long, a \`define\`'s \`introduced\` is
+ * always many runes -- so collapsing one is nearly always a statement about
+ * all of them. Generalising can be wrong, and when it is the cost is one
+ * click to reopen; not generalising is wrong in a way that costs a click per
+ * instance per form, forever.
+ *
+ * Fed from workspace state by the host, so it survives a reload, and shared
+ * by every pane that renders an envelope: a global preference that held in
+ * one pane and not another would not be one.
+ */
+let kindFolds = {};
+
+/** Adopt the host's stored kind defaults. */
+function foldKindsAre(kinds) {
+  kindFolds = kinds || {};
+}
+
+/** Forget everything -- the escape hatch for state nobody can see. */
+function foldsForget() {
+  kindFolds = {};
+  foldMemory = {};
+  foldOrder = [];
+  folds = {};
+  foldScope = '';
+}
 
 /**
  * Say what the folds now belong to, forgetting them if it changed.
@@ -355,14 +400,25 @@ let foldScope = '';
  * never calls this: its transcript is cumulative, so its folds are too.
  */
 function foldScopeIs(scope) {
-  if (scope !== foldScope) {
-    foldScope = scope;
-    folds = {};
+  if (scope === foldScope) {
+    return;
   }
+  foldScope = scope;
+  const seen = foldOrder.indexOf(scope);
+  if (seen !== -1) {
+    foldOrder.splice(seen, 1);
+  } else {
+    foldMemory[scope] = {};
+  }
+  foldOrder.push(scope);
+  while (foldOrder.length > FOLD_SCOPES) {
+    delete foldMemory[foldOrder.shift()];
+  }
+  folds = foldMemory[scope];
 }
 
 /**
- * A \`<details>\` whose open state survives the next render.
+ * A \`<details>\` whose open state survives the next render, and the next form.
  *
  * A *fold* is this: anything that opens and closes. A *card* is a fold with
  * an outline -- an event, a function of a clique, a topic's documentation --
@@ -373,10 +429,27 @@ function foldScopeIs(scope) {
  * \`id\` must be derived from what is inside it -- \`4:event:my-app:introduced\`
  * -- and never from its position. A positional id is wrong the moment a list
  * changes length, which is exactly when a form is re-probed and re-rendered.
+ *
+ * \`kind\` is what this fold *is*, with the names taken out: \`ev:introduced\`
+ * for every event's introduced list. Passed rather than derived from \`id\`,
+ * and that is not fastidiousness -- an event name reaches this page raw, so a
+ * book in another package gives \`ev:fty::thing:introduced\` and any split on
+ * \`:\` recovers the wrong kind. Two folds share a kind exactly when a reader
+ * collapsing one means all of them; the failing form's induction and an
+ * event's are deliberately *not* the same kind, since one is read when a
+ * proof went wrong and the other is noise on a proof that went right.
+ *
+ * Three sources, most specific first: what the reader set on this very fold,
+ * then the default their last gesture on this kind left behind, then the
+ * default this call asks for. So an explicitly-set fold keeps what it was
+ * set to even when the kind default moves under it.
  */
-function fold(id, openByDefault, summaryHtml, bodyHtml, cls) {
-  const open = id in folds ? folds[id] : openByDefault;
+function fold(id, kind, openByDefault, summaryHtml, bodyHtml, cls) {
+  const open = id in folds ? folds[id]
+    : kind && kind in kindFolds ? kindFolds[kind]
+    : openByDefault;
   return '<details data-fold="' + esc(id) + '"' +
+    (kind ? ' data-kind="' + esc(kind) + '"' : '') +
     (cls ? ' class="' + cls + '"' : '') + (open ? ' open' : '') + '>' +
     '<summary>' + summaryHtml + '</summary>' + bodyHtml + '</details>';
 }
@@ -389,11 +462,20 @@ function fold(id, openByDefault, summaryHtml, bodyHtml, cls) {
  * rather than one per element, because the elements are replaced on every
  * render and their listeners would go with them.
  */
-function bindFolds(root) {
+function bindFolds(root, onKinds) {
   root.addEventListener('toggle', (ev) => {
     const d = ev.target;
-    if (d && d.tagName === 'DETAILS' && d.dataset && d.dataset.fold) {
-      folds[d.dataset.fold] = d.open;
+    if (!(d && d.tagName === 'DETAILS' && d.dataset && d.dataset.fold)) {
+      return;
+    }
+    // Both, always: the explicit entry is what keeps this fold where the
+    // reader put it, and the kind default is what carries the gesture to the
+    // ones they have not touched.
+    folds[d.dataset.fold] = d.open;
+    const k = d.dataset.kind;
+    if (k && kindFolds[k] !== d.open) {
+      kindFolds[k] = d.open;
+      if (onKinds) { onKinds(kindFolds); }
     }
   }, true);
 }
@@ -639,12 +721,12 @@ function memberHtml(d, p) {
     (facts.length ? '<span class="efacts meta">' + facts.join(' \u00b7 ') + '</span>' : '');
   let body = nameFacts(d);
   if (runes.length) {
-    body += fold(p + 'mem:' + d.name + ':introduced', false,
+    body += fold(p + 'mem:' + d.name + ':introduced', 'mem:introduced', false,
       '<span class="meta">introduced (' + runes.length + ')</span>',
       introducedHtml(d));
   }
   return body
-    ? fold(p + 'mem:' + d.name, false, head,
+    ? fold(p + 'mem:' + d.name, 'mem', false, head,
            '<div class="cinside">' + body + '</div>', 'card')
     : '<div class="card bare"><div class="csum">' + head + '</div></div>';
 }
@@ -726,18 +808,23 @@ function eventHtml(e, p, openByDefault, at) {
   // facts line above already says "N rules, M off", and each disabled rule
   // carries its badge once the fold is open. (No backticks: template literal.)
   if (runes.length) {
-    body += fold(p + 'ev:' + key + ':introduced', true,
+    body += fold(p + 'ev:' + key + ':introduced', 'ev:introduced', true,
       '<span class="meta">introduced (' + runes.length + ')</span>',
       introducedHtml(d));
   }
   // Beside the theorem that inducted, which is the whole point: a form is
   // often several events, they all number their goals from \`*1\`, and a flat
-  // list of schemes attached to none of them. Open by default -- an event
-  // that inducted at all is the interesting one on the card, and there are
-  // rarely more than two.
+  // list of schemes attached to none of them.
+  //
+  // Closed by default, unlike the failing form's. A scheme is read when a
+  // proof went *wrong*; on one that went right it is a large block saying
+  // something nobody asked -- and a card that opens with one buries the
+  // rules and the cost, which is what the card is for. The two are separate
+  // kinds for exactly this reason, so collapsing one never speaks for the
+  // other.
   const inds = e.inductions || [];
   if (inds.length) {
-    body += fold(p + 'ev:' + key + ':inducted', true,
+    body += fold(p + 'ev:' + key + ':inducted', 'ev:inducted', false,
       '<span class="meta">inducted (' + inds.length + ')</span>',
       inductionHtml(inds));
   }
@@ -747,7 +834,7 @@ function eventHtml(e, p, openByDefault, at) {
   // written only its rules -- the others' rules appeared nowhere at all.
   body += members.map((mem) => memberHtml(mem, p + 'ev:' + key + ':')).join('');
   if (used.length) {
-    body += fold(p + 'ev:' + key + ':used', false,
+    body += fold(p + 'ev:' + key + ':used', 'ev:used', false,
       '<span class="meta">used (' + used.length + ')</span>',
       usedHtml(used));
   }
@@ -770,7 +857,7 @@ function eventHtml(e, p, openByDefault, at) {
     const head = '<span class="meta">documentation</span>' +
       (d.short ? '<div class="dsum">' + withCode(d.short, d.shortCode) + '</div>' : '');
     body = (d.long
-      ? fold(p + 'ev:' + key + ':documentation', false, head,
+      ? fold(p + 'ev:' + key + ':documentation', 'ev:documentation', false, head,
              '<div class="cinside doclong">' + withCode(d.long, d.longCode) + '</div>',
              'card')
       // Nothing to open: a chevron onto nothing is worse than no chevron.
@@ -801,7 +888,7 @@ function eventHtml(e, p, openByDefault, at) {
   // An event with nothing under it gets no fold: a chevron that opens onto
   // nothing is worse than no chevron.
   return body
-    ? fold(p + 'ev:' + key, openByDefault, head,
+    ? fold(p + 'ev:' + key, 'ev', openByDefault, head,
            '<div class="cinside">' + body + '</div>', 'card')
     : '<div class="card bare"><div class="csum">' + head + '</div></div>';
 }
@@ -827,7 +914,7 @@ function eventHtml(e, p, openByDefault, at) {
 function docsHtml(m, p) {
   const docs = m.docs || [];
   if (!docs.length) { return ''; }
-  return fold(p + 'docs', true, '<h3>Documented (' + docs.length + ')</h3>',
+  return fold(p + 'docs', 'docs', true, '<h3>Documented (' + docs.length + ')</h3>',
     docs.map((d) => docCard(d, p)).join(''));
 }
 
@@ -870,7 +957,7 @@ function docCard(d, p) {
   const head = '<code class="ename">' + esc(d.name) + '</code>' +
     (d.short ? '<div class="dsum">' + withCode(d.short, d.shortCode) + '</div>' : '');
   return d.long
-    ? fold(p + 'doc:' + d.name, false, head,
+    ? fold(p + 'doc:' + d.name, 'doc', false, head,
            '<div class="cinside doclong">' + withCode(d.long, d.longCode) + '</div>',
            'card')
     : '<div class="card bare"><div class="csum">' + head + '</div></div>';
@@ -916,7 +1003,7 @@ function productiveHtml(m, p) {
   // A form that records six hundred events is a page the reader has to scroll
   // past to reach anything below it, and the count in the heading is often
   // the whole of what they wanted from it.
-  return head + fold(p + 'events', true, '<h3>Events (' + total + ')</h3>', events) +
+  return head + fold(p + 'events', 'events', true, '<h3>Events (' + total + ')</h3>', events) +
     docsHtml(m, p);
 }
 
@@ -993,11 +1080,11 @@ function failureHtml(m, p, on, goals) {
   // with them.
   const failedInd = bad ? (bad.inductions || []) : [];
   if (failedInd.length) {
-    h += fold(p + 'inducted', true,
+    h += fold(p + 'inducted', 'failed:inducted', true,
       '<h3>Induction (' + failedInd.length + ')</h3>', inductionHtml(failedInd));
   }
   if ((m.rules || []).length) {
-    h += fold(p + 'rules', true, '<h3>Rules (' + m.rules.length + ')</h3>',
+    h += fold(p + 'rules', 'rules', true, '<h3>Rules (' + m.rules.length + ')</h3>',
       usedHtml(m.rules));
   }
   if ((m.hintEvents || []).length) {
@@ -1023,7 +1110,7 @@ function failureHtml(m, p, on, goals) {
   // events before one of them failed.
   const before = inner.filter((e) => e !== bad).slice().reverse();
   if (before.length) {
-    h += fold(p + 'before', false,
+    h += fold(p + 'before', 'before', false,
       '<h3>Admitted before the failure (' + before.length + ')</h3>',
       before.map((e, i) => eventHtml(e, p, false, i)).join(''));
   }
@@ -1035,7 +1122,7 @@ function warningsHtml(m, p) {
   if (!m.warnings) { return ''; }
   // The daemon joins the kinds with ", ", so splitting counts them exactly.
   const kinds = String(m.warnings).split(', ');
-  return fold(p + 'warnings', true, '<h3>Warnings (' + kinds.length + ')</h3>',
+  return fold(p + 'warnings', 'warnings', true, '<h3>Warnings (' + kinds.length + ')</h3>',
     '<pre>' + esc(m.warnings) + '</pre>');
 }
 

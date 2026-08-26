@@ -207,6 +207,16 @@ export interface FormModel extends FormEnvelope {
   colEnd: number;
   /** The paint status: `admitted`, `conditional`, `skipped`, `failed`, ... */
   status: string;
+  /**
+   * What identifies this form for fold memory -- its names, joined.
+   *
+   * Not the index, which moves whenever a form is inserted above this one,
+   * and not the content, which changes on every edit while a reader is
+   * iterating on the very proof whose folds they arranged. A name survives
+   * both. Absent for a form that writes none (`include-book`, a bare `thm`),
+   * where the page falls back to the index and accepts the drift.
+   */
+  foldKey?: string;
 }
 
 /** The strings in an induction record that are ACL2 code rather than prose. */
@@ -375,7 +385,20 @@ export class FormView {
    */
   onCols?: (cols: number) => void;
 
+  /**
+   * The reader moved a fold's kind default, and the host should store it.
+   *
+   * Kind defaults are workspace state rather than page state: they are a
+   * standing preference about what this reader wants to look at, and a
+   * preference that died with the window would have to be re-expressed every
+   * morning.
+   */
+  onFoldKinds?: (kinds: Record<string, boolean>) => void;
+
   private lastInduction?: { book: string; index: number; events: FormEventInductions[] };
+
+  /** The host's fold kind defaults, replayed onto every panel built. */
+  private foldKinds: Record<string, boolean> = {};
 
   get visible(): boolean {
     return this.panel !== undefined;
@@ -400,13 +423,20 @@ export class FormView {
     );
     this.panel.iconPath = this.iconPath;
     this.panel.webview.html = pageHtml(HTML, this.panel.webview);
+    // Before anything renders, so the first form is drawn with the reader's
+    // own defaults rather than the shipped ones and then corrected.
+    this.send({ kind: 'folds', kinds: this.foldKinds });
     this.panel.webview.onDidReceiveMessage(
-      (m: { cmd?: string; cols?: number }) => {
+      (m: { cmd?: string; cols?: number; kinds?: Record<string, boolean> }) => {
       // Width first: it arrives before any form is shown, and re-flowing is
       // the whole reason the page reports it.
       if (m.cmd === 'cols' && typeof m.cols === 'number' && m.cols !== this.cols) {
         this.cols = m.cols;
         this.onCols?.(this.layoutCols());
+        return;
+      }
+      if (m.cmd === 'folds' && m.kinds) {
+        this.onFoldKinds?.(m.kinds);
         return;
       }
       if (m.cmd === 'showOutput' && this.model) {
@@ -570,6 +600,35 @@ export class FormView {
     this.send({ kind: 'note', text });
   }
 
+  /**
+   * Hand the page the stored kind defaults, and keep them.
+   *
+   * Kept because a panel that does not exist yet cannot be told: the host
+   * reads workspace state once at activation, long before anyone opens this
+   * view, and a message sent to no panel is dropped. So the value is held
+   * here and replayed whenever a panel is built -- without which a stored
+   * preference would sit unused until the reader happened to toggle
+   * something, which is exactly when they would least expect it to change.
+   */
+  setFoldKinds(kinds: Record<string, boolean>): void {
+    this.foldKinds = kinds;
+    this.send({ kind: 'folds', kinds });
+  }
+
+  /**
+   * Forget every fold, everywhere.
+   *
+   * The escape hatch this scheme needs by construction: a default set months
+   * ago is invisible, so a reader wondering why a section is empty has
+   * nothing on screen to tell them and no way back without it.
+   */
+  resetFolds(): void {
+    // The held copy too: a panel built after a reset would otherwise replay
+    // the very defaults the reset was asked to forget.
+    this.foldKinds = {};
+    this.send({ kind: 'foldsReset' });
+  }
+
   /** Re-send the current model, for when the theme changed under us. */
   refresh(): void {
     if (this.model) {
@@ -727,9 +786,16 @@ window.addEventListener('message', (ev) => {
   if (m.kind === 'model') {
     model = m.model;
     toks = m.toks || {};
-    const key = m.model.book + ':' + m.model.index;
-    // Folds belong to a form. Arriving at a different one forgets them, the
-    // same as the rules records below.
+    // Keyed by what the form *is*, not where it sits. An index shifts the
+    // moment a form is inserted above this one, and the folds a reader set
+    // would then be found by a different form -- silently, and during the
+    // edit-and-re-admit loop this memory exists to serve. The key is the
+    // form's own names, falling back to the index only where there are none.
+    // (No backticks in here: this comment lives inside a template literal.)
+    const key = m.model.book + ':' + (m.model.foldKey || 'ix:' + m.model.index);
+    // Which form's *explicit* fold state to use. Kept when it is left, so
+    // coming back finds it as it was; the rules records below are dropped
+    // instead, being a fetch rather than a decision the reader made.
     foldScopeIs(key);
     // What the form introduced rides with the model when it is known,
     // dropped when the form changed, kept when this is the same form again.
@@ -759,6 +825,14 @@ window.addEventListener('message', (ev) => {
     Object.assign(toks, m.toks || {});
     ruleEntries = m.entries || [];
     rulesKey = m.book + ':' + m.index;
+    render();
+  } else if (m.kind === 'folds') {
+    // The host's stored kind defaults, on the way in. Sent before the first
+    // model, and again whenever another pane moves one.
+    foldKindsAre(m.kinds);
+    render();
+  } else if (m.kind === 'foldsReset') {
+    foldsForget();
     render();
   } else if (m.kind === 'note') {
     note = m.text;
@@ -866,7 +940,7 @@ function render() {
     // re-tokenize twice a second, because a webview cannot do what the
     // output view does -- that is a real TextDocument, colored by VSCode
     // from its language. So hand the reader to the thing that already works.
-    h += fold('tail', true,
+    h += fold('tail', 'tail', true,
       '<h3>Prover output <span id="elapsed" class="meta"></span></h3>',
       '<pre id="tailtext">(waiting for output\\u2026)</pre>', 'tail') +
       '<p class="openrow"><button id="openoutput">Open in Output view</button></p>';
@@ -890,7 +964,7 @@ function render() {
   root.innerHTML = h;
 }
 
-bindFolds(document);
+bindFolds(document, (kinds) => vscode.postMessage({ cmd: 'folds', kinds }));
 
 // The output view is a command away, and the tail is the one thing this page
 // deliberately does not render well.

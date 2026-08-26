@@ -333,9 +333,10 @@ check(spans([[{ t: 'a', c: '' }], [{ t: 'b', c: '' }]]) === 'a\nb', 'and joins l
 // its section's default says open.
 
 {
-  const { fold, foldScopeIs, bindFolds } =
-    liftAll(['esc', 'folds', 'foldScope', 'foldScopeIs', 'fold', 'bindFolds'],
-            '({ fold, foldScopeIs, bindFolds })');
+  const { fold, foldScopeIs, bindFolds, foldKindsAre, foldsForget } =
+    liftAll(['esc', 'folds', 'foldMemory', 'foldOrder', 'foldScope', 'FOLD_SCOPES',
+             'kindFolds', 'foldKindsAre', 'foldsForget', 'foldScopeIs', 'fold', 'bindFolds'],
+            '({ fold, foldScopeIs, bindFolds, foldKindsAre, foldsForget })');
 
   // The page binds one listener on the document; this stands in for it, and
   // records how it was bound.
@@ -349,8 +350,10 @@ check(spans([[{ t: 'a', c: '' }], [{ t: 'b', c: '' }]]) === 'a\nb', 'and joins l
   check(capture === true,
     'folds are recorded in the capture phase, since toggle does not bubble');
 
-  const details = (id, open) => ({ tagName: 'DETAILS', dataset: { fold: id }, open });
-  const open = (id, byDefault) => fold(id, byDefault, 'S', 'B').includes(' open>');
+  const details = (id, open, kind) =>
+    ({ tagName: 'DETAILS', dataset: kind ? { fold: id, kind } : { fold: id }, open });
+  const open = (id, byDefault, kind) =>
+    fold(id, kind, byDefault, 'S', 'B').includes(' open>');
 
   check(open('a', true), 'an untouched fold takes its section default');
   check(!open('b', false), 'and a closed default stays closed');
@@ -365,18 +368,97 @@ check(spans([[{ t: 'a', c: '' }], [{ t: 'b', c: '' }]]) === 'a\nb', 'and joins l
   foldScopeIs('book:4');
   check(!open('c', true), 'a re-render of the same form keeps what they left');
   foldScopeIs('book:5');
-  check(open('c', true), 'while moving to another form forgets it');
+  check(open('c', true), 'while another form starts from the section default');
+  // The point of keying by form: coming back finds it as it was left.
+  foldScopeIs('book:4');
+  check(!open('c', true), 'and coming back to the first finds it as they left it');
 
-  check(fold('4:event:my-app:introduced', true, 'S', 'B')
+  check(fold('4:event:my-app:introduced', null, true, 'S', 'B')
           .includes('data-fold="4:event:my-app:introduced"'),
     'the id is carried on the element, so the next render can find it again');
-  check(fold('a&b', true, 'S', 'B').includes('data-fold="a&amp;b"'),
+  check(fold('a&b', null, true, 'S', 'B').includes('data-fold="a&amp;b"'),
     'and escaped, since an ACL2 name is not HTML');
 
   // Neither of these is a fold; neither should be recorded or throw.
   toggled({ target: { tagName: 'DETAILS', dataset: {} } });
   toggled({ target: { tagName: 'DIV', dataset: { fold: 'a' } } });
   check(open('a', true), 'a details with no id, and a non-details, are both ignored');
+
+  foldsForget();
+}
+
+// ---- a fold's kind carries the gesture to the ones not touched ----
+//
+// The generalising rule. What makes a reader collapse a fold is usually a
+// property of its kind -- a `used` list is always long -- so one gesture
+// speaks for all of them. Being wrong costs a click; not generalising costs a
+// click per instance per form, forever.
+{
+  const { fold, foldScopeIs, bindFolds, foldKindsAre, foldsForget } =
+    liftAll(['esc', 'folds', 'foldMemory', 'foldOrder', 'foldScope', 'FOLD_SCOPES',
+             'kindFolds', 'foldKindsAre', 'foldsForget', 'foldScopeIs', 'fold', 'bindFolds'],
+            '({ fold, foldScopeIs, bindFolds, foldKindsAre, foldsForget })');
+  let toggled;
+  let sent;
+  bindFolds(
+    { addEventListener: (type, fn) => { if (type === 'toggle') { toggled = fn; } } },
+    (kinds) => { sent = { ...kinds }; }
+  );
+  const details = (id, open, kind) =>
+    ({ tagName: 'DETAILS', dataset: { fold: id, kind }, open });
+  const open = (id, byDefault, kind) =>
+    fold(id, kind, byDefault, 'S', 'B').includes(' open>');
+
+  foldScopeIs('book:form-a');
+  check(open('ev:foo:used', true, 'ev:used'), 'to begin with, the default rules');
+  toggled({ target: details('ev:foo:used', false, 'ev:used') });
+  check(!open('ev:bar:used', true, 'ev:used'),
+        'collapsing one carries to another of the same kind, untouched');
+  check(open('ev:foo:introduced', true, 'ev:introduced'),
+        'and not to a different kind');
+
+  // Explicit beats inherited: a fold set by hand keeps what it was set to
+  // even when the kind default moves under it afterwards.
+  toggled({ target: details('ev:baz:used', true, 'ev:used') });
+  check(open('ev:baz:used', false, 'ev:used'), 'the one just opened is open');
+  check(!open('ev:foo:used', true, 'ev:used'),
+        'and the one explicitly closed earlier stays closed');
+  check(open('ev:qux:used', false, 'ev:used'),
+        'while an untouched one follows the newest gesture');
+
+  // The kind default is not per form -- that is the whole point of it.
+  foldScopeIs('book:form-b');
+  check(open('ev:new:used', false, 'ev:used'),
+        'a different form inherits the kind default, not the section default');
+  check(!open('ev:foo:used', true, 'ev:used') === false,
+        'though the explicit entry belonged to the form it was set on');
+
+  // What leaves for the host, so it can be stored and fed to the other pane.
+  check(sent && sent['ev:used'] === true, 'the kind map is handed out on change');
+
+  // The host feeding stored state back in.
+  foldKindsAre({ 'ev:used': false, events: false });
+  check(!open('ev:brand-new:used', true, 'ev:used') && !open('events', true, 'events'),
+        'stored defaults arrive from workspace state and apply at once');
+
+  foldsForget();
+  check(open('events', true, 'events') && open('ev:brand-new:used', true, 'ev:used'),
+        'and the reset command puts every kind back to its shipped default');
+}
+
+// ---- fold memory is bounded ----
+//
+// Browsing a large book end to end would otherwise keep a map per form for
+// the life of the window.
+{
+  const { fold, foldScopeIs, foldsForget, scopes } =
+    liftAll(['esc', 'folds', 'foldMemory', 'foldOrder', 'foldScope', 'FOLD_SCOPES',
+             'kindFolds', 'foldKindsAre', 'foldsForget', 'foldScopeIs', 'fold', 'bindFolds'],
+            '({ fold, foldScopeIs, foldsForget, scopes: () => foldOrder.length })');
+  foldsForget();
+  for (let i = 0; i < 250; i++) { foldScopeIs('book:f' + i); }
+  check(scopes() === 100, `at most FOLD_SCOPES forms are remembered (${scopes()})`);
+  foldsForget();
 }
 
 // ---- `envelope`: what a form left behind, per event ----
@@ -389,7 +471,8 @@ check(spans([[{ t: 'a', c: '' }], [{ t: 'b', c: '' }]]) === 'a\nb', 'and joins l
 globalThis.toks = {};
 const envelope = lift('esc', 'strip', 'causes', 'spans', 'hl', 'rat',
                       'fmtSecs', 'timeParts', 'proveSecs', 'fmtTime', 'fmtChars', 'guardNote',
-                      'folds', 'foldScope', 'foldScopeIs', 'fold',
+                      'folds', 'foldMemory', 'foldOrder', 'foldScope', 'FOLD_SCOPES',
+                      'kindFolds', 'foldKindsAre', 'foldsForget', 'foldScopeIs', 'fold',
                       'factRow', 'nameFacts', 'introducedHtml', 'inductionHtml', 'usedHtml',
                       'withCode', 'TITLE_NAMES', 'cliqueTitle', 'memberHtml', 'eventHtml', 'docCard', 'docsHtml', 'productiveHtml', 'failureHtml', 'warningsHtml',
                       'envelope');
