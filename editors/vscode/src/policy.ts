@@ -386,10 +386,16 @@ export function diagnosticMessage(status: string): string {
  * this is a fixed phrase per kind rather than ACL2's actual text. Each phrase
  * is a faithful compression of what ACL2 prints for that kind. Anything not
  * listed falls through to ACL2's own bracket label, which is already
- * capitalised (`Equiv`, `Guards`) and recognizable -- a kind whose meaning
+ * capitalised (`Equiv`, `Meta`) and recognizable -- a kind whose meaning
  * varies too much to compress into one true line is better left as its label
- * than given a phrase that is wrong for some of its instances. No "ACL2
- * Warning:" prefix: the icon and the source column carry that.
+ * than given a phrase that is wrong for some of its instances. That is the
+ * test each of these had to pass: ACL2 emits `Use`, `Guards` and
+ * `Compound-rec` from one place each, saying one thing, so one line can be
+ * true of every instance. `Equiv` and `Disable` are the other case -- several
+ * sites, or one whose point is the particular rule it names -- and they stay
+ * as labels.
+ *
+ * No "ACL2 Warning:" prefix: the icon and the source column carry that.
  */
 export function warningMessage(kind: string): string {
   switch (kind.toLowerCase()) {
@@ -405,6 +411,18 @@ export function warningMessage(kind: string): string {
       return 'Rule unlikely to fire; nonrecursive function in its trigger';
     case 'free':
       return 'Free variables limit where this rule applies';
+    case 'use':
+      // "It is unusual to :USE the formula of an enabled :REWRITE or
+      // :DEFINITION rule, so you may want to consider disabling ..."
+      return 'Unusual to :use an enabled rule; consider disabling it';
+    case 'guards':
+      // About an included book, like Uncertified: "The book X defines the
+      // functions ..., which have not had their guards verified."
+      return 'Includes a book with guards unverified';
+    case 'compound-rec':
+      // "The newly proposed compound recognizer rule X is not as restrictive
+      // as the old rule Y."
+      return 'Compound recognizer is less restrictive than the one it replaces';
     case 'subsume':
       return 'Probably subsumes an existing rule';
     case 'ignored-variables':
