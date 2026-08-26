@@ -523,6 +523,150 @@ pub struct CompletionItem {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct InductionParams {
+    pub book: String,
+    /// A handle from a `unit` event or an `eval` reply.
+    pub output_ref: String,
+}
+
+/// One induction ACL2 performed, from its own records.
+///
+/// Same class of fact as the rest of this wire, which the old version of this
+/// type was not: it came out of ACL2's prose because the scheme was printed
+/// and never recorded, and every field was optional so that a reworded ACL2
+/// dropped one instead of inventing it. These are probed out of the event
+/// data like everything else here, so the fields are simply present.
+#[derive(Debug, Serialize)]
+pub struct InductionWire {
+    /// The pool name: `*1`, `*1.1`. Unique only within its event, which is
+    /// why these arrive grouped by event rather than flat.
+    pub goal: String,
+    /// The term whose recursion suggested the scheme, laid out for the pane.
+    pub suggested: String,
+    /// Terms merged into the scheme alongside `suggested`. Usually empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub accommodating: Vec<String>,
+    /// The `:induction` runes behind the suggestion. Structural, where the
+    /// old field could only be ACL2's English.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub runes: Vec<String>,
+    /// What `:p` stands for in `scheme`.
+    pub p_formula: String,
+    /// The scheme, with `:p` for the conjecture -- or the head of it, when
+    /// `scheme_chars` says there was more.
+    pub scheme: String,
+    /// How long the scheme really is, in characters, when what is above is
+    /// only its head. Absent when the whole thing is there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheme_chars: Option<usize>,
+    /// Present when `scheme` is the first case of a scheme that had this many
+    /// -- a bound ACL2 was asked for, before any of this crate's. Absent when
+    /// every case is here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheme_cases: Option<usize>,
+}
+
+/// One event's inductions.
+#[derive(Debug, Serialize)]
+pub struct EventInductionWire {
+    /// Empty for a `thm`, which introduces nothing to name.
+    pub event: String,
+    pub inductions: Vec<InductionWire>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InductionReply {
+    /// Events that inducted, newest first. Empty is the ordinary case.
+    pub events: Vec<EventInductionWire>,
+    /// False when the image cannot report inductions at all, so a panel can
+    /// say that instead of showing an empty section that looks like a fact
+    /// about this form.
+    pub supported: bool,
+}
+
+/// How much of an induction scheme crosses the wire.
+///
+/// The scheme is the one field here with no bound of its own. ACL2 prints it
+/// with the gag-mode evisc tuple, which is `nil` under this crate's settings,
+/// so nothing is abbreviated -- and for a mutual recursion the scheme *is*
+/// the clique. Measured on `books/kestrel/c/syntax/validator.lisp`: the
+/// `defines` at line 2775 produced three schemes of 6.83 MB each, 20.9 MB in
+/// one reply, against 1.6 MB of real events for the whole book. What that did
+/// to the editor is recorded in `editors/vscode/src/policy.ts`.
+///
+/// So the head of it crosses and the rest stays where every other long piece
+/// of ACL2's output already lives -- behind the output handle, one `output`
+/// request away. Generous on purpose: a scheme a person can actually read
+/// arrives whole, and this is a backstop against the ones nobody can.
+///
+/// Chosen against the client's own limit rather than freely. The panel lays a
+/// scheme out at the pane's width *before* coloring it, and laying out grows
+/// the text -- 6.83 MB became 15.3 MB, about 2.2x. What the panel colors is
+/// therefore what this sends, expanded; if that lands over `MAX_TERM` in
+/// `editors/vscode/src/policy.ts` the scheme arrives cut *and* uncolored,
+/// which is the one combination nobody asked for. This leaves room for the
+/// expansion, and `webview.mjs` holds the two numbers to it.
+///
+/// The probe's own ceiling sits above this one and is measured in `acl2-count`
+/// rather than characters, so a clique scheme is usually cut twice: once to
+/// its first case, once to this length. `scheme_cases` and `scheme_chars` say
+/// which happened, and they are independent.
+const SCHEME_LIMIT: usize = 16 * 1024;
+
+/// The head of a scheme, and its full length when anything was cut.
+///
+/// Cut on a line boundary because the scheme's indentation *is* its
+/// structure: stopping mid-line would leave a term's tail sitting at a column
+/// that means something else. Falling back to a character boundary covers the
+/// scheme that is one very long line, which must still be cut somewhere and
+/// must not be cut through a character.
+///
+/// Cut *after* laying out, not before, because the layout is what the panel
+/// colors and therefore what has to fit its limit -- cutting the unlaid term
+/// would bound the wrong string.
+fn cut_scheme(s: &str) -> (String, Option<usize>) {
+    if s.len() <= SCHEME_LIMIT {
+        return (s.to_string(), None);
+    }
+    let mut cut = SCHEME_LIMIT;
+    while !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let head = match s[..cut].rfind('\n') {
+        Some(nl) => &s[..nl],
+        None => &s[..cut],
+    };
+    (head.to_string(), Some(s.chars().count()))
+}
+
+pub fn induction(i: &acl2_session::Induction) -> InductionWire {
+    let (scheme, scheme_chars) = cut_scheme(&laid(&i.scheme));
+    InductionWire {
+        goal: i.goal.clone(),
+        suggested: laid(&i.suggested),
+        accommodating: i.accommodating.iter().map(|t| laid(t)).collect(),
+        runes: i.runes.clone(),
+        p_formula: laid(&i.p_formula),
+        scheme,
+        scheme_chars,
+        scheme_cases: i.scheme_cases,
+    }
+}
+
+pub fn inductions(events: &[acl2_session::EventInductions], supported: bool) -> InductionReply {
+    InductionReply {
+        events: events
+            .iter()
+            .map(|e| EventInductionWire {
+                event: e.event.clone(),
+                inductions: e.records.iter().map(induction).collect(),
+            })
+            .collect(),
+        supported,
+    }
+}
+
+#[derive(Debug, Deserialize)]
 pub struct OutputParams {
     pub book: String,
     /// A handle from a `unit` event. Never construct one.

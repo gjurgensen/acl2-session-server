@@ -41,13 +41,19 @@ import {
   UnitEvent,
   UnitState,
 } from './protocol';
-import { Envelope, RulesReply, RuneWire } from './protocol';
+import { Envelope, InductionEventWire, RulesReply, RuneWire } from './protocol';
 import { DecorationMode, Decorations } from './decorations';
 import { byteColumn, charOffset } from './positions';
 import { problemFor } from './bars';
 import { EVAL_SCHEME, OutputView, SCHEME } from './outputView';
 import { Highlighter } from './highlight';
-import { FormEnvelope, FormModel, FormNameRules, FormView } from './formView';
+import {
+  FormEnvelope,
+  FormEventInductions,
+  FormModel,
+  FormNameRules,
+  FormView,
+} from './formView';
 import { setExtensionUri } from './webviewParts';
 import { Console, ConsoleResult, HISTORY } from './console';
 import { DocView, plainSpans } from './docView';
@@ -170,6 +176,7 @@ interface BookSession {
    * the only way what it introduced can change.
    */
   rulesByUnit: Map<number, FormNameRules[]>;
+  inductionByUnit: Map<number, FormEventInductions[]>;
   debounce?: ReturnType<typeof setTimeout>;
   /**
    * Resolves when the daemon has split the book for the first time.
@@ -1864,6 +1871,7 @@ async function startCommand(initial?: Held): Promise<void> {
       ready: undefined,
       unitEvents: new Map(),
       rulesByUnit: new Map(),
+      inductionByUnit: new Map(),
       evalQueue: [],
       evalReplies: new Map(),
     };
@@ -2464,8 +2472,10 @@ function onUnit(p: UnitEvent): void {
     s.runningUnit = undefined;
     s.runningRef = undefined;
   }
-  // Re-admitted: whatever it introduced may be different now.
+  // Re-admitted: whatever it introduced may be different now, and so is
+  // whatever it inducted -- the handle these were read under is stale too.
   s.rulesByUnit.delete(p.index);
+  s.inductionByUnit.delete(p.index);
   if (outputView.shownBook === s.id && outputView.shownUnit === p.index) {
     void showUnitOutput(s, p.index);
   }
@@ -2940,6 +2950,11 @@ function setLayout(cols: number): void {
   client?.notify('layout', { cols });
   for (const s of books.values()) {
     s.rulesByUnit.clear();
+    // The schemes were laid out for the old width, so they are cleared with
+    // everything else the daemon lays out. Re-fetched, not re-flowed: the cut
+    // is applied to the laid-out text, so a scheme cut at one width is the
+    // wrong string to lay out again at another.
+    s.inductionByUnit.clear();
   }
   const shown = formView.shown();
   const s = shown && byId.get(shown.book);
@@ -3152,6 +3167,62 @@ async function followFormView(s: BookSession, index?: number): Promise<void> {
   if (model) {
     formView.render(model);
     void followRules(s, at);
+    void followInduction(s, at);
+  }
+}
+
+/**
+ * Fill in what the form's proofs inducted on.
+ *
+ * One request for the whole form, answered from what the daemon banked as the
+ * form was admitted -- so this needs no prover and returns during a proof,
+ * which is when a reader is most likely to be looking at an earlier form.
+ *
+ * Most forms induct nothing and the reply is empty, which is why this is a
+ * request rather than a field of the state event: the schemes are the largest
+ * thing a form can carry, and the forms that have one are the minority.
+ */
+async function followInduction(s: BookSession, index: number): Promise<void> {
+  const cached = s.inductionByUnit.get(index);
+  if (cached) {
+    formView.induction(s.id, index, cached);
+    return;
+  }
+  const ref = s.unitEvents.get(index)?.output_ref;
+  if (!ref) {
+    return;
+  }
+  try {
+    const r = (await client?.request('induction', {
+      book: s.id,
+      output_ref: ref,
+    })) as { events?: InductionEventWire[]; supported?: boolean } | undefined;
+    // An image that cannot report inductions says so once, in the log, rather
+    // than leaving every form looking as though it inducted nothing.
+    if (r?.supported === false) {
+      channel.appendLine('induction: this ACL2 does not report induction records');
+      return;
+    }
+    const events: FormEventInductions[] = (r?.events ?? []).map((e) => ({
+      event: e.event,
+      inductions: (e.inductions ?? []).map((i) => ({
+        goal: i.goal,
+        suggested: i.suggested,
+        accommodating: i.accommodating,
+        runes: i.runes,
+        pFormula: i.p_formula,
+        scheme: i.scheme,
+        schemeChars: i.scheme_chars,
+        schemeCases: i.scheme_cases,
+      })),
+    }));
+    s.inductionByUnit.set(index, events);
+    // Keyed by book and unit inside the form view: the cursor may have moved on.
+    formView.induction(s.id, index, events);
+  } catch (err) {
+    // Best effort, but said out loud -- a form view that silently shows less
+    // is indistinguishable from a form that inducted less.
+    channel.appendLine(`induction: form ${index} could not be read (${err})`);
   }
 }
 

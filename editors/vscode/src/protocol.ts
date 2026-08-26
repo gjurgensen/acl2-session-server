@@ -419,6 +419,43 @@ export interface RulesReply {
   runes: RuneWire[];
 }
 
+/** One induction ACL2 performed, as the daemon reports it. */
+export interface InductionWire {
+  goal: string;
+  suggested: string;
+  accommodating?: string[];
+  runes?: string[];
+  p_formula: string;
+  scheme: string;
+  /** Set only when `scheme` was cut to what crosses the wire. */
+  scheme_chars?: number;
+  /**
+   * Set only when `scheme` is the first case of a scheme that had this many.
+   * A separate cut from `scheme_chars`, made earlier and for a different
+   * reason -- see the daemon's `SCHEME_LIMIT` and the probe's ceiling.
+   */
+  scheme_cases?: number;
+}
+
+/** One event's inductions, under the name ACL2 filed them by. */
+export interface InductionEventWire {
+  event: string;
+  inductions: InductionWire[];
+}
+
+/**
+ * What a form's proofs inducted on, per event.
+ *
+ * Served from what the daemon banked as the form was admitted, like
+ * `RulesReply` and for the same reason. `supported` is false when the image
+ * predates ACL2's induction records, which is a fact about the image rather
+ * than about this form -- and the two are otherwise the same empty list.
+ */
+export interface InductionReply {
+  events: InductionEventWire[];
+  supported: boolean;
+}
+
 /**
  * A book this file includes whose source changed under the session.
  *

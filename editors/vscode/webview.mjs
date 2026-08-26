@@ -388,9 +388,9 @@ check(spans([[{ t: 'a', c: '' }], [{ t: 'b', c: '' }]]) === 'a\nb', 'and joins l
 
 globalThis.toks = {};
 const envelope = lift('esc', 'strip', 'causes', 'spans', 'hl', 'rat',
-                      'fmtSecs', 'timeParts', 'proveSecs', 'fmtTime', 'guardNote',
+                      'fmtSecs', 'timeParts', 'proveSecs', 'fmtTime', 'fmtChars', 'guardNote',
                       'folds', 'foldScope', 'foldScopeIs', 'fold',
-                      'factRow', 'nameFacts', 'introducedHtml', 'usedHtml',
+                      'factRow', 'nameFacts', 'introducedHtml', 'inductionHtml', 'usedHtml',
                       'withCode', 'TITLE_NAMES', 'cliqueTitle', 'memberHtml', 'eventHtml', 'docCard', 'docsHtml', 'productiveHtml', 'failureHtml', 'warningsHtml',
                       'envelope');
 {
@@ -861,6 +861,85 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   check(!plain.includes('<span'), 'so the page renders it as plain escaped text');
   check(plain.includes('&lt;') === false && plain.startsWith('(and'),
         'still escaped, and still the term that arrived');
+}
+
+// ---- an induction sits on the event that performed it ----
+//
+// The grouping is the point, and it is the thing the deleted log parser could
+// not do. Two theorems in one form, both inducting, both calling their goal
+// `*1`: the schemes have to land on their own cards or they say nothing.
+{
+  globalThis.toks = {};
+  const h = envelope({
+    checkpoints: [], rules: [], inner: [
+      { name: 'tl-rev', kind: 'defthm', inductions: [
+        { goal: '*1.1', suggested: '(app rv (list x1))',
+          accommodating: ['(true-listp rv)'],
+          runes: ['(:induction true-listp)', '(:induction app)'],
+          pFormula: '(:p rv x1)', scheme: '(and (implies (not (consp rv)) (:p rv x1)))' },
+        { goal: '*1', suggested: '(rev x)', runes: ['(:induction rev)'],
+          pFormula: '(:p x)', scheme: '(and (implies (not (consp x)) (:p x)))' },
+      ] },
+      { name: 'app-assoc', kind: 'defthm', inductions: [
+        { goal: '*1', suggested: '(app x y)', accommodating: ['(app x (app y z))'],
+          runes: ['(:induction app)'], pFormula: '(:p x y z)',
+          scheme: '(and (implies (not (consp x)) (:p x y z)))' },
+      ] },
+      { name: 'never-inducted', kind: 'defthm' },
+    ],
+  }, 'g-');
+
+  check(h.includes('inducted (2)') && h.includes('inducted (1)'),
+        'each event counts its own inductions, in the (N) style');
+  check(h.includes('data-fold="g-ev:tl-rev:inducted"') &&
+        h.includes('data-fold="g-ev:app-assoc:inducted"'),
+        'and they are separate folds, keyed by the event that performed them');
+  check(h.split('inducted (').length === 3,
+        'the event that inducted nothing gets no fold at all');
+  // Both goals are called *1. What tells them apart is whose card they are on.
+  // Sliced between the two folds without assuming which comes first: the
+  // events render in *source* order, which is the reverse of the order the
+  // wire sends them in, and pinning the test to one of those tests the
+  // ordering rather than the grouping.
+  const tl = h.indexOf('g-ev:tl-rev:inducted');
+  const aa = h.indexOf('g-ev:app-assoc:inducted');
+  check(tl !== -1 && aa !== -1, 'both events drew their fold');
+  const first = h.slice(Math.min(tl, aa), Math.max(tl, aa));
+  const second = h.slice(Math.max(tl, aa));
+  const [tlPart, aaPart] = tl < aa ? [first, second] : [second, first];
+  check(tlPart.includes('(rev x)') && !tlPart.includes('(app x y)'),
+        'tl-rev keeps its own suggesting term');
+  check(aaPart.includes('(app x y)') && !aaPart.includes('(rev x)'),
+        'and app-assoc keeps its own, though both goals are named *1');
+  check(h.includes('(:induction true-listp)') && h.includes('(:induction rev)'),
+        'the runes are runes, not ACL2’s English about them');
+  check(h.includes('1 induction') === false && h.includes('2 inductions'),
+        'the closed card still says an event inducted, and how often');
+}
+
+// ---- a cut scheme says which cut, because there are two ----
+//
+// A scheme that simply stops reads as a scheme with no base case. The two
+// cuts happen for different reasons and at different layers, so a reader who
+// sees only one note draws the wrong conclusion about the other.
+{
+  globalThis.toks = {};
+  const inductionHtml = lift('esc', 'strip', 'spans', 'hl', 'fmtChars', 'factRow',
+                             'inductionHtml');
+  const whole = inductionHtml([
+    { goal: '*1', suggested: '(app x y)', pFormula: '(:p x)', scheme: '(and (:p x))' },
+  ]);
+  check(!whole.includes('case 1 of') && !whole.includes('of 6.8 MB'),
+        'a scheme that arrived whole is not marked as anything else');
+
+  const cut = inductionHtml([
+    { goal: '*1', suggested: '(app x y)', pFormula: '(:p x)', scheme: '(and (:p x))',
+      schemeCases: 47, schemeChars: 6831709 },
+  ]);
+  check(cut.includes('case 1 of 47'),
+        'a clique scheme says it is one case of many');
+  check(cut.includes('6.8 MB'),
+        'and separately says how much text there really was');
 }
 
 // ---- saying how much of a scheme is on show ----

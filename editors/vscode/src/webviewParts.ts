@@ -544,6 +544,49 @@ function introducedHtml(d) {
   }).join('') + '</ul>';
 }
 
+/**
+ * What one of an event's proofs inducted on.
+ *
+ * Read top-down the way the announcement does: which goal, what suggested the
+ * scheme, what it had to accommodate, which rules produced the suggestion,
+ * and then the scheme itself with :p standing for the conjecture. The scheme
+ * is a block rather than a row -- its indentation is its structure, and the
+ * daemon already laid it out for this pane's width.
+ *
+ * Two different truncations can have happened and they are not the same fact,
+ * so they get separate notes. schemeCases means ACL2 was asked for the first
+ * case only, because a mutual recursion inducts over its whole clique;
+ * schemeChars means the text was then cut to what crosses the wire. A scheme
+ * that stops without a note reads as a scheme with no base case, which is the
+ * one misreading that matters here.
+ */
+function inductionHtml(records) {
+  return '<ul class="rules">' + records.map((r) => {
+    let rows = factRow('suggested by', r.suggested);
+    for (const a of r.accommodating || []) {
+      rows += factRow('accommodating', a);
+    }
+    if ((r.runes || []).length) {
+      rows += '<tr><td class="meta">rules</td><td>' +
+        r.runes.map((u) => '<code class="lisp">' + hl(u) + '</code>').join(' ') +
+        '</td></tr>';
+    }
+    rows += factRow('conjecture', r.pFormula);
+    let notes = '';
+    if (r.schemeCases) {
+      notes += '<div class="meta">case 1 of ' + esc(r.schemeCases) +
+        ' -- the scheme was too large to carry whole</div>';
+    }
+    if (r.schemeChars) {
+      notes += '<div class="meta">first ' + fmtChars(String(r.scheme).length) +
+        ' of ' + fmtChars(r.schemeChars) + ' -- the rest is in the output</div>';
+    }
+    return '<li><code class="lisp">' + hl(r.goal) + '</code>' +
+      '<table class="inner">' + rows + '</table>' +
+      '<pre class="field">' + hl(r.scheme) + '</pre>' + notes + '</li>';
+  }).join('') + '</ul>';
+}
+
 /** The rules a proof consumed -- the other direction from introducedHtml. */
 function usedHtml(rules) {
   return '<ul class="rules">' +
@@ -664,6 +707,10 @@ function eventHtml(e, p, openByDefault, at) {
     facts.push(runes.length + ' rule' + (runes.length === 1 ? '' : 's') +
                (off ? ', ' + off + ' off' : ''));
   }
+  if ((e.inductions || []).length) {
+    facts.push((e.inductions.length === 1 ? 'inducted' :
+                e.inductions.length + ' inductions'));
+  }
   const used = e.rules || [];
 
   let body = d ? nameFacts(d) : '';
@@ -682,6 +729,17 @@ function eventHtml(e, p, openByDefault, at) {
     body += fold(p + 'ev:' + key + ':introduced', true,
       '<span class="meta">introduced (' + runes.length + ')</span>',
       introducedHtml(d));
+  }
+  // Beside the theorem that inducted, which is the whole point: a form is
+  // often several events, they all number their goals from \`*1\`, and a flat
+  // list of schemes attached to none of them. Open by default -- an event
+  // that inducted at all is the interesting one on the card, and there are
+  // rarely more than two.
+  const inds = e.inductions || [];
+  if (inds.length) {
+    body += fold(p + 'ev:' + key + ':inducted', true,
+      '<span class="meta">inducted (' + inds.length + ')</span>',
+      inductionHtml(inds));
   }
   // One row per function the clique admitted. ACL2 records the whole clique
   // as a single event keyed under its first definition, so without this a

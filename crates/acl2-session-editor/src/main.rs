@@ -226,6 +226,10 @@ struct BookHandle {
     tx: Sender<Cmd>,
     control: Arc<SessionControl>,
     outputs: Arc<Mutex<OutputStore>>,
+    inductions: Arc<Mutex<acl2_session::InductionStore>>,
+    /// What the image can do, so the panel can say "this ACL2 cannot report
+    /// that" rather than showing an empty section as a fact about the form.
+    capabilities: acl2_session::Capabilities,
     /// Fallback revision counter for clients that send none.
     auto_rev: AtomicU64,
     /// Joined at shutdown, so daemon exit always runs the driver's `Book`
@@ -368,6 +372,7 @@ impl Daemon {
                 now(self.close(&p.book))
             }
             "output" => self.output(args(params)?).map(Answer::Now),
+            "induction" => self.induction(args(params)?).map(Answer::Now),
             "reflow" => now(self.reflow(args(params)?)),
             "status" => {
                 let p: wire::BookParams = args(params)?;
@@ -536,6 +541,8 @@ impl Daemon {
             .then(|| book.inherited_inhibit_output().unwrap_or("?").to_string());
         let control = book.control();
         let outputs = book.output_store();
+        let inductions = book.induction_store();
+        let capabilities = book.capabilities().clone();
         let (id, shared) = {
             let mut reg = self.registry.lock().expect("registry lock");
             let id = reg.register(book, acl2.clone());
@@ -547,8 +554,8 @@ impl Daemon {
         let driver = std::thread::spawn(move || d.run());
         self.books.lock().expect("books lock").insert(
             id.to_string(),
-            BookHandle { tx, control, outputs, auto_rev: AtomicU64::new(0), driver,
-                         path: path.clone() },
+            BookHandle { tx, control, outputs, inductions, capabilities,
+                         auto_rev: AtomicU64::new(0), driver, path: path.clone() },
         );
         Ok(serde_json::to_value(wire::OpenReply {
             book: id.to_string(),
@@ -591,6 +598,29 @@ impl Daemon {
     /// test to that, because this depends on it.
     fn reflow(&self, p: wire::ReflowParams) -> Result<Value, String> {
         Ok(serde_json::to_value(wire::reflow(&p.terms)).expect("serialize"))
+    }
+
+    /// What a form inducted, per event.
+    ///
+    /// Served from the handle's stores, like `output` and for the same
+    /// reason: nothing here touches the session, so a grinding proof never
+    /// delays it.
+    ///
+    /// The old verb of this name was documented as "not sufficient, and
+    /// unused by the client", because the announcements it returned came back
+    /// flat with nothing saying which of a form's events printed each one.
+    /// These are grouped by the event ACL2 filed them under, so the form view
+    /// can put each scheme beside the theorem that used it -- which is the
+    /// per-event home the section should have had.
+    fn induction(&self, p: wire::InductionParams) -> Result<Value, RequestError> {
+        let (inductions, capabilities) =
+            self.handle_of(&p.book, |h| (h.inductions.clone(), h.capabilities.clone()))?;
+        let store = inductions.lock().expect("inductions lock");
+        let reply = wire::inductions(
+            store.get(&p.output_ref),
+            capabilities.has(acl2_session::Capability::InductionRecords),
+        );
+        Ok(serde_json::to_value(reply).expect("serialize"))
     }
 
     fn output(&self, p: wire::OutputParams) -> Result<Value, RequestError> {

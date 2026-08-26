@@ -115,6 +115,37 @@ export interface FormRune {
   fields: FormRuneField[];
 }
 
+/** One induction ACL2 performed -- see the daemon's `InductionWire`. */
+export interface FormInduction {
+  goal: string;
+  suggested: string;
+  accommodating?: string[];
+  runes?: string[];
+  pFormula: string;
+  scheme: string;
+  /**
+   * How long the scheme really is, when `scheme` is only its head.
+   *
+   * The daemon cuts it: a mutual recursion's scheme is the whole clique, and
+   * the one that started this arrived at 6.83 MB. Present means the page must
+   * say so rather than showing a term that stops without explanation.
+   */
+  schemeChars?: number;
+  /**
+   * Present when `scheme` is the first case of a scheme that had this many.
+   * A different cut from `schemeChars` and it happened earlier -- ACL2 was
+   * asked for one case because the whole thing was too large to carry -- so
+   * the page must not report the two as one thing.
+   */
+  schemeCases?: number;
+}
+
+/** One event's inductions, under the name ACL2 filed them by. */
+export interface FormEventInductions {
+  event: string;
+  inductions: FormInduction[];
+}
+
 /**
  * What one name a form introduced actually is, in the world.
  *
@@ -176,6 +207,13 @@ export interface FormModel extends FormEnvelope {
   colEnd: number;
   /** The paint status: `admitted`, `conditional`, `skipped`, `failed`, ... */
   status: string;
+}
+
+/** The strings in an induction record that are ACL2 code rather than prose. */
+function inductionStrings(events: FormEventInductions[]): string[] {
+  return events.flatMap((e) =>
+    e.inductions.flatMap((r) => [r.scheme, r.suggested, r.pFormula, ...(r.accommodating || [])])
+  );
 }
 
 /**
@@ -337,6 +375,8 @@ export class FormView {
    */
   onCols?: (cols: number) => void;
 
+  private lastInduction?: { book: string; index: number; events: FormEventInductions[] };
+
   get visible(): boolean {
     return this.panel !== undefined;
   }
@@ -446,6 +486,43 @@ export class FormView {
     this.postRules(this.lastRules);
   }
 
+  /**
+   * Fill in what the form's proofs inducted on.
+   *
+   * Keyed by book and unit like the rules records, and for the same reason:
+   * the cursor may have moved on while this was being fetched, and detail for
+   * the form you have left is noise.
+   */
+  induction(book: string, index: number, events: FormEventInductions[]): void {
+    const s = this.shown();
+    if (!s || s.book !== book || s.index !== index) {
+      return;
+    }
+    // The same guard `rules` carries, and for the same reason: a render
+    // replaces the whole page and resets every fold the reader has opened, so
+    // a post that would change nothing must not happen.
+    const l = this.lastInduction;
+    if (l && l.book === book && l.index === index && same(l.events, events)) {
+      return;
+    }
+    this.lastInduction = { book, index, events };
+    this.postInduction(this.lastInduction);
+  }
+
+  private postInduction(i: {
+    book: string;
+    index: number;
+    events: FormEventInductions[];
+  }): void {
+    this.send({
+      kind: 'induction',
+      book: i.book,
+      index: i.index,
+      events: i.events,
+      toks: tokenizeAll(inductionStrings(i.events), this.tokenizer),
+    });
+  }
+
   private postRules(r: { book: string; index: number; entries: FormNameRules[] }): void {
     this.send({
       kind: 'rules',
@@ -552,14 +629,23 @@ export class FormView {
       u && u.book === model.book && u.index === model.index
         ? u.entries
         : undefined;
+    // The inductions ride along rather than following in a second message.
+    // They used to follow, and the page replaces its token map on a model --
+    // so every state event rendered once with the scheme uncolored and again
+    // a moment later with it colored. That is the flicker.
+    const i = this.lastInduction;
+    const events =
+      i && i.book === model.book && i.index === model.index ? i.events : undefined;
     this.send({
       kind: 'model',
       model: laid,
       entries,
+      events,
       toks: tokenizeAll(
         [
           ...highlightable(laid),
           ...(entries ? rulesStrings(entries, highlightDocCode()) : []),
+          ...(events ? inductionStrings(events) : []),
         ],
         this.tokenizer
       ),
@@ -628,6 +714,13 @@ let model;
 let note;
 let ruleEntries = [];
 let rulesKey = '';
+// Which form the inductions belong to, so a re-render of the *same* form keeps
+// them. The form view re-renders on every state event, and clearing on each one
+// made the fold blink out and back for the whole time a book was being checked.
+// No backticks in here: this comment lives inside a template literal, and one
+// would end the string.
+let inductions = [];
+let inductionKey = '';
 
 window.addEventListener('message', (ev) => {
   const m = ev.data;
@@ -647,6 +740,20 @@ window.addEventListener('message', (ev) => {
       ruleEntries = [];
       rulesKey = key;
     }
+    // Same rule as the rules records: a different form drops them, the same
+    // form again keeps them.
+    if (m.events) {
+      inductions = m.events;
+      inductionKey = key;
+    } else if (key !== inductionKey) {
+      inductions = [];
+      inductionKey = key;
+    }
+    render();
+  } else if (m.kind === 'induction') {
+    Object.assign(toks, m.toks || {});
+    inductions = m.events || [];
+    inductionKey = m.book + ':' + m.index;
     render();
   } else if (m.kind === 'rules') {
     Object.assign(toks, m.toks || {});
@@ -688,9 +795,24 @@ const CLIQUE_KINDS = /^(defuns|mutual-recursion|defuns-std)$/i;
  */
 function withDetail(m) {
   const inner = m.inner || [];
-  if (!ruleEntries.length) { return m; }
+  // Inductions attach on their own, before the early return below: a form can
+  // have inducted without introducing anything whose record we fetched, and
+  // giving up here lost the fold entirely for exactly the forms -- bare
+  // theorems -- most likely to have one.
+  const byInd = new Map(
+    inductions.map((e) => [String(e.event).toLowerCase(), e.inductions])
+  );
+  const withInd = byInd.size
+    ? { ...m, inner: inner.map((e) => {
+        const got = byInd.get(String(e.name).toLowerCase());
+        return got && got.length ? { ...e, inductions: got } : e;
+      }) }
+    : m;
+  if (!ruleEntries.length) { return withInd; }
+  m = withInd;
+  const withI = m.inner || [];
   const by = new Map(ruleEntries.map((e) => [String(e.name).toLowerCase(), e]));
-  const named = new Set(inner.map((e) => String(e.name).toLowerCase()));
+  const named = new Set(withI.map((e) => String(e.name).toLowerCase()));
   // A clique is recorded as one event under its first definition, so the
   // members after that one are named in no event. They get a row of the
   // event's own card, which means their records are wanted here and their
@@ -706,7 +828,7 @@ function withDetail(m) {
   const docs = ruleEntries.filter(
     (e) => e.short && !named.has(String(e.name).toLowerCase())
   );
-  return { ...m, docs, inner: inner.map((e) => {
+  return { ...m, docs, inner: withI.map((e) => {
     const d = by.get(String(e.name).toLowerCase());
     const withD = d ? { ...e, detail: d } : e;
     if (!CLIQUE_KINDS.test(String(e.kind || ''))) { return withD; }
