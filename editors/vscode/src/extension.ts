@@ -3189,36 +3189,47 @@ async function followRules(s: BookSession, index: number): Promise<void> {
     // the whole of the standalone case.
     const entries: FormNameRules[] = replies
       .filter((r): r is RulesReply => !!r && (r.found || !!r.short))
-      .map((r) => ({
-        name: r.name,
-        found: r.found,
-        // Rendered here rather than in the page: a short is xdoc markup, and
-        // 59% of them carry some (measured over 2,067 topics under `std/top`
-        // and `centaur/fty/top`) -- overwhelmingly `@('...')`, `@(see ...)`,
-        // `@(tsee ...)` and `<see topic=...>`. Shown raw, the reader gets
-        // `@(tsee foo)` in the middle of a sentence. `xdocHtml` is the
-        // renderer the doc view already uses, and it escapes as it goes, so
-        // this stays one implementation rather than a second approximate one
-        // inside the webview.
-        short: r.short === undefined ? undefined : xdocHtml(r.short).html,
-        // The body, rendered the same way. Its code blocks arrive as `<pre>`
-        // holding their own escaped source, so an uncoloured one reads as
-        // plain text rather than as a blank -- the form view has no slot to
-        // fill them from, the way the doc view does.
-        long: r.long === undefined ? undefined : xdocHtml(r.long).html,
-        symbolClass: r.symbol_class,
-        measure: r.measure,
-        relation: r.relation,
-        formals: r.formals,
-        guard: r.guard,
-        statement: r.statement,
-        runes: (r.runes ?? []).map((u: RuneWire) => ({
-          rune: u.rune,
-          class: u.class,
-          enabled: u.enabled,
-          fields: u.fields ?? [],
-        })),
-      }));
+      .map((r) => {
+        // Rendered once each, since both halves are wanted whole: the HTML
+        // and the code blocks it has holes for.
+        const rendered = {
+          short: r.short === undefined ? undefined : xdocHtml(r.short),
+          long: r.long === undefined ? undefined : xdocHtml(r.long),
+        };
+        return {
+          name: r.name,
+          found: r.found,
+          // Rendered here rather than in the page: a short is xdoc markup, and
+          // 59% of them carry some (measured over 2,067 topics under `std/top`
+          // and `centaur/fty/top`) -- overwhelmingly `@('...')`, `@(see ...)`,
+          // `@(tsee ...)` and `<see topic=...>`. Shown raw, the reader gets
+          // `@(tsee foo)` in the middle of a sentence. `xdocHtml` is the
+          // renderer the doc view already uses, and it escapes as it goes, so
+          // this stays one implementation rather than a second approximate one
+          // inside the webview.
+          short: rendered.short?.html,
+          // The lifted code blocks travel beside the HTML that has holes for
+          // them, exactly as they do for the doc view. The form view fills them
+          // from its own token map -- keyed by source text, which is why the
+          // texts join the strings it tokenizes -- so a term inside a topic is
+          // coloured by the same grammar as a term anywhere else on the page.
+          shortCode: rendered.short?.code,
+          long: rendered.long?.html,
+          longCode: rendered.long?.code,
+          symbolClass: r.symbol_class,
+          measure: r.measure,
+          relation: r.relation,
+          formals: r.formals,
+          guard: r.guard,
+          statement: r.statement,
+          runes: (r.runes ?? []).map((u: RuneWire) => ({
+            rune: u.rune,
+            class: u.class,
+            enabled: u.enabled,
+            fields: u.fields ?? [],
+          })),
+        };
+      });
     s.rulesByUnit.set(index, entries);
     // Keyed by book and unit inside the form view: the cursor may have moved on.
     formView.rules(s.id, index, entries);

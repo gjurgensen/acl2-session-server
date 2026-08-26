@@ -19,6 +19,7 @@
 
 import * as vscode from 'vscode';
 import { TokLines } from './highlight';
+import { DocCode } from './xdoc';
 import { pageHtml, SHARED_CSS, SHARED_JS } from './webviewParts';
 import { MAX_TERM } from './policy';
 
@@ -132,11 +133,15 @@ export interface FormNameRules {
    * than escaping it.
    */
   short?: string;
+  /** The code lifted out of `short`, for the page to fill its holes with. */
+  shortCode?: DocCode[];
   /**
    * This name's rendered xdoc body, when the topic has one. Its presence is
    * what gives a documented name something to open onto.
    */
   long?: string;
+  /** The code lifted out of `long`, likewise. */
+  longCode?: DocCode[];
   symbolClass?: string;
   measure?: string;
   relation?: string;
@@ -181,6 +186,10 @@ function same(a: unknown, b: unknown): boolean {
 /** The strings in a rules record that are ACL2 code rather than prose. */
 export function rulesStrings(entries: FormNameRules[]): string[] {
   return entries.flatMap((e) => [
+    // Code lifted out of a topic is code like any other on this page, and the
+    // map is keyed by source text, so it is coloured by being listed here.
+    ...(e.shortCode ?? []).map((c) => c.text),
+    ...(e.longCode ?? []).map((c) => c.text),
     ...(e.formals === undefined ? [] : [e.formals]),
     ...(e.guard === undefined ? [] : [e.guard]),
     ...(e.measure === undefined ? [] : [e.measure]),

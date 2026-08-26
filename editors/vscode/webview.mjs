@@ -391,7 +391,7 @@ const envelope = lift('esc', 'strip', 'causes', 'spans', 'hl', 'rat',
                       'fmtSecs', 'timeParts', 'proveSecs', 'fmtTime', 'guardNote',
                       'folds', 'foldScope', 'foldScopeIs', 'fold',
                       'factRow', 'nameFacts', 'introducedHtml', 'usedHtml',
-                      'eventHtml', 'docCard', 'docsHtml', 'productiveHtml', 'failureHtml', 'warningsHtml',
+                      'withCode', 'eventHtml', 'docCard', 'docsHtml', 'productiveHtml', 'failureHtml', 'warningsHtml',
                       'envelope');
 {
   const fn = {
@@ -956,24 +956,24 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   const doc = (extra) =>
     envelope({ checkpoints: [], rules: [], inner: [], ...extra }, 'p:');
 
-  // A name that carries a topic says so where its other facts are, and says it
-  // as prose: everything else in that table is a term, and a short is the one
-  // line on the page a person wrote.
+  // A name that carries a topic says so once, above its facts -- not in a
+  // "documented" row *and* a fold underneath, which said the same sentence
+  // twice on one card.
   const onEvent = doc({
     inner: [{ name: 'shown', kind: 'define',
               detail: { name: 'shown', short: 'counts the scopes',
                         guard: '(natp x)', runes: [] } }],
   });
-  check(/documented/.test(onEvent), 'a documented name says so');
-  check(/counts the scopes/.test(onEvent), 'and says what');
-  check(onEvent.indexOf('documented') < onEvent.indexOf('guard'),
-    'and it leads, being the only row written by a person');
+  check(/counts the scopes/.test(onEvent), 'a documented name says what it is');
+  check(onEvent.indexOf('counts the scopes') < onEvent.indexOf('guard'),
+    'and it leads, being the only line written by a person');
+  check(onEvent.split('counts the scopes').length === 2, 'and says it once');
 
   const quiet = doc({
     inner: [{ name: 'quiet', kind: 'defun',
               detail: { name: 'quiet', guard: '(natp x)', runes: [] } }],
   });
-  check(!/documented/.test(quiet), 'an undocumented name says nothing at all');
+  check(!/dsum/.test(quiet), 'an undocumented name says nothing at all');
 
   // A topic belonging to no event of the form. A standalone defxdoc records no
   // event at all, so it has nothing above to attach to -- and a form view that
@@ -1006,8 +1006,17 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
               detail: { name: 'shown', short: 'counts', long: '<p>at length</p>',
                         runes: [] } }],
   });
-  check(/documentation<\/span>/.test(onCard), 'an event offers its documentation');
-  check(/at length/.test(onCard), 'and it is there to open');
+  // The fold reads like the standalone card: the summary is its face, the
+  // body is inside, and the name is not repeated -- the card it sits in is
+  // already the name.
+  check(/<summary>[\s\S]*counts[\s\S]*<\/summary>/.test(onCard),
+    'the summary is the face of the fold');
+  check(/at length/.test(onCard), 'and the body is there to open');
+  check(!/>documentation</.test(onCard), 'with no label saying so a second time');
+  // Once as a heading, and that is the event card's own. Fold ids carry it
+  // too, which is not the reader seeing it twice.
+  check(onCard.split('class=\"ename\"').length === 2,
+    'and the name is written once, by the card it sits in');
 
   // ...and it comes last when the form did do something as well.
   const both = doc({
@@ -1016,6 +1025,21 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   });
   check(both.indexOf('lone-topic') > both.indexOf('ev'),
     'documentation comes after what the form did');
+
+  // Code lifted out of a topic is put back coloured, from the same token map
+  // every other term on this page is coloured from -- a term is a term
+  // wherever it is written.
+  const held = doc({ docs: [{ name: 'x', short: 'a summary',
+    long: 'see <pre data-code="0">(f x)</pre>',
+    longCode: [{ slot: 0, text: '(f x)' }] }] });
+  check(!/data-code/.test(held), 'a filled hole keeps none of its scaffolding');
+  check(/\(f x\)/.test(held), 'and the code is there');
+
+  // A hole with nothing to fill it keeps the escaped source the renderer left
+  // inside it, so it reads rather than coming up blank.
+  const unfilled = doc({ docs: [{ name: 'x', short: 's',
+    long: 'see <pre data-code="7">(g y)</pre>' }] });
+  check(/\(g y\)/.test(unfilled), 'an unfilled hole still shows its source');
 
   // Nothing documented, nothing said: not an empty heading.
   check(!/Documented/.test(doc({ inner: [{ name: 'ev' }], docs: [] })),

@@ -210,21 +210,26 @@ details.event > summary { padding: 5px 8px; }
    \`@(tsee ...)\` is in xdoc anyway, a name in code font, rather than as a
    link that goes nowhere when clicked. */
 .doc a.see { color: inherit; text-decoration: none; }
-/* The summary on a documented card's face. Dimmer than the name and set off
-   from it, the way an event's facts are -- it is a line about the thing, not
-   the thing. Wraps rather than clipping: a short is a sentence. */
-.dsum { font-style: italic; opacity: 0.85; margin-left: 6px; }
-.dsum a.see { color: inherit; text-decoration: none; }
-.dsum a.see, .dsum code, .doclong a.see, .doclong code {
-  font-family: var(--vscode-editor-font-family), monospace; font-style: normal;
-  font-size: 0.95em; }
-.doclong a.see { color: inherit; text-decoration: none; }
-/* A rendered body. Its code blocks arrive as \`<pre>\` carrying their own
-   escaped source, uncoloured -- this page fills spans from a token map the
-   host sends, and it has none for these. Plain but readable beats blank. */
+/* The summary on a documented card's face: its own line under the name, not
+   trailing off the side of it. A short is a sentence, and a sentence set
+   beside a name reads as an afterthought where it is in fact the point of
+   the card.
+
+   Not italicised. The italic was marking it as prose among terms, which is a
+   job its own line already does -- and a sentence of italic prose is harder
+   to read than the same sentence upright, which is a poor trade for a
+   distinction nothing needs any more. */
+.dsum { opacity: 0.85; margin: 2px 0 0; }
+.dbare { margin: 0 0 4px; }
+.dsum a.see, .doclong a.see { color: inherit; text-decoration: none; }
+/* A rendered body. Code inside it is the page's own \`pre\`/\`code\` -- an
+   outlined box and a faint chip -- because a term is a term wherever it is
+   written, and a documented topic should not introduce a third way of
+   drawing one. */
 .doclong p { margin: 4px 0; }
-.doclong pre { white-space: pre-wrap; margin: 4px 0; padding: 4px 6px;
-  background: var(--vscode-textCodeBlock-background); border-radius: 3px; }
+/* A name standing in for a directive that would have printed a definition.
+   A name, so it is drawn as one. */
+code.xname { background: none; padding: 0; }
 .doc a.see, .doc code { font-family: var(--vscode-editor-font-family), monospace;
   font-style: normal; font-size: 0.95em; }
 /* And the same for a fold nested inside one: its body lines up under its own
@@ -466,13 +471,6 @@ function factRow(label, term) {
  */
 function nameFacts(d) {
   let rows = '';
-  // First, and not through the Lisp highlighter: a short is a sentence about
-  // the name, where everything below it is a term. It leads because it is the
-  // only row written by a person -- the rest is what ACL2 made of the form.
-  if (d.short) {
-    rows += '<tr><td class="meta">documented</td><td class="doc">' +
-      d.short + '</td></tr>';
-  }
   if (d.guard) { rows += factRow('guard', d.guard); }
   if (d.measure) { rows += factRow('measure', d.measure); }
   if (d.relation) { rows += factRow('decreasing under', d.relation); }
@@ -567,14 +565,18 @@ function eventHtml(e, p, openByDefault) {
       '<span class="meta">used (' + used.length + ')</span>',
       usedHtml(used));
   }
-  // A name that carries a topic keeps its body here rather than only in the
-  // Documented section below, which holds the topics belonging to no event.
-  // Otherwise a documented \`define\` shows its summary in the facts table with
-  // no way to read the rest.
-  if (d && d.long) {
-    body += fold(p + 'ev:' + e.name + ':documentation', false,
-      '<span class="meta">documentation</span>',
-      '<div class="doclong">' + d.long + '</div>');
+  // Built to read like the standalone card below, because it is the same
+  // thing: the summary on the face, the body inside. The name is not repeated
+  // -- the card this sits in is already the name -- and there is no
+  // "documented" row above it either, which said the summary a second time.
+  if (d && (d.short || d.long)) {
+    const face = d.short
+      ? '<div class="dsum">' + withCode(d.short, d.shortCode) + '</div>'
+      : '<span class="meta">documentation</span>';
+    body = (d.long
+      ? fold(p + 'ev:' + e.name + ':documentation', false, face,
+             '<div class="doclong">' + withCode(d.long, d.longCode) + '</div>')
+      : '<div class="dbare">' + face + '</div>') + body;
   }
 
   // The formals sit beside the name because together they are the signature,
@@ -632,12 +634,36 @@ function docsHtml(m, p) {
  * chevron that opens onto nothing is worse than no chevron. A \`defxdoc\` with
  * a \`:short\` and no \`:long\` is an ordinary thing to write.
  */
+/**
+ * A rendered topic with its code put back, coloured.
+ *
+ * The renderer lifts code out and leaves a numbered hole, so that whoever
+ * shows it can colour it with the editor's own grammar rather than a second
+ * approximate one -- the same bargain the terms on this page already make.
+ * This is that page keeping its side of it: \`hl\` looks the source text up in
+ * the token map the host sends, and the host lists these texts among the
+ * strings it tokenizes.
+ *
+ * A hole with nothing to fill it is left exactly as it is. The renderer puts
+ * the escaped source inside the hole as well as beside it, so an unfilled one
+ * reads as plain text rather than coming up blank.
+ */
+function withCode(html, code) {
+  const by = {};
+  for (const c of code || []) { by[String(c.slot)] = c.text; }
+  return String(html || '').replace(
+    /<(pre|code) data-code="(\\d+)">[\\s\\S]*?<\\/\\1>/g,
+    (m, tag, n) => (n in by ? '<' + tag + '>' + hl(by[n]) + '</' + tag + '>' : m)
+  );
+}
+
 function docCard(d, p) {
   const head = '<code class="ename">' + esc(d.name) + '</code>' +
-    (d.short ? '<span class="dsum">' + d.short + '</span>' : '');
+    (d.short ? '<div class="dsum">' + withCode(d.short, d.shortCode) + '</div>' : '');
   return d.long
     ? fold(p + 'doc:' + d.name, false, head,
-           '<div class="einside doclong">' + d.long + '</div>', 'event')
+           '<div class="einside doclong">' + withCode(d.long, d.longCode) + '</div>',
+           'event')
     : '<div class="event bare"><div class="esum">' + head + '</div></div>';
 }
 
