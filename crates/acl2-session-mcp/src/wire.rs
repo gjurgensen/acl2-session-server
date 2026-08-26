@@ -646,6 +646,156 @@ pub fn evaluated(r: &core::EvalResult) -> EvalReply {
     }
 }
 
+/// One induction ACL2 performed, as this surface returns it.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct InductionWire {
+    /// The goal it was for: `*1`, `*1.1`. Not unique across a form -- every
+    /// event numbers its goals from `*1` -- which is why these arrive grouped
+    /// under the event that performed them rather than in one flat list.
+    pub goal: String,
+    /// The term that suggested the scheme, untranslated.
+    pub suggested: String,
+    /// Terms merged into the scheme alongside `suggested`. Usually empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub accommodating: Vec<String>,
+    /// The `:induction` runes behind the suggestion.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub runes: Vec<String>,
+    /// `(:p x y z)` -- what `:p` stands for in `scheme`.
+    pub p_formula: String,
+    /// The scheme, with `:p` for the conjecture.
+    ///
+    /// **May be cut, in two different ways, and they mean different things.**
+    /// `scheme_cases` present means this is the *first case* of a scheme that
+    /// had that many -- a mutual recursion inducts over its whole clique.
+    /// `scheme_chars` present means the text was additionally cut to this
+    /// surface's budget. Either way the text says so in a trailing `;;` note,
+    /// and `acl2_output` on this form's `output_ref` has what ACL2 printed.
+    pub scheme: String,
+    /// Present **only when `scheme` was cut to length**: the real character
+    /// count. Absent means the text is whole.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheme_chars: Option<usize>,
+    /// Present **only when `scheme` is one case of many**: how many there
+    /// were. Absent means every case is here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheme_cases: Option<usize>,
+}
+
+/// One event's inductions.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct EventInductionWire {
+    /// The name ACL2 filed these under. Empty for a `thm`, which introduces
+    /// nothing to name.
+    pub event: String,
+    pub inductions: Vec<InductionWire>,
+}
+
+/// What a form inducted, per event.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct InductionReply {
+    /// Events that inducted, newest first. Empty when the form inducted
+    /// nothing -- which is the ordinary case, and is not a failure.
+    pub events: Vec<EventInductionWire>,
+    /// False when this ACL2 cannot report inductions at all, in which case
+    /// `events` is empty for a reason that has nothing to do with this form.
+    /// See `acl2_health` for the image's capabilities.
+    pub supported: bool,
+}
+
+/// How much of an induction scheme this surface returns.
+///
+/// Tighter than the editor's, because this one pays per token. ACL2 prints
+/// the scheme with the gag-mode evisc tuple, which is `nil` under this
+/// crate's settings, so nothing is abbreviated -- and for a mutual recursion
+/// the scheme *is* the clique. One measured on
+/// `books/kestrel/c/syntax/validator.lisp` ran to 6,831,709 characters, three
+/// of them from a single `defines`. Returning that does not merely cost: it
+/// evicts whatever the caller was reasoning about.
+///
+/// Two kilobytes covers an ordinary scheme whole -- `binary-append`'s is two
+/// lines -- and cuts only the ones no reply should carry.
+const SCHEME_LIMIT: usize = 2 * 1024;
+
+/// The head of a scheme, with a note saying it was cut and where the rest is.
+///
+/// The note is **in the string**, not only in a sibling field. A caller
+/// reading this is a model reading prose, and a term that simply stops looks
+/// like a term that ended -- it would go on to reason about a scheme that has
+/// no base case, because the base case was in the part that was dropped. A
+/// `;;` comment is inert if anything tries to read the text as Lisp, and
+/// unmissable if anything reads it as text.
+///
+/// Cut on a line boundary, because the scheme's indentation is its structure;
+/// falling back to a character boundary covers the scheme that is one long
+/// line, which must still be cut and must not be cut through a character.
+fn cut_scheme(s: &str) -> (String, Option<usize>) {
+    if s.len() <= SCHEME_LIMIT {
+        return (s.to_string(), None);
+    }
+    let mut cut = SCHEME_LIMIT;
+    while !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let head = match s[..cut].rfind('\n') {
+        Some(nl) => &s[..nl],
+        None => &s[..cut],
+    };
+    let full = s.chars().count();
+    (
+        format!(
+            "{head}\n\
+             ;; TRUNCATED: {} of {full} characters. ACL2 printed this scheme in\n\
+             ;; full and the rest is not shown here -- a mutual recursion inducts\n\
+             ;; over its whole clique. Nothing below this line has been read.\n\
+             ;; Use acl2_output on this form's output_ref for the whole thing.",
+            head.chars().count()
+        ),
+        Some(full),
+    )
+}
+
+pub fn induction(i: &acl2_session::Induction) -> InductionWire {
+    let (scheme, scheme_chars) = cut_scheme(&i.scheme);
+    // Said again in the text when the *probe* cut it, for the same reason the
+    // length cut says so there: the two cuts are independent, and a reader
+    // that sees only the character note would take a single case for the
+    // whole scheme.
+    let scheme = match i.scheme_cases {
+        Some(n) => format!(
+            "{scheme}\n\
+             ;; PARTIAL: this is case 1 of {n}. The scheme was too large to\n\
+             ;; carry whole -- a mutual recursion inducts over its entire\n\
+             ;; clique -- so ACL2 was asked for its first case only.\n\
+             ;; Use acl2_output on this form's output_ref for the whole thing."
+        ),
+        None => scheme,
+    };
+    InductionWire {
+        goal: i.goal.clone(),
+        suggested: i.suggested.clone(),
+        accommodating: i.accommodating.clone(),
+        runes: i.runes.clone(),
+        p_formula: i.p_formula.clone(),
+        scheme,
+        scheme_chars,
+        scheme_cases: i.scheme_cases,
+    }
+}
+
+pub fn inductions(events: &[acl2_session::EventInductions], supported: bool) -> InductionReply {
+    InductionReply {
+        events: events
+            .iter()
+            .map(|e| EventInductionWire {
+                event: e.event.clone(),
+                inductions: e.records.iter().map(induction).collect(),
+            })
+            .collect(),
+        supported,
+    }
+}
+
 /// A slice of one form's captured output.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct OutputReply {
@@ -742,6 +892,17 @@ pub struct HealthReply {
     /// without waiting behind the in-flight call.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rebuilds: Option<usize>,
+    /// ACL2's own version string. For a human reading a report: it does *not*
+    /// determine what the image can do, because the global bumps at release
+    /// while features land between releases -- an image with induction
+    /// records and one without both say "ACL2 Version 8.7".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acl2_version: Option<String>,
+    /// Optional features this image lacks, by name. Empty is the usual and
+    /// good case. A tool returning nothing where you expected something is
+    /// worth checking against this before anything else.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub missing_capabilities: Vec<String>,
 }
 
 /// What an interrupt accomplished.
@@ -897,6 +1058,61 @@ pub fn certified(r: &acl2_session::cert::CertReport) -> CertifyReply {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rec(scheme: &str, cases: Option<usize>) -> acl2_session::Induction {
+        acl2_session::Induction {
+            goal: "*1".into(),
+            suggested: "(app x y)".into(),
+            accommodating: vec![],
+            runes: vec!["(:induction app)".into()],
+            p_formula: "(:p x y)".into(),
+            scheme: scheme.into(),
+            scheme_cases: cases,
+        }
+    }
+
+    #[test]
+    fn an_ordinary_scheme_is_returned_whole_and_unmarked() {
+        let s = "(and (implies (and (not (endp x)) (:p (cdr x) y)) (:p x y))\n     \
+                 (implies (endp x) (:p x y)))";
+        let (out, full) = cut_scheme(s);
+        assert_eq!(out, s);
+        assert_eq!(full, None);
+        assert!(!out.contains("TRUNCATED"));
+    }
+
+    #[test]
+    fn a_long_scheme_is_cut_and_says_so_in_the_text() {
+        let s = format!("(and\n{})", "  (implies (:p x) (:p x))\n".repeat(400));
+        let w = induction(&rec(&s, None));
+        assert!(w.scheme.len() < s.len());
+        assert!(w.scheme.contains(";; TRUNCATED"), "{}", w.scheme);
+        assert_eq!(w.scheme_chars, Some(s.chars().count()));
+        // The note is the last thing, so a reader that stops early still
+        // reaches the part saying the term does not end here.
+        assert!(w.scheme.trim_end().ends_with("for the whole thing."));
+    }
+
+    /// The two cuts are independent, and a reply that had suffered both used
+    /// to mention only the second. A caller that reads "TRUNCATED at 2048
+    /// characters" and nothing else takes one case of a forty-seven-case
+    /// clique scheme for the whole scheme -- which is a scheme with no base
+    /// case, and reasoning about it goes wrong quietly.
+    #[test]
+    fn a_scheme_cut_by_the_probe_says_so_as_well() {
+        let w = induction(&rec("(implies (:p (cdr x)) (:p x))", Some(47)));
+        assert!(w.scheme.contains(";; PARTIAL"), "{}", w.scheme);
+        assert!(w.scheme.contains("case 1 of 47"), "{}", w.scheme);
+        assert_eq!(w.scheme_cases, Some(47));
+        assert_eq!(w.scheme_chars, None, "this one was short enough to keep whole");
+    }
+
+    #[test]
+    fn an_event_that_inducted_nothing_is_not_reported() {
+        let r = inductions(&[], true);
+        assert!(r.events.is_empty());
+        assert!(r.supported, "an empty list from a capable image still says so");
+    }
 
     /// Real tuples from the field session, plus the shapes that must fail
     /// closed. The first component is prove time in seconds.

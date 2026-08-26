@@ -219,6 +219,15 @@ struct OutputArgs {
     context: Option<usize>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct InductionArgs {
+    session_id: String,
+    /// A handle from a previous reply's `output_ref` -- the same handle
+    /// `acl2_output` takes, for the same form. Never construct one; see
+    /// `acl2_output`'s note on why an invented handle reads as an answer.
+    output_ref: String,
+}
+
 /// The server state.
 ///
 /// No `tool_router` field: since rmcp 3, `#[tool_handler]` builds the router by
@@ -678,10 +687,15 @@ impl Acl2Mcp {
             if (control.snapshot().is_some() || control.build_snapshot().is_some())
                 && book.try_lock().is_err()
             {
+                // The capability fields are deliberately absent on this
+                // path rather than guessed: reading them needs the book, and
+                // this path exists precisely because the book is busy.
                 return Ok::<_, String>(wire::HealthReply {
                     state: "busy".to_string(),
                     running_unit: control.snapshot().and_then(|s| s.unit),
                     rebuilds: None,
+                    acl2_version: None,
+                    missing_capabilities: Vec::new(),
                 });
             }
             let mut b = book.lock().map_err(|e| e.to_string())?;
@@ -696,6 +710,12 @@ impl Acl2Mcp {
                 .to_string(),
                 running_unit: b.running_unit(),
                 rebuilds: Some(b.rebuilds()),
+                acl2_version: b.capabilities().version.clone(),
+                missing_capabilities: b
+                    .capabilities()
+                    .missing()
+                    .map(|c| format!("{c:?}"))
+                    .collect(),
             })
         })
         .map_err(fail)?;
@@ -766,6 +786,43 @@ impl Acl2Mcp {
             total_lines: out.total_lines,
             superseded: out.superseded,
         })
+    }
+
+    /// What a form inducted, per event.
+    #[tool(
+        description = "What a form's proofs inducted on, per event: the term that \
+                       suggested each scheme, the terms it accommodated, the \
+                       :induction runes behind it and the scheme itself. Takes an \
+                       output_ref from a previous acl2_sync reply. Most forms induct \
+                       nothing and return an empty list, which is not a failure. A \
+                       scheme may be cut -- a mutual recursion inducts over its whole \
+                       clique, and one measured at 6.8 million characters -- and says \
+                       so in the text when it is; acl2_output on the same output_ref \
+                       has what ACL2 printed."
+    )]
+    async fn acl2_induction(
+        &self,
+        Parameters(a): Parameters<InductionArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        // The store, not the book, for the reason `acl2_output` gives: asking
+        // what a finished form inducted must not queue behind a proof that is
+        // still running.
+        let reg = self.registry.lock().map_err(fail)?;
+        let id = SessionId::from(a.session_id.as_str());
+        let store = reg.inductions_of(&id).ok_or_else(|| {
+            fail(format!(
+                "no session {}; it was never opened, or has been closed",
+                a.session_id
+            ))
+        })?;
+        // Absent capability and "this form did not induct" are both an empty
+        // list, and they are not the same fact -- so the reply carries which.
+        let supported = reg
+            .capabilities_of(&id)
+            .is_none_or(|c| c.has(acl2_session::Capability::InductionRecords));
+        drop(reg);
+        let store = store.lock().map_err(fail)?;
+        json(wire::inductions(store.get(&a.output_ref), supported))
     }
 }
 

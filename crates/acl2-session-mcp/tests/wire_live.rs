@@ -384,6 +384,83 @@ fn a_blocked_session_answers_status_health_output_and_interrupt() {
 /// A client once spent days reporting behaviour fixed the day before,
 /// against an installed binary that had never been restarted; no reply could
 /// have revealed it. This one can.
+/// `acl2_induction` answers on a handle, per event, and says when it cannot.
+///
+/// The per-event grouping is the assertion that matters. Both theorems here
+/// induct, both call their goal `*1`, and both are inside one `progn` -- the
+/// exact shape that made the deleted log parser attach every scheme to the
+/// wrong theorem.
+#[test]
+#[ignore = "needs ACL2"]
+fn induction_is_reported_per_event_on_a_handle() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("induction");
+    let book = dir.join("b.lisp");
+    std::fs::write(
+        &book,
+        "(in-package \"ACL2\")\n\
+         (defun i-app (x y) (if (consp x) (cons (car x) (i-app (cdr x) y)) y))\n\
+         (defun i-rev (x) (if (consp x) (i-app (i-rev (cdr x)) (cons (car x) nil)) nil))\n\
+         (progn\n\
+           (defthm i-tl-rev (true-listp (i-rev x)))\n\
+           (defthm i-app-assoc\n\
+             (equal (i-app (i-app x y) z) (i-app x (i-app y z)))))\n",
+    )
+    .unwrap();
+
+    let mut s = Server::start(&acl2);
+    let sid = s.tool("acl2_session_open", json!({"file": book}))["session_id"]
+        .as_str()
+        .expect("session id")
+        .to_string();
+    let o = s.tool("acl2_sync", json!({"session_id": sid, "deadline_seconds": 180}));
+    let admitted = o["admitted"].as_array().expect("admitted array").clone();
+
+    // The `defun`s induct nothing, and that is an empty answer rather than an
+    // error or an absent key.
+    let defun_ref = admitted[1]["output_ref"].as_str().expect("ref").to_string();
+    let none = s.tool("acl2_induction", json!({"session_id": sid, "output_ref": defun_ref}));
+    assert_eq!(none["events"].as_array().map(Vec::len), Some(0), "{none}");
+    assert_eq!(none["supported"].as_bool(), Some(true),
+               "an empty answer from a capable image still says it is capable: {none}");
+
+    let progn_ref = admitted.last().expect("the progn")["output_ref"]
+        .as_str()
+        .expect("ref")
+        .to_string();
+    let ind = s.tool("acl2_induction", json!({"session_id": sid, "output_ref": progn_ref}));
+    let events = ind["events"].as_array().expect("events").clone();
+    assert_eq!(events.len(), 2, "both theorems inducted: {ind}");
+
+    let by = |n: &str| {
+        events
+            .iter()
+            .find(|e| e["event"].as_str() == Some(n))
+            .unwrap_or_else(|| panic!("no {n} in {ind}"))
+            .clone()
+    };
+
+    // Each theorem's own scheme, though both goals are called `*1`.
+    let a = by("i-app-assoc");
+    let a = &a["inductions"];
+    assert_eq!(a[0]["goal"].as_str(), Some("*1"), "{ind}");
+    assert_eq!(a[0]["suggested"].as_str(), Some("(i-app x y)"), "{ind}");
+    assert_eq!(a[0]["runes"][0].as_str(), Some("(:induction i-app)"), "{ind}");
+
+    let t = by("i-tl-rev");
+    let t = &t["inductions"];
+    assert_eq!(t.as_array().map(Vec::len), Some(2), "*1 and its sub-induction: {ind}");
+    assert_eq!(t[0]["goal"].as_str(), Some("*1.1"), "{ind}");
+    assert_eq!(t[1]["suggested"].as_str(), Some("(i-rev x)"), "{ind}");
+
+    // An ordinary scheme arrives whole, so neither cut is announced.
+    assert!(t[1]["scheme"].as_str().unwrap_or("").contains("(:p x)"), "{ind}");
+    assert!(t[1].get("scheme_chars").is_none(), "not cut to length: {ind}");
+    assert!(t[1].get("scheme_cases").is_none(), "not cut to one case: {ind}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 #[ignore = "needs ACL2"]
 fn the_open_reply_identifies_the_build() {

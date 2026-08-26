@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::capability::{Capabilities, Capability};
+use crate::induction::{EventInductions, Induction, InductionStore};
 use crate::session::{Outcome, Session, SessionControl};
 use crate::output::{OutputRef, OutputSlice, OutputStore, Slice};
 use crate::split::{split, Form, SplitError};
@@ -336,81 +337,6 @@ pub struct InnerEvent {
     pub induction: Vec<Induction>,
 }
 
-/// One induction ACL2 performed, from `get-event-data`'s `INDUCTION-RECORDS`.
-///
-/// ACL2 gained this in commit `31b8c8aff5` (2026-08-25, "Induction information
-/// is now returned by get-event-data"), which builds an `induction-record` at
-/// the point the winning candidate is chosen and files it in the event's ttree
-/// -- the same values `induct-msg/continue` prints, kept instead of dropped.
-/// `books/tools/show-induction-records.lisp` is ACL2's own reader for it, and
-/// [`crate::capability::Capability::InductionRecords`] is how a session learns
-/// whether the image in front of it has any of this.
-///
-/// This crate carried a *parser* for the printed narrative until `fb7bf7f`.
-/// What killed it was not fragility but attribution: an announcement never
-/// names the event that printed it, and a form is often many events each
-/// numbering its goals from `*1`. The records come out of `event-data-fal`
-/// keyed by event name, so that defect is gone rather than mitigated --
-/// measured on a `progn` of three theorems, each carrying its own records,
-/// and on one theorem carrying two (`*1` and its sub-induction `*1.1`, which
-/// ACL2 does not print at all under default settings).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Induction {
-    /// The goal this induction was for -- `*1`, `*1.1`, `[2]*1.3`.
-    ///
-    /// ACL2 holds this as a `msgp`, not a string: a format string plus its
-    /// arguments, carrying the pool list as numbers and the forcing round
-    /// separately. The probe has ACL2 print it with `~@` rather than
-    /// reassembling the name here, so the spelling stays ACL2's (P2) --
-    /// including the `[round]` prefix, which only appears off round zero.
-    pub goal: String,
-    /// The term that suggested the scheme, untranslated: `(revappend x z)`.
-    pub suggested: String,
-    /// The other terms merged into the scheme alongside `suggested`.
-    /// Untranslated, and usually empty.
-    pub accommodating: Vec<String>,
-    /// The `:induction` runes that produced the suggestion.
-    ///
-    /// A list, not a phrase. The old parser could offer only ACL2's English
-    /// ("the :induction rules BINARY-APPEND and REVAPPEND") because that is
-    /// what `tilde-*-simp-phrase` renders; this is the rune list itself.
-    ///
-    /// Excludes splitter and forcing-round information, which ACL2's record
-    /// deliberately leaves out.
-    pub runes: Vec<String>,
-    /// `(:p x y z)` -- the conjecture's variables, in ACL2's term order.
-    /// This is what `:p` stands for inside [`Self::scheme`].
-    pub p_formula: String,
-    /// The scheme itself, with `:p` for the conjecture.
-    ///
-    /// Empty only when the probe could not read the record at all. When
-    /// [`Self::scheme_cases`] is `Some`, this is the *first case* rather than
-    /// the whole scheme -- see that field for why.
-    pub scheme: String,
-    /// `Some(n)` when `scheme` holds one case out of `n`, rather than all of
-    /// them; `None` when it is whole.
-    ///
-    /// A mutual recursion inducts over its entire clique, and one such scheme
-    /// measured 6,831,709 characters. That is a *transport* problem before it
-    /// is a display one -- it crosses a pty and is parsed on every admission
-    /// -- so the probe bounds it, and the surfaces cut again to their own
-    /// budgets on top.
-    ///
-    /// The bound is structural rather than by character count, and that was
-    /// forced rather than chosen: `fmt1-to-string` has no badge, so it cannot
-    /// be called from the `loop$` the probe is built on, and a character-exact
-    /// prefix is therefore not available in ACL2. Keeping whole cases is the
-    /// better failure anyway -- what arrives is a readable term rather than a
-    /// term cut off mid-symbol.
-    pub scheme_cases: Option<usize>,
-}
-
-impl Induction {
-    /// Whether [`Self::scheme`] is the whole scheme rather than one case.
-    pub fn scheme_complete(&self) -> bool {
-        self.scheme_cases.is_none()
-    }
-}
 
 /// One key checkpoint: the goal's name and its term.
 #[derive(Debug, Clone)]
@@ -1259,6 +1185,7 @@ pub struct Book {
     admitted: Vec<Admitted>,
     label_gen: u64,
     rebuilds: usize,
+    inductions: Arc<Mutex<InductionStore>>,
     /// Captured output, shared so `acl2_output`-style reads never queue
     /// behind this book's lock: a client reading a *completed* form's log
     /// while a sync grinds gets it immediately. Session calls lock it
@@ -1423,6 +1350,7 @@ impl Book {
             label_gen: 0,
             rebuilds: 0,
             outputs: Arc::new(Mutex::new(OutputStore::new()?)),
+            inductions: Arc::new(Mutex::new(InductionStore::default())),
             pending: None,
             rules: HashMap::new(),
             deps: HashMap::new(),
@@ -1535,6 +1463,32 @@ impl Book {
             self.inner_detail,
             self.capabilities.has(Capability::InductionRecords),
         );
+    }
+
+    /// The induction store, shared for the same reason as the output store.
+    pub fn induction_store(&self) -> Arc<Mutex<InductionStore>> {
+        self.inductions.clone()
+    }
+
+    /// File a unit's inductions under its output handle, so they outlive the
+    /// sync that saw them.
+    ///
+    /// Called for *every* unit, including the ones that inducted nothing --
+    /// that is what makes an absent entry and an empty one mean the same
+    /// thing to a reader, and it is why this is a method rather than a
+    /// condition at each call site.
+    fn record_inductions(&mut self, r: &OutputRef, inner: &[InnerEvent]) {
+        let events: Vec<EventInductions> = inner
+            .iter()
+            .filter(|e| !e.induction.is_empty())
+            .map(|e| EventInductions { event: e.name.clone(), records: e.induction.clone() })
+            .collect();
+        if events.is_empty() {
+            return;
+        }
+        if let Ok(mut store) = self.inductions.lock() {
+            store.put(r.as_str(), events);
+        }
     }
 
     /// The output store, shared for the same reason as the control block:
@@ -2261,6 +2215,7 @@ impl Book {
             match sub.outcome {
                 Outcome::Ok => {
                     let (inner, inner_total, clique) = parse_inner(&sub);
+                    self.record_inductions(&output_ref, &inner);
                     out.admitted.push(UnitReport {
                         index: i,
                         line_start: u.line_start,
@@ -2298,6 +2253,7 @@ impl Book {
                         Status::Rejected
                     };
                     let error_line = error_message(&sub.output);
+                    self.record_inductions(&output_ref, &inner);
                     let mut report = FailureReport {
                         index: i,
                         line_start: u.line_start,
@@ -2803,6 +2759,7 @@ impl Book {
             let introduced = inner_names(&sub);
             self.scrape_rules(&introduced, p.index);
             let (inner, inner_total, clique) = parse_inner(&sub);
+            self.record_inductions(&output_ref, &inner);
             return Ok(Some(Resumed::Admitted(UnitReport {
                 index: p.index,
                 line_start: p.at.line_start,
@@ -2822,6 +2779,7 @@ impl Book {
         }
         let (ed, cp, inner, inner_total) = self.probe_after_failure(deadline.max(PROBE_FLOOR));
         let error_line = error_message(&sub.output);
+        self.record_inductions(&output_ref, &inner);
         let mut report = FailureReport {
             index: p.index,
             line_start: p.at.line_start,

@@ -90,6 +90,7 @@
 pub mod capability;
 pub mod cert;
 pub mod image;
+pub mod induction;
 pub mod output;
 pub mod pretty;
 pub mod pty;
@@ -107,6 +108,7 @@ pub use split::{
 };
 pub use registry::{Registry, RegistryError, SessionId};
 pub use capability::{Capabilities, Capability};
+pub use induction::{EventInductions, Induction, InductionStore};
 pub use cert::{Build, CertError, CertReport, CertStatus};
 pub use image::{find_checkout, ImageError, ImagePolicy};
 pub use output::{OutputRef, OutputSlice, OutputStore, Slice, SliceRequest};

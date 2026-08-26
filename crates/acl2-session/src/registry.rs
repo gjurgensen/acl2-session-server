@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::image::{ImageError, ImagePolicy};
+use crate::capability::Capabilities;
+use crate::induction::InductionStore;
 use crate::output::OutputStore;
 use crate::session::SessionControl;
 use crate::sync::{Book, SyncError};
@@ -108,6 +110,8 @@ struct Entry {
     /// Shared for the same reason as `control`: reading a captured log must
     /// not wait behind whatever call holds the book.
     outputs: Arc<Mutex<OutputStore>>,
+    inductions: Arc<Mutex<InductionStore>>,
+    capabilities: Capabilities,
 }
 
 /// Several open books, each with its own ACL2 process.
@@ -153,6 +157,8 @@ impl Registry {
                 path: book.path().to_path_buf(),
                 control: book.control(),
                 outputs: book.output_store(),
+                inductions: book.induction_store(),
+                capabilities: book.capabilities().clone(),
                 book: Arc::new(Mutex::new(book)),
                 image,
             },
@@ -188,6 +194,21 @@ impl Registry {
     /// lock.
     pub fn outputs_of(&self, id: &SessionId) -> Option<Arc<Mutex<OutputStore>>> {
         self.entries.get(id).map(|e| e.outputs.clone())
+    }
+
+    /// The induction store, for the same reason and on the same handles.
+    pub fn inductions_of(&self, id: &SessionId) -> Option<Arc<Mutex<InductionStore>>> {
+        self.entries.get(id).map(|e| e.inductions.clone())
+    }
+
+    /// What the session's image can do, recorded when it started.
+    ///
+    /// Copied out at open rather than read through the book, so that a
+    /// caller can find out *why* a result is empty without waiting for
+    /// whatever the book is currently doing -- which is exactly the moment
+    /// the question comes up.
+    pub fn capabilities_of(&self, id: &SessionId) -> Option<Capabilities> {
+        self.entries.get(id).map(|e| e.capabilities.clone())
     }
 
     /// Close a session, killing its ACL2 and discarding its captured output.

@@ -54,9 +54,10 @@
 //! enumerates.
 
 use super::{
-    CensusEntry, Checkpoint, Checkpoints, EventData, FormValue, Induction, InnerEvent, NameKind,
+    CensusEntry, Checkpoint, Checkpoints, EventData, FormValue, InnerEvent, NameKind,
 };
 use crate::capability::{Capabilities, Capability};
+use crate::induction::Induction;
 use crate::split::split;
 
 // ---- Setting up, and asking where we are ---------------------------------------
