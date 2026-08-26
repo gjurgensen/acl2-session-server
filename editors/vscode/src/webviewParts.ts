@@ -200,16 +200,6 @@ details.event > summary { padding: 5px 8px; }
    the first inline run -- without this it starts back at the chevron, a slot
    to the left of the name it is about. */
 .efacts { display: block; margin-top: 2px; padding-left: var(--twist); }
-/* An xdoc short: the one thing on this page a person wrote, so it reads as
-   prose rather than as a term -- no monospace, and it wraps. */
-.doc { font-style: italic; opacity: 0.85; margin: 1px 0 3px; }
-/* A short is xdoc markup, rendered by the same pass the doc view uses, so it
-   arrives carrying whatever that pass emits -- including topic links. This
-   page has nothing to open one with: the doc view listens for a click on
-   \`a.see\`, and this is a different webview. So they read as what
-   \`@(tsee ...)\` is in xdoc anyway, a name in code font, rather than as a
-   link that goes nowhere when clicked. */
-.doc a.see { color: inherit; text-decoration: none; }
 /* The summary on a documented card's face: its own line under the name, not
    trailing off the side of it. A short is a sentence, and a sentence set
    beside a name reads as an afterthought where it is in fact the point of
@@ -219,9 +209,25 @@ details.event > summary { padding: 5px 8px; }
    job its own line already does -- and a sentence of italic prose is harder
    to read than the same sentence upright, which is a poor trade for a
    distinction nothing needs any more. */
-.dsum { opacity: 0.85; margin: 2px 0 0; }
-.dbare { margin: 0 0 4px; }
+.dsum { display: block; margin-top: 2px; padding-left: var(--twist);
+  opacity: 0.85; }
+/* Rendered markup can carry a topic link, and this page has nothing to open
+   one with -- the doc view listens for a click on \`a.see\`, and this is a
+   different webview. They read as what \`@(tsee ...)\` is in xdoc anyway, a
+   name in code font, rather than as a link that goes nowhere when clicked. */
 .dsum a.see, .doclong a.see { color: inherit; text-decoration: none; }
+/* An event's documentation, boxed like the card it describes and like the
+   standalone card for a topic with no event. A box is this page's grouping
+   idiom, and a block of prose sitting loose among an event's facts was the
+   one thing inside a card that had no edge of its own. */
+details.docfold, .docfold.bare {
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border-radius: 4px; margin: 4px 0;
+}
+details.docfold > summary { padding: 4px 8px; }
+.docfold.bare > .esum { padding: 4px 8px 4px calc(8px + var(--twist)); }
+.docfold > .dinside { padding: 0 9px 6px calc(8px + var(--twist)); }
+.docfold .dsum { padding-left: 0; }
 /* A rendered body. Code inside it is the page's own \`pre\`/\`code\` -- an
    outlined box and a faint chip -- because a term is a term wherever it is
    written, and a documented topic should not introduce a third way of
@@ -230,8 +236,6 @@ details.event > summary { padding: 5px 8px; }
 /* A name standing in for a directive that would have printed a definition.
    A name, so it is drawn as one. */
 code.xname { background: none; padding: 0; }
-.doc a.see, .doc code { font-family: var(--vscode-editor-font-family), monospace;
-  font-style: normal; font-size: 0.95em; }
 /* And the same for a fold nested inside one: its body lines up under its own
    label, not under its own chevron. \`.einside\` says this for itself, having a
    padding on all four sides. */
@@ -565,18 +569,28 @@ function eventHtml(e, p, openByDefault) {
       '<span class="meta">used (' + used.length + ')</span>',
       usedHtml(used));
   }
-  // Built to read like the standalone card below, because it is the same
-  // thing: the summary on the face, the body inside. The name is not repeated
-  // -- the card this sits in is already the name -- and there is no
-  // "documented" row above it either, which said the summary a second time.
+  // Boxed, and labelled on the line the chevron is on. The summary used to be
+  // the short itself, which is a block -- so it began on the line *after* the
+  // chevron, leaving the chevron pointing at nothing and the box opening with
+  // a blank line. A label beside the chevron is what every other fold on this
+  // page does, and the short then reads as the first line of the contents,
+  // which is what it is.
+  //
+  // The name is not repeated: the card this sits in is already the name. Nor
+  // is there a "documented" row above it any more, which said the summary a
+  // second time.
   if (d && (d.short || d.long)) {
-    const face = d.short
-      ? '<div class="dsum">' + withCode(d.short, d.shortCode) + '</div>'
-      : '<span class="meta">documentation</span>';
+    const label = '<span class="meta">documentation</span>';
+    const inside =
+      (d.short ? '<div class="dsum">' + withCode(d.short, d.shortCode) + '</div>' : '') +
+      (d.long ? '<div class="doclong">' + withCode(d.long, d.longCode) + '</div>' : '');
     body = (d.long
-      ? fold(p + 'ev:' + e.name + ':documentation', false, face,
-             '<div class="doclong">' + withCode(d.long, d.longCode) + '</div>')
-      : '<div class="dbare">' + face + '</div>') + body;
+      ? fold(p + 'ev:' + e.name + ':documentation', false, label,
+             '<div class="dinside">' + inside + '</div>', 'docfold')
+      // A summary and nothing else is one sentence, and a chevron that opens
+      // onto one sentence is a click to learn what a line would have said.
+      : '<div class="docfold bare"><div class="esum">' + label + '</div>' +
+        '<div class="dinside">' + inside + '</div></div>') + body;
   }
 
   // The formals sit beside the name because together they are the signature,

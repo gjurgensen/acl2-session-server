@@ -1006,13 +1006,15 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
               detail: { name: 'shown', short: 'counts', long: '<p>at length</p>',
                         runes: [] } }],
   });
-  // The fold reads like the standalone card: the summary is its face, the
-  // body is inside, and the name is not repeated -- the card it sits in is
-  // already the name.
-  check(/<summary>[\s\S]*counts[\s\S]*<\/summary>/.test(onCard),
-    'the summary is the face of the fold');
+  // Labelled on the chevron's own line. The summary was the short itself,
+  // which is a block: it began on the line after the chevron, so the box
+  // opened with a blank line and the chevron pointed at nothing.
+  check(/<summary><span class="meta">documentation<\/span><\/summary>/.test(onCard),
+    'the chevron has a label on its own line');
+  check(/class="dinside"><div class="dsum">counts/.test(onCard),
+    'and the short is the first line of the contents, not the face');
   check(/at length/.test(onCard), 'and the body is there to open');
-  check(!/>documentation</.test(onCard), 'with no label saying so a second time');
+  check(/class="docfold"/.test(onCard), 'the whole of it is boxed');
   // Once as a heading, and that is the event card's own. Fold ids carry it
   // too, which is not the reader seeing it twice.
   check(onCard.split('class=\"ename\"').length === 2,
@@ -1151,6 +1153,9 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
     ['details[data-fold] > summary::before', "the chevron's slot"],
     ['.einside', "a fold's body"],
     ['.efacts', "the facts line inside a summary"],
+    ['.dsum', "a topic's summary inside one"],
+    ['.docfold.bare > .esum', "an event's documentation with no chevron"],
+    ['.docfold > .dinside', "an event's documentation body"],
     ['.event.bare .esum', "an event with no chevron at all"],
     ['details[data-fold]:not(.event) > *:not(summary)', "a nested fold's body"],
   ]) {
