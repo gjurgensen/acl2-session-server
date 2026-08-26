@@ -43,6 +43,7 @@ explanation of the `--default` and `--trusted` arguments.
 | `acl2_interrupt` | Abort the form in flight and make the session usable again. |
 | `acl2_health` | Whether the session is answering: ready, busy, unresponsive, dead. |
 | `acl2_output` | Read part of a form's captured output, by handle. |
+| `acl2_induction` | What a form's proofs inducted on, per event, by handle. |
 
 Note that `acl2_sync` stops at the first failure and reports it as structure.
 The reply's `failed` object, for a theorem whose proof reverts to induction and
@@ -83,16 +84,25 @@ rewriting detail, arbitrary macro output — exist only in the printed narrative
 The structured result is a fast path over a complete log, never a replacement
 for it.
 
-The induction scheme is one of the things that lives only in the log, and
-there is no tool that returns it as fields. There was one, and it was
-withdrawn: ACL2 prints the scheme and records it nowhere, so recovering it
-means parsing prose — and while the parse itself is sound, it cannot say
-*which event* an announcement belongs to. A form is often many events (a
+`acl2_induction` takes the same handle and says what a form's proofs inducted
+on: the term that suggested each scheme, the terms it accommodated, the
+`:induction` runes behind it, and the scheme itself. Grouped by the event that
+performed it, which is the part that matters — a form is often many events (a
 `progn`, an `encapsulate`, a `mutual-recursion`), each proving separately and
-each numbering its own goals from `*1`, so a flat list of announcements taken
-from one form's log attaches to no event in particular. Read the log with
-`acl2_output`, where each announcement still sits beside the proof that
-printed it. See the `induction` module for what a real fix would need.
+each numbering its own goals from `*1`. An earlier version of this tool was
+withdrawn for exactly that: it parsed the printed narrative, and an
+announcement does not name the event that printed it, so a flat list attached
+to no event in particular. ACL2 now files a record per event, so the
+association is its own.
+
+Most forms induct nothing and the reply is an empty list, which is not a
+failure. A scheme may be cut — a mutual recursion inducts over its whole
+clique, and one measured at 6,831,709 characters — and says so in the text
+when it is; `acl2_output` on the same handle has what ACL2 printed. If the
+list is empty where you expected something, check `acl2_health`:
+`missing_capabilities` names `InductionRecords` on an ACL2 too old to report
+them, and the version string will not tell you, since an image with the field
+and one without both call themselves 8.7.
 
 `acl2_certify` runs `cert.pl` on the session's book, with the same ACL2
 image the session runs and the `cert.pl` from that image's own checkout. It

@@ -42,13 +42,15 @@
 //! *running* is read from the stream, because the structured state is locked
 //! inside a busy process until it finishes.
 //!
-//! There was a second: a module that parsed the printed induction narrative,
-//! because ACL2 computes the scheme inside a printing function and records it
-//! nowhere. It is gone, and the two faults are worth keeping apart. Reading
-//! prose was the *sanctioned* part -- there was no other source. What made it
-//! unfixable is that an announcement cannot say which of a form's events it
-//! belongs to, and a form is often many events each numbering its goals from
-//! `*1`. Structured induction data in `get-event-data` is the replacement.
+//! There was a second, and it is worth recording because it is now closed. A
+//! module parsed the printed induction narrative, since ACL2 computed the
+//! scheme inside a printing function and recorded it nowhere. Reading prose
+//! was the *sanctioned* part of that -- there was no other source. What made
+//! it unfixable was that an announcement cannot say which of a form's events
+//! it belongs to, and a form is often many events each numbering its goals
+//! from `*1`. ACL2 now files an `induction-record` per event, so
+//! [`induction`] reads it as structure like everything else here, and the
+//! exception is gone rather than tolerated.
 //!
 //! **P3. Fast paths are verified against a recorded invariant; failure
 //! degrades to replay.** Undo is a performance optimization, never a
