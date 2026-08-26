@@ -602,9 +602,14 @@ check(!pages[1][1].includes('Introduced ('),
   };
   const render = (n, eventsOpenLimit) =>
     envelope({ checkpoints: [], rules: [], inner: events(n), eventsOpenLimit }, 'c-');
-  check(render(3, 4).includes(' open>'), 'a handful of events open by default');
-  check(!render(6, 4).includes(' open>'),
-        'and past the limit every one of them starts collapsed');
+  // The cards, not the section that holds them: the Events section folds too
+  // and is open by default, so asking the whole envelope would always find an
+  // `open` and never see the cards close.
+  const cards = (h) => [...h.matchAll(/<details[^>]*class="event"[^>]*>/g)].map((m) => m[0]);
+  check(cards(render(3, 4)).every((c) => c.includes(' open>')),
+    'a handful of events open by default');
+  check(cards(render(6, 4)).every((c) => !c.includes(' open>')),
+    'and past the limit every one of them starts collapsed');
   check(render(6, 99).includes(' open>'), 'the limit is a setting, not a constant');
 }
 
@@ -982,6 +987,25 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
     'the first member is a row, not the card and a row both');
 }
 
+// ---- the sections fold too, not only what is inside them ----
+{
+  const m = { checkpoints: [], rules: [], inner: [
+    { name: 'f', kind: 'defun', rules: [] },
+  ], docs: [{ name: 't', short: 's' }] };
+  const h = envelope(m, 'p:');
+  // A form recording six hundred events is a page to scroll past before
+  // reaching anything below it, and the count in the heading is often the
+  // whole of what a reader wanted from it.
+  for (const [id, what] of [['p:events', 'Events'], ['p:docs', 'Documented']]) {
+    check(h.includes('data-fold="' + id + '"'), `the ${what} section folds`);
+  }
+  // Open to begin with: folding it is for getting past it, not for hiding it.
+  check(/data-fold="p:events"[^>]*\bopen\b/.test(h), 'and starts open');
+  // Keyed by what it is, not where it sits, so it survives a re-render -- the
+  // rule every fold on this page follows.
+  check(!/data-fold="p:events:\d/.test(h), 'and is keyed by what it holds');
+}
+
 // ---- an event with no name, and a clique with too many ----
 {
   const one = (e) => envelope({ checkpoints: [], rules: [], inner: [e] }, 'p:');
@@ -1103,13 +1127,13 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   check(/<summary>[\s\S]*topic[\s\S]*a summary[\s\S]*<\/summary>/.test(card),
     'with the name and the summary on its face');
   check(/the whole document/.test(card), 'and the body inside');
-  check(!/<details[^>]*\bopen\b/.test(card),
+  check(!/<details[^>]*class="event"[^>]*\bopen\b/.test(card),
     'closed to begin with: a body is prose, and several open at once is a wall');
 
   // No body, no chevron -- the rule the events already follow. A `defxdoc`
   // with a short and no long is an ordinary thing to write.
   const bare = doc({ docs: [{ name: 'terse', short: 'all there is' }] });
-  check(!/<details/.test(bare), 'a topic with no body gets no fold');
+  check(!/<details[^>]*class="event"/.test(bare), 'a topic with no body gets no fold');
   check(/all there is/.test(bare), 'and still says what it is');
 
   // A documented name that *is* an event keeps its body under its own card,

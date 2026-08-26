@@ -732,8 +732,8 @@ function eventHtml(e, p, openByDefault, at) {
 function docsHtml(m, p) {
   const docs = m.docs || [];
   if (!docs.length) { return ''; }
-  return '<h3>Documented (' + docs.length + ')</h3>' +
-    docs.map((d) => docCard(d, p)).join('');
+  return fold(p + 'docs', true, '<h3>Documented (' + docs.length + ')</h3>',
+    docs.map((d) => docCard(d, p)).join(''));
 }
 
 /**
@@ -809,17 +809,20 @@ function productiveHtml(m, p) {
   // open blocks is a page that cannot be scrolled.
   const limit = m.eventsOpenLimit != null ? m.eventsOpenLimit : 4;
   const openByDefault = inner.length <= limit;
-  let h = head + '<h3>Events (' + total + ')</h3>';
-  h += inner.map((e, i) => eventHtml(e, p, openByDefault, i)).join('');
-  h += docsHtml(m, p);
   const detailed = inner.filter(
     (e) => e.kind || e.time || e.proverSteps != null || (e.rules || []).length || e.detail
   ).length;
+  let events = inner.map((e, i) => eventHtml(e, p, openByDefault, i)).join('');
   if (detailed < inner.length) {
-    h += '<p class="meta">detail (kind, time, steps, rules) is probed for the first ' +
+    events += '<p class="meta">detail (kind, time, steps, rules) is probed for the first ' +
       detailed + ' events; the rest are names only.</p>';
   }
-  return h;
+  // The section itself folds, like Rules and the pre-failure list already do.
+  // A form that records six hundred events is a page the reader has to scroll
+  // past to reach anything below it, and the count in the heading is often
+  // the whole of what they wanted from it.
+  return head + fold(p + 'events', true, '<h3>Events (' + total + ')</h3>', events) +
+    docsHtml(m, p);
 }
 
 /**
