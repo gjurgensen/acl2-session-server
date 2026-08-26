@@ -250,7 +250,8 @@ body { margin: 0; display: flex; flex-direction: column; }
 #wrap { position: relative; }
 #form, #hlbox {
   box-sizing: border-box; width: 100%; margin: 0;
-  font-family: var(--vscode-editor-font-family, monospace); font-size: 12px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: var(--vscode-editor-font-size, 0.92rem);
   line-height: 1.4; padding: 4px 6px; border: 1px solid transparent;
   border-radius: 3px; tab-size: 2;
   white-space: pre-wrap; overflow-wrap: break-word; word-break: normal;
@@ -281,9 +282,9 @@ body { margin: 0; display: flex; flex-direction: column; }
 .ev > summary .sform { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis;
                        white-space: nowrap;
                        font-family: var(--vscode-editor-font-family, monospace);
-                       font-size: 12px; }
+                       font-size: var(--vscode-editor-font-size, 0.92rem); }
 .evlog { max-height: 32vh; overflow: auto; }
-.wc { font-size: 11px; padding: 1px 7px; border-radius: 9px;
+.wc { font-size: 0.85rem; padding: 1px 7px; border-radius: 9px;
       background: rgba(212, 172, 13, 0.22); }
 .wc.dirty { background: rgba(198, 40, 40, 0.3); font-weight: 600; }
 #hint { padding: 10px 0; }

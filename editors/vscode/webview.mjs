@@ -1318,9 +1318,27 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
     'terms are set in the editor\u2019s font');
   check(codeRule !== null && /font-size:\s*var\(--vscode-editor-font-size/.test(codeRule),
     'and at the editor\u2019s size, so they match the buffer they came from');
-  const sizes = [...css.matchAll(/font-size:\s*([^;]+);/g)].map((m) => m[1].trim());
-  check(sizes.every((v) => !/^\d+px$/.test(v)),
-    `no size is written in pixels (${sizes.filter((v) => /^\d+px$/.test(v))})`);
+  // Every stylesheet, not only the shared one: the console and the doc view
+  // add rules of their own on top of it, and the console's had the same fault
+  // this set out to fix -- a code block pinned at 12px while the buffer it
+  // echoes followed the reader's setting.
+  for (const f of ['webviewParts', 'console', 'docView']) {
+    const sheet = readFileSync(new URL(`./src/${f}.ts`, import.meta.url), 'utf8');
+    const sizes = [...sheet.matchAll(/font-size:\s*([^;}]+)[;}]/g)].map((m) => m[1].trim());
+    const px = sizes.filter((v) => /^\d+px$/.test(v));
+    check(px.length === 0, `${f} writes no size in pixels (${px})`);
+  }
+
+  // The terms take all three of the editor's font settings, because they are
+  // the buffer's own text and a reader compares them against it.
+  const codeRule2 = rule('pre, code');
+  check(codeRule2 !== null && /font-weight:\s*var\(--vscode-editor-font-weight/.test(codeRule2),
+    'and the editor\u2019s weight, so a light or bold editor font is matched too');
+  // The one place a var has no fallback is a var that has to resolve anyway;
+  // everywhere else names what to do without it.
+  const bodyRule = rule('body');
+  check(bodyRule !== null && /var\(--vscode-font-family,\s*[a-z-]+\)/.test(bodyRule),
+    'the workbench font names a fallback, as the editor font already did');
   for (const [sel, what] of [
     ['details[data-fold] > summary::before', "the chevron's slot"],
     ['.cinside', "a card's body"],

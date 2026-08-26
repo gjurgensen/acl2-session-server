@@ -80,8 +80,8 @@ export const SHARED_CSS = `
    is how a label two levels down ends up unreadable. Anchored here, on the
    root, so one setting moves the page and the proportions hold. */
 html { font-size: var(--vscode-font-size, 13px); }
-body { font-family: var(--vscode-font-family); color: var(--vscode-foreground);
-       font-size: 1rem; }
+body { font-family: var(--vscode-font-family, sans-serif);
+       color: var(--vscode-foreground); font-size: 1rem; }
 .h { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; margin: 10px 0 4px; }
 .status { font-weight: 600; padding: 1px 8px; border-radius: 9px; }
 .status.admitted, .status.ok { background: rgba(46, 125, 50, 0.25); }
@@ -99,7 +99,8 @@ h3 { margin: 14px 0 4px; font-size: 0.85rem; text-transform: uppercase;
    than the editor for anyone whose editor font is the larger of the two,
    which is the common setting and the default one. */
 pre, code { font-family: var(--vscode-editor-font-family, monospace);
-           font-size: var(--vscode-editor-font-size, 0.92rem); }
+           font-size: var(--vscode-editor-font-size, 0.92rem);
+           font-weight: var(--vscode-editor-font-weight, normal); }
 /* A block of ACL2's own text -- a checkpoint term, the live log, a value --
    in an outlined box. The same box a card uses (same border colour,
    same radius), on purpose: a box is this page's grouping idiom, so a block

@@ -94,7 +94,7 @@ ${SHARED_CSS}
 body { padding: 0 14px 20px; line-height: 1.5; }
 .bar { display: flex; gap: 8px; align-items: baseline; position: sticky; top: 0;
        background: var(--vscode-editor-background); padding: 10px 0 6px; }
-.name { font-weight: 600; font-size: 15px; }
+.name { font-weight: 600; font-size: 1.15rem; }
 a.see { color: var(--vscode-textLink-foreground); text-decoration: none; cursor: pointer; }
 a.see:hover { text-decoration: underline; }
 .math { font-family: var(--vscode-editor-font-family, monospace);
