@@ -1025,13 +1025,14 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
     ],
   };
   const h = envelope(failed, 'g-');
-  check(h.includes('Induction (1)'),
+  check(h.includes('inducted (1)'),
         'a failing form shows what it inducted on');
   check(h.includes('(d-app x nil)') && h.includes('(:induction d-app)'),
         'with the suggesting term and the runes behind it');
-  check(h.indexOf('Checkpoints (') < h.indexOf('Induction (') &&
-        h.indexOf('Induction (') < h.indexOf('Summary ('),
-        'directly under the checkpoints, whose *1 names it explains');
+  check(h.indexOf('Checkpoints (') < h.indexOf('Summary ('),
+        'in the block directly under the checkpoints, whose *1 names it explains');
+  check(h.indexOf('Summary (') < h.indexOf('inducted ('),
+        'and leading that block, for the same reason');
 
   // A form that failed before the prover ran has no scheme and must not
   // grow an empty section for one.
@@ -1086,27 +1087,71 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   globalThis.toks = {};
   const summaryHtml = lift('esc', 'strip', 'spans', 'hl', 'folds', 'foldMemory', 'foldOrder',
                            'foldScope', 'FOLD_SCOPES', 'kindFolds', 'foldKindsAre',
-                           'foldsForget', 'foldScopeIs', 'fold', 'usedHtml', 'summaryHtml');
-  // A compound failure: nothing at form level, everything on the event.
-  const bad = { name: 'd-thm', abortCauses: '(empty-clause)',
-                rules: ['(:definition d-app)'], hintEvents: ['(:use d-assoc)'],
-                splitterRules: ['(:rewrite d-split)'] };
-  const compound = summaryHtml({ rules: [], hintEvents: [], splitterRules: [] }, bad, 'g-');
-  check(compound.includes('Summary (3)'), 'the section counts all three parts');
-  check(compound.includes('used (1)') && compound.includes('supplied (1)') &&
-        compound.includes('splits (1)'), 'and labels each part');
-  check(compound.includes('(:use d-assoc)'),
-        'sourced from the failing event, which is where a compound form keeps it');
+                           'foldsForget', 'foldScopeIs', 'fold', 'factRow', 'fmtChars',
+                           'inductionHtml', 'usedHtml', 'summaryHtml');
+  const block = summaryHtml({
+    supplied: ['(:use d-assoc)'],
+    splits: ['(:rewrite d-split)'],
+    inducted: [{ goal: '*1', suggested: '(d-app x nil)', runes: ['(:induction d-app)'],
+                 pFormula: '(:p x)', scheme: '(and (:p x))' }],
+    used: ['(:definition d-app)'],
+  }, 'g-', 'g-');
+  check(block.includes('Summary (4)'), 'the section counts every part');
+  check(block.includes('inducted (1)') && block.includes('supplied (1)') &&
+        block.includes('splits (1)') && block.includes('used (1)'),
+        'and labels each one');
+  // Each part is its own fold, so a reader can shut the long one and keep
+  // the short ones.
+  for (const k of ['inducted', 'supplied', 'splits', 'used']) {
+    check(block.includes('data-fold="g-' + k + '"'), k + ' is separately collapsible');
+  }
+  // Order is not ACL2's: the long reference list goes last, so the parts a
+  // reader came for are not pushed below a wall of runes.
+  const at = (t) => block.indexOf(t);
+  check(at('inducted (') < at('supplied (') && at('supplied (') < at('splits (') &&
+        at('splits (') < at('used ('),
+        'inducted, supplied, splits, then used');
 
-  // A bare theorem: the form-level values are the fallback and still work.
-  const bare = summaryHtml({ rules: ['(:definition b-app)'], hintEvents: [], splitterRules: [] },
-                           undefined, 'g-');
+  check(summaryHtml({}, 'g-', 'g-') === '',
+        'and a proof with none of them grows no section');
+}
+
+// ---- a failing form's Summary comes from the failing event ----
+//
+// The regression this exists for: the sections it replaced read form-level
+// fields, and `get-event-data` leaves those empty for every compound form --
+// so a failing `define` showed no rules, no hints and no splitters while its
+// own event had all three. `failureHtml` draws no card for that event, so this
+// block is its card's Summary, flattened.
+{
+  globalThis.toks = {};
+  const compound = envelope({
+    status: 'failed',
+    checkpoints: [{ goal: 'Subgoal *1/2', term: '(implies (not (consp x)) (not x))' }],
+    rules: [], hintEvents: [], splitterRules: [],
+    abortCause: '(empty-clause)',
+    inner: [
+      { name: 'd-thm', kind: 'defthm', abortCauses: '(empty-clause)',
+        rules: ['(:definition d-app)'],
+        hintEvents: ['(:use d-assoc)'],
+        splitterRules: ['(:rewrite d-split)'] },
+    ],
+  }, 'g-');
+  check(compound.includes('Summary (3)'),
+        'the failing event supplies the block when the form level is empty');
+  check(compound.includes('(:use d-assoc)') && compound.includes('(:definition d-app)') &&
+        compound.includes('(:rewrite d-split)'),
+        'all three of its parts, none of which the outer event knows');
+
+  // A failure with nothing to attribute to -- a translate error names no
+  // event -- still renders whatever the form level had.
+  const bare = envelope({
+    status: 'failed', checkpoints: [], errorLine: 'ACL2 Error [Translate]',
+    rules: ['(:definition b-app)'], hintEvents: [], splitterRules: [],
+    inner: [],
+  }, 'g-');
   check(bare.includes('Summary (1)') && bare.includes('used (1)'),
-        'with no identifiable event, the form-level values still render');
-
-  // Nothing at all draws nothing.
-  check(summaryHtml({ rules: [], hintEvents: [], splitterRules: [] }, undefined, 'g-') === '',
-        'and a form with none of the three grows no section');
+        'with no event to attribute to, the form-level values still render');
 }
 
 // ---- a cut scheme says which cut, because there are two ----

@@ -677,36 +677,49 @@ function usedHtml(rules) {
 }
 
 /**
- * What the failing form's proof drew on: used, supplied, and what split it.
+ * What a proof did and what it drew on -- the same block wherever it appears.
  *
- * ACL2's own name for this block, and its own grouping -- \`print-summary\`
- * calls \`print-rules-and-hint-events-summary\`, which prints runes, then hint
- * events, then splitter rules, in that order. One fold rather than three
- * headings, and not called "Rules" because the event cards already carry two
- * rune lists (\`introduced\`, \`used\`) and a third top-level one under that name
- * says nothing about which sense it means.
+ * ACL2's own name and its own grouping: \`print-summary\` calls
+ * \`print-rules-and-hint-events-summary\`, which is runes, hint events and
+ * splitter rules. Induction joins them here because the question the section
+ * answers is *what did this proof do*, and a scheme is an answer to it;
+ * \`introduced\` stays outside because it is what the event left in the world,
+ * which is a different question.
  *
- * **Sourced from the failing event first, and that is the point.** The
- * form-level fields come from \`get-event-data\` on the *outer* event, which
- * ACL2 leaves empty for every compound form -- so a failing \`define\` showed no
- * rules, no hints and no splitters at all, while its events had all three.
- * \`failureHtml\` draws no card for the failing event, so this section is that
- * card flattened, and it reads the event's own data. The form-level value is
- * the fallback, for a failure with no identifiable event to attribute to.
+ * Not called "Rules": an event card already carries two rune lists
+ * (\`introduced\` and \`used\`), and a third under that name says nothing about
+ * which sense is meant.
+ *
+ * **Order is not ACL2's, deliberately.** ACL2 prints runes first, which is an
+ * artifact of the order its subroutines are called rather than a reading
+ * order -- and \`used\` runs to dozens of entries, so leading with it pushes
+ * everything a reader actually came for below a wall of runes. So: how it
+ * proved the thing, what the author handed it, why it branched, and the long
+ * reference list last.
+ *
+ * Open by default, with each part keeping its own. The wrapper is a boundary
+ * rather than a gate: the counts stay visible and \`used\` is still one click.
+ * Anyone who disagrees collapses \`summary\` once and the kind default carries
+ * it everywhere.
  */
-function summaryHtml(m, bad, p) {
-  const pick = (fromEvent, fromForm) =>
-    (fromEvent && fromEvent.length ? fromEvent : fromForm) || [];
-  const used = pick(bad && bad.rules, m.rules);
-  const supplied = pick(bad && bad.hintEvents, m.hintEvents);
-  const splits = pick(bad && bad.splitterRules, m.splitterRules);
-  const total = used.length + supplied.length + splits.length;
+function summaryHtml(src, p, id) {
+  const supplied = src.supplied || [];
+  const splits = src.splits || [];
+  const inducted = src.inducted || [];
+  const used = src.used || [];
+  const total = supplied.length + splits.length + inducted.length + used.length;
   if (!total) { return ''; }
-  const part = (label, lst) => lst.length
-    ? '<div class="meta">' + label + ' (' + lst.length + ')</div>' + usedHtml(lst)
+  const part = (label, kind, lst, openByDefault, html) => lst.length
+    ? fold(id + kind, kind, openByDefault,
+        '<span class="meta">' + label + ' (' + lst.length + ')</span>',
+        html ? html(lst) : usedHtml(lst))
     : '';
-  return fold(p + 'summary', 'summary', true, '<h3>Summary (' + total + ')</h3>',
-    part('used', used) + part('supplied', supplied) + part('splits', splits));
+  return fold(id + 'summary', 'summary', true,
+    '<h3>Summary (' + total + ')</h3>',
+    part('inducted', 'inducted', inducted, false, inductionHtml) +
+    part('supplied', 'supplied', supplied, true) +
+    part('splits', 'splits', splits, true) +
+    part('used', 'used', used, false));
 }
 
 /** How many of a clique's names fit on its title line before the count. */
@@ -848,47 +861,20 @@ function eventHtml(e, p, openByDefault, at) {
       '<span class="meta">introduced (' + runes.length + ')</span>',
       introducedHtml(d));
   }
-  // Beside the theorem that inducted, which is the whole point: a form is
-  // often several events, they all number their goals from \`*1\`, and a flat
-  // list of schemes attached to none of them.
-  //
-  // Closed by default, unlike the failing form's. A scheme is read when a
-  // proof went *wrong*; on one that went right it is a large block saying
-  // something nobody asked -- and a card that opens with one buries the
-  // rules and the cost, which is what the card is for. The two are separate
-  // kinds for exactly this reason, so collapsing one never speaks for the
-  // other.
-  const inds = e.inductions || [];
-  if (inds.length) {
-    body += fold(p + 'ev:' + key + ':inducted', 'ev:inducted', false,
-      '<span class="meta">inducted (' + inds.length + ')</span>',
-      inductionHtml(inds));
-  }
   // One row per function the clique admitted. ACL2 records the whole clique
   // as a single event keyed under its first definition, so without this a
   // \`mutual-recursion\` read as though it had defined that one function and
   // written only its rules -- the others' rules appeared nowhere at all.
   body += members.map((mem) => memberHtml(mem, p + 'ev:' + key + ':')).join('');
-  if (used.length) {
-    body += fold(p + 'ev:' + key + ':used', 'ev:used', false,
-      '<span class="meta">used (' + used.length + ')</span>',
-      usedHtml(used));
-  }
-  // What the author handed the prover, and what made it branch. Both are
-  // short -- one or two entries where \`used\` is dozens -- and both are read
-  // per event because ACL2 reports neither on the outer event of a compound
-  // form. Open by default for that reason: a fold that is nearly always
-  // absent, and tiny when present, costs nothing open and is easy to miss shut.
-  if (supplied.length) {
-    body += fold(p + 'ev:' + key + ':supplied', 'ev:supplied', true,
-      '<span class="meta">supplied (' + supplied.length + ')</span>',
-      usedHtml(supplied));
-  }
-  if (splits.length) {
-    body += fold(p + 'ev:' + key + ':splits', 'ev:splits', true,
-      '<span class="meta">splits (' + splits.length + ')</span>',
-      usedHtml(splits));
-  }
+  // Everything this event's *proof* did, in one block -- see \`summaryHtml\`.
+  // \`introduced\` and the clique rows stay above it: they are what the event
+  // left in the world, which is a different question from what its proof
+  // drew on.
+  body += summaryHtml(
+    { supplied, splits, inducted: e.inductions || [], used },
+    p,
+    p + 'ev:' + key + ':'
+  );
   // Boxed, and labelled on the line the chevron is on. The summary used to be
   // the short itself, which is a block -- so it began on the line *after* the
   // chevron, leaving the chevron pointing at nothing and the box opening with
@@ -1118,23 +1104,32 @@ function failureHtml(m, p, on, goals) {
     }
   }
 
-  // Directly under the checkpoints, because it is what explains their names.
-  // A reader looking at \`Subgoal *1/2'\` is looking at the pool this scheme
-  // created; \`*1\` in the record and \`*1\` in the goal name are the same
-  // thing, and without the scheme the numbering is just notation.
+  // Directly under the checkpoints, because the induction inside it is what
+  // explains their names. A reader looking at \`Subgoal *1/2'\` is looking at
+  // the pool that scheme created; \`*1\` in the record and \`*1\` in the goal
+  // name are the same thing, and without the scheme the numbering is just
+  // notation. That is also why \`inducted\` leads the block.
   //
-  // Drawn here and not only on the event card: \`failureHtml\` never draws a
-  // card for the event that failed -- it leads with that event's name and
-  // spreads its detail across the sections below -- so the one event a reader
-  // most wants the scheme for is the one \`eventHtml\` is never called on. The
-  // events that got in *before* the failure keep their cards, and their folds
-  // with them.
-  const failedInd = bad ? (bad.inductions || []) : [];
-  if (failedInd.length) {
-    h += fold(p + 'inducted', 'failed:inducted', true,
-      '<h3>Induction (' + failedInd.length + ')</h3>', inductionHtml(failedInd));
-  }
-  h += summaryHtml(m, bad, p);
+  // Drawn at all because \`failureHtml\` never draws a *card* for the event
+  // that failed -- it leads with that event's name and spreads its detail
+  // across the sections below -- so the one event a reader most wants this
+  // for is the one \`eventHtml\` is never called on. This section is that
+  // card's Summary, flattened; the events that got in before the failure keep
+  // their own cards, and their own.
+  //
+  // Sourced from the failing event first, which is the fix rather than a
+  // refinement: the form-level fields are empty for every compound form, so a
+  // failing \`define\` showed no rules, no hints and no splitters while its own
+  // event had all three. The form level is the fallback, for a failure with no
+  // event to attribute anything to.
+  const pick = (fromEvent, fromForm) =>
+    (fromEvent && fromEvent.length ? fromEvent : fromForm) || [];
+  h += summaryHtml({
+    supplied: pick(bad && bad.hintEvents, m.hintEvents),
+    splits: pick(bad && bad.splitterRules, m.splitterRules),
+    inducted: (bad && bad.inductions) || [],
+    used: pick(bad && bad.rules, m.rules),
+  }, p, p);
   if (m.time) { h += '<h3>Time</h3><p class="meta">' + fmtTime(m.time) + '</p>'; }
 
   if (m.errorLine || m.abortCause) {
