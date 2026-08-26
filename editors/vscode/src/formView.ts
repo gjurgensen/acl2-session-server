@@ -750,18 +750,31 @@ body { padding: 2px 12px 12px; box-sizing: border-box; }
    a proof that has printed two lines is two lines tall. Stretching it with
    \`flex: 1\` would fill the pane either way and leave the button stranded
    at the foot of an empty box, when where it belongs is under the output.
-   \`min-height: 0\` on both, or a flex child refuses to shrink below the
-   size of its content and the *pane* scrolls instead of the log. Only while
-   the fold is open: a closed one keeps its own height and the button rises
-   to meet it. */
+   \`min-height: 0\`, or a flex child refuses to shrink below the size of its
+   content and the *pane* scrolls instead of the log.
+
+   The log is a **sibling** of the fold rather than its body, and that is
+   load-bearing rather than tidy. A \`<details>\` does not pass a flex context
+   to its contents: Chrome puts them in a \`::details-content\` box which is
+   the flex item, so a \`<pre>\` inside one is not, and \`flex\`/\`min-height\`
+   on it are inert. Measured -- \`flex: 1 1 0 !important\` on the \`<pre>\`
+   moved its height not at all, while the \`<details>\` around it shrank
+   correctly. The log therefore grew to its full 1126px inside a 667px box
+   and painted straight over the button below it. Outside the fold it is a
+   real flex item and shrinks to what is left.
+
+   The fold still owns it: \`:not([open]) ~\` hides the log when the header is
+   collapsed, and the button rises to meet it. */
 #root { min-height: 100%; }
 #root.running { display: flex; flex-direction: column; height: 100%; }
-#root.running details.tail[open] {
-  display: flex; flex-direction: column; flex: 0 1 auto; min-height: 0;
-}
-#root.running details.tail[open] #tailtext {
+#root.running details.tail ~ #tailtext {
   flex: 0 1 auto; min-height: 0; max-height: none;
 }
+#root.running details.tail:not([open]) ~ #tailtext { display: none; }
+/* Never shrinks. A flex item defaults to \`flex-shrink: 1\`, so a row holding
+   one button can be squeezed below the button's own height, and the button
+   then paints outside its row. */
+#root.running .openrow { flex: 0 0 auto; }
 .openrow { margin: 8px 0 0; }
 </style>
 </head>
@@ -946,9 +959,14 @@ function render() {
     // re-tokenize twice a second, because a webview cannot do what the
     // output view does -- that is a real TextDocument, colored by VSCode
     // from its language. So hand the reader to the thing that already works.
+    // The fold carries the header alone and the log follows it as a sibling.
+    // See the stylesheet: a <details> does not pass a flex context to its
+    // contents, so a log inside one cannot be bounded by the pane and grows
+    // over the button below it.
     h += fold('tail', 'tail', true,
       '<h3>Prover output <span id="elapsed" class="meta"></span></h3>',
-      '<pre id="tailtext">(waiting for output\\u2026)</pre>', 'tail') +
+      '', 'tail') +
+      '<pre id="tailtext">(waiting for output\\u2026)</pre>' +
       '<p class="openrow"><button id="openoutput">Open in Output view</button></p>';
   }
   // pending and beyond render nothing below the chip. There is no further

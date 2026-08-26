@@ -280,16 +280,31 @@ check(spans([[{ t: 'a', c: '' }], [{ t: 'b', c: '' }]]) === 'a\nb', 'and joins l
   const page = pages[1][1];
   check(/#root\.running \{[^}]*display: flex/.test(page),
         'a running form lays its page out as a column');
-  check(/#root\.running details\.tail\[open\] \{[^}]*flex: 0 1 auto;[^}]*min-height: 0/.test(page),
-        'the open tail fold grows into the leftover room without claiming it');
+  check(/#root\.running details\.tail ~ #tailtext \{[^}]*flex: 0 1 auto;[^}]*min-height: 0/
+          .test(page),
+        'the log grows into the leftover room without claiming it');
   check(!/#root\.running[^}]*\{[^}]*flex: 1;/.test(page),
         'and nothing stretches, which would strand the button under empty space');
-  check(/#root\.running details\.tail\[open\] #tailtext \{[^}]*min-height: 0/.test(page),
-        'and so does the log inside it, or the pane scrolls instead');
-  check(/details\.tail\[open\]/.test(page) && !/details\.tail \{/.test(page),
-        'only while open, so a collapsed fold lets the button rise');
-  check(page.indexOf("fold('tail'") < page.indexOf('id="openoutput"'),
-        'the button sits under the output, not above it');
+  check(/#root\.running details\.tail:not\(\[open\]\) ~ #tailtext \{[^}]*display: none/
+          .test(page),
+        'a collapsed fold hides the log, so the button rises to meet it');
+  check(/#root\.running \.openrow \{[^}]*flex: 0 0 auto/.test(page),
+        'and the button row never shrinks, or the button paints outside it');
+
+  // The log is a SIBLING of the fold, not its body. A `<details>` does not
+  // pass a flex context to its contents -- Chrome puts them in a
+  // `::details-content` box which is the flex item -- so a `<pre>` inside one
+  // is not, `flex` and `min-height` on it are inert, and it grows to its full
+  // height straight over the button. Measured: 1126px of log inside a 667px
+  // box. If the log ever moves back inside the fold, this is what notices.
+  const foldAt = page.indexOf("fold('tail'");
+  const preAt = page.indexOf('id="tailtext"');
+  const btnAt = page.indexOf('id="openoutput"');
+  check(foldAt !== -1 && preAt !== -1 && btnAt !== -1, 'the running page has all three');
+  check(foldAt < preAt && preAt < btnAt,
+        'header, then log, then button');
+  check(/'', 'tail'\)/.test(page),
+        'and the fold body is empty -- the log cannot live inside it');
 }
 
 // ---- `statusLabel`: the word on the chip ----
