@@ -35,9 +35,21 @@ struct Daemon {
 
 impl Drop for Daemon {
     fn drop(&mut self) {
-        // A panicking test must not strand the daemon and its ACL2: kill
-        // whatever is still there and reap it. After a graceful shutdown the
-        // child is already gone and this is a no-op.
+        // A panicking test must not strand the daemon and its ACL2. Close
+        // stdin first: EOF ends the protocol loop, and only an orderly exit
+        // lets the daemon reach `Session::drop` and kill the ACL2 it spawned.
+        // `Child::kill` sends SIGKILL, which the daemon cannot catch, so
+        // killing outright reaps the daemon and orphans its ACL2 grandchild.
+        // After a graceful shutdown the child is already gone and the wait
+        // below returns at once.
+        drop(self.w.take());
+        for _ in 0..50 {
+            if matches!(self.child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        // Whatever would not exit on its own still has to go.
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
