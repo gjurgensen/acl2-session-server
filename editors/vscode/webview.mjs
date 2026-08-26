@@ -1308,6 +1308,16 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   // in pixels here would sit still while the rest of the page moved.
   check(/html\s*\{[^}]*font-size:\s*var\(--vscode-font-size/.test(css),
     'and the text follows the size the reader configured');
+  // Two settings, because there are two kinds of text here. Labels and prose
+  // are workbench text and take the workbench size; terms are the buffer's
+  // own -- a statement, a rune, a checkpoint -- and take the editor's, as
+  // they already take its family. Anchored to the workbench alone they came
+  // out smaller than the buffer they came from, which is the default setting.
+  const codeRule = rule('pre, code');
+  check(codeRule !== null && /var\(--vscode-editor-font-family/.test(codeRule),
+    'terms are set in the editor\u2019s font');
+  check(codeRule !== null && /font-size:\s*var\(--vscode-editor-font-size/.test(codeRule),
+    'and at the editor\u2019s size, so they match the buffer they came from');
   const sizes = [...css.matchAll(/font-size:\s*([^;]+);/g)].map((m) => m[1].trim());
   check(sizes.every((v) => !/^\d+px$/.test(v)),
     `no size is written in pixels (${sizes.filter((v) => /^\d+px$/.test(v))})`);

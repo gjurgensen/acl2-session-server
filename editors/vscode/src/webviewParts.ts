@@ -92,8 +92,14 @@ body { font-family: var(--vscode-font-family); color: var(--vscode-foreground);
 .meta { opacity: 0.7; font-size: 0.92rem; }
 h3 { margin: 14px 0 4px; font-size: 0.85rem; text-transform: uppercase;
      letter-spacing: 0.05em; opacity: 0.75; }
+/* Code takes the editor's size as well as its family. These *are* the
+   buffer's terms -- a statement, a rune, a checkpoint -- and a reader
+   comparing one against the source should not be reading two sizes of the
+   same text. Anchoring them to the workbench size instead left them smaller
+   than the editor for anyone whose editor font is the larger of the two,
+   which is the common setting and the default one. */
 pre, code { font-family: var(--vscode-editor-font-family, monospace);
-           font-size: 0.92rem; }
+           font-size: var(--vscode-editor-font-size, 0.92rem); }
 /* A block of ACL2's own text -- a checkpoint term, the live log, a value --
    in an outlined box. The same box a card uses (same border colour,
    same radius), on purpose: a box is this page's grouping idiom, so a block
