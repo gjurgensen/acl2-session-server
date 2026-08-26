@@ -1345,13 +1345,22 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
     ['.efacts', "the facts line inside a summary"],
     ['.dsum', "a topic's summary inside one"],
         ['.card.bare > .csum', "a card with no chevron at all"],
-    ['details[data-fold]:not(.card) > *:not(summary)', "a nested fold's body"],
+    ['details[data-fold]:not(.card) > *:not(summary):not(.card)',
+     "a nested fold's body"],
   ]) {
     const r = rule(sel);
     check(r !== null, `${what} has a rule`);
     check(r !== null && /var\(--twist\)/.test(r),
       `${what} is derived from it, not written out`);
   }
+
+  // A card is not indented by the fold that holds it. The indent says what a
+  // fold contains; a card says that with its outline, and saying it twice
+  // spends a chevron's width of a narrow pane on nothing -- which the terms
+  // inside the card would rather have.
+  const nested = rule('details[data-fold]:not(.card) > *:not(summary):not(.card)');
+  check(nested !== null && /var\(--twist\)/.test(nested),
+    'a fold indents what it holds, except a card, which is delimited already');
 
   // The other half of the same number: where there is *no* chevron the slot
   // is reserved by the container's padding, so a block inside must not indent

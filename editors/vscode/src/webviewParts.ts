@@ -261,8 +261,16 @@ details.card > summary { padding: 5px 8px; }
 code.xname { background: none; padding: 0; }
 /* And the same for a fold nested inside one: its body lines up under its own
    label, not under its own chevron. \`.cinside\` says this for itself, having a
-   padding on all four sides. */
-details[data-fold]:not(.card) > *:not(summary) { padding-left: var(--twist); }
+   padding on all four sides.
+
+   Not when the body is a card. The indent exists to show what a fold
+   contains, and a card shows that already -- it has an outline. Indenting it
+   as well says the same thing twice and spends a chevron's width of a narrow
+   pane on saying it, which the terms inside would rather have. So a section
+   heading that folds sits flush with the cards it holds. */
+details[data-fold]:not(.card) > *:not(summary):not(.card) {
+  padding-left: var(--twist);
+}
 /* A rule that exists but is off. Blue, not red: a disabled rule is a fact
    worth surfacing -- it is the field most likely to explain a proof that did
    not fire -- but it is a state, not a fault, and red reads as something
