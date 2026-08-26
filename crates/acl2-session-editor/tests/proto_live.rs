@@ -821,6 +821,80 @@ fn hover_answers_while_the_session_is_busy() {
 }
 
 /// What a form introduced, answered while the session is busy proving.
+/// The failing unit's induction reaches the wire.
+///
+/// The path a reader actually takes: a proof fails, the panel opens on it, and
+/// the question is what it inducted on. Asked on the *failing* unit's handle,
+/// which is the one the panel has -- and the case the core tests cover but the
+/// wire did not.
+#[test]
+#[ignore = "needs ACL2"]
+fn a_failing_units_induction_reaches_the_wire() {
+    let Some(acl2) = acl2() else {
+        eprintln!("ACL2 not set; skipping");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("acl2-editord-ind-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let book_path: PathBuf = dir.join("b.lisp");
+    // False for improper lists, so it reverts to induction and fails there --
+    // having first chosen, and recorded, a scheme.
+    let text = "(in-package \"ACL2\")\n\n\
+                (defun w-app (x y) (if (consp x) (cons (car x) (w-app (cdr x) y)) y))\n\n\
+                (defthm w-app-nil (equal (w-app x nil) x))\n";
+    std::fs::write(&book_path, text).expect("write book");
+
+    let mut d = Daemon::start(&acl2);
+    let opened = d.request("open", json!({ "path": book_path.to_str().unwrap() }));
+    let book = opened["book"].as_str().expect("book id").to_string();
+    d.notify("update", json!({ "book": book, "text": text, "revision": 1 }));
+    let events = d.events_until_settled();
+
+    let failed = events
+        .iter()
+        .filter(|(m, _)| m == "unit")
+        .find(|(_, p)| p["outcome"] == "skipped" || p["outcome"] == "failed")
+        .map(|(_, p)| p.clone())
+        .expect("the false theorem fails");
+
+    let ind = d.request(
+        "induction",
+        json!({ "book": book, "output_ref": failed["output_ref"] }),
+    );
+    assert_eq!(ind["supported"], json!(true), "{ind}");
+    let events_out = ind["events"].as_array().expect("events");
+    assert_eq!(events_out.len(), 1, "the one event that inducted: {ind}");
+    assert_eq!(events_out[0]["event"], json!("w-app-nil"), "{ind}");
+    let recs = events_out[0]["inductions"].as_array().expect("inductions");
+    assert_eq!(recs.len(), 1, "{ind}");
+    assert_eq!(recs[0]["goal"], json!("*1"), "{ind}");
+    assert_eq!(recs[0]["suggested"], json!("(w-app x nil)"), "{ind}");
+    assert_eq!(recs[0]["runes"][0], json!("(:induction w-app)"), "{ind}");
+    // Laid out for the pane, and small enough that neither cut fired.
+    assert!(
+        recs[0]["scheme"].as_str().unwrap_or("").contains("(:p x)"),
+        "{ind}"
+    );
+    assert!(recs[0].get("scheme_chars").is_none(), "{ind}");
+    assert!(recs[0].get("scheme_cases").is_none(), "{ind}");
+
+    // The `defun` inducted nothing, and says so rather than erroring.
+    let plain = events
+        .iter()
+        .filter(|(m, _)| m == "unit")
+        .find(|(_, p)| p["index"] == json!(1))
+        .map(|(_, p)| p.clone())
+        .expect("the defun");
+    let none = d.request(
+        "induction",
+        json!({ "book": book, "output_ref": plain["output_ref"] }),
+    );
+    assert_eq!(none["events"].as_array().map(Vec::len), Some(0), "{none}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 ///
 /// The reason the scrape is taken eagerly: a session serialises on one ACL2,
 /// so this question cannot reach the prover during a proof -- and reading

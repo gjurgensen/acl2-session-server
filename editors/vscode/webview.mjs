@@ -917,6 +917,47 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
         'the closed card still says an event inducted, and how often');
 }
 
+// ---- the event that FAILED shows its scheme too ----
+//
+// The regression this exists for: `failureHtml` never draws a card for the
+// failing event -- it leads with the name and spreads the detail across its
+// own sections -- so the fold on `eventHtml` covered every event except the
+// one a reader opens the panel for. A bare failing `defthm` has exactly one
+// event, and it is that one.
+{
+  globalThis.toks = {};
+  const failed = {
+    status: 'failed',
+    checkpoints: [{ goal: 'Subgoal *1/2', term: '(implies (not (consp x)) (not x))' }],
+    rules: ['(:definition d-app)'],
+    abortCause: '(empty-clause)',
+    inner: [
+      { name: 'app-nil-is-identity', kind: 'defthm', abortCauses: '(empty-clause)',
+        inductions: [
+          { goal: '*1', suggested: '(d-app x nil)', runes: ['(:induction d-app)'],
+            pFormula: '(:p x)', scheme: '(and (implies (not (consp x)) (:p x)))' },
+        ] },
+    ],
+  };
+  const h = envelope(failed, 'g-');
+  check(h.includes('Induction (1)'),
+        'a failing form shows what it inducted on');
+  check(h.includes('(d-app x nil)') && h.includes('(:induction d-app)'),
+        'with the suggesting term and the runes behind it');
+  check(h.indexOf('Checkpoints (') < h.indexOf('Induction (') &&
+        h.indexOf('Induction (') < h.indexOf('Rules ('),
+        'directly under the checkpoints, whose *1 names it explains');
+
+  // A form that failed before the prover ran has no scheme and must not
+  // grow an empty section for one.
+  const rejected = {
+    status: 'failed', checkpoints: [], errorLine: 'ACL2 Error [Translate]',
+    inner: [{ name: 'n-bogus', kind: 'defthm' }],
+  };
+  check(!envelope(rejected, 'g-').includes('Induction ('),
+        'and a form that never reached the prover grows no section for one');
+}
+
 // ---- a cut scheme says which cut, because there are two ----
 //
 // A scheme that simply stops reads as a scheme with no base case. The two

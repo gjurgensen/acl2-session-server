@@ -980,6 +980,22 @@ function failureHtml(m, p, on, goals) {
     }
   }
 
+  // Directly under the checkpoints, because it is what explains their names.
+  // A reader looking at \`Subgoal *1/2'\` is looking at the pool this scheme
+  // created; \`*1\` in the record and \`*1\` in the goal name are the same
+  // thing, and without the scheme the numbering is just notation.
+  //
+  // Drawn here and not only on the event card: \`failureHtml\` never draws a
+  // card for the event that failed -- it leads with that event's name and
+  // spreads its detail across the sections below -- so the one event a reader
+  // most wants the scheme for is the one \`eventHtml\` is never called on. The
+  // events that got in *before* the failure keep their cards, and their folds
+  // with them.
+  const failedInd = bad ? (bad.inductions || []) : [];
+  if (failedInd.length) {
+    h += fold(p + 'inducted', true,
+      '<h3>Induction (' + failedInd.length + ')</h3>', inductionHtml(failedInd));
+  }
   if ((m.rules || []).length) {
     h += fold(p + 'rules', true, '<h3>Rules (' + m.rules.length + ')</h3>',
       usedHtml(m.rules));
