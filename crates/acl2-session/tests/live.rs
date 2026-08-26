@@ -2946,6 +2946,10 @@ fn the_kinds_an_event_can_have_are_few() {
         // The one whose kind comes from the *form* rather than the event: its
         // entry records the form as a fmt string, so the head is read there.
         ("(verify-guards zz-g)", vec!["verify-guards"]),
+        // A `thm` proves a goal and introduces nothing, so ACL2 keys its
+        // record under no name at all. It is admissible in a book because it
+        // expands into `make-event`, not because it is a primitive event.
+        ("(thm (equal (zz-f x) x))", vec!["thm"]),
     ];
     forms.extend(noisy.iter().map(|(f, _)| f.to_string()));
     let refs: Vec<&str> = forms.iter().map(String::as_str).collect();
@@ -2975,6 +2979,19 @@ fn the_kinds_an_event_can_have_are_few() {
         o.admitted.iter().flat_map(|u| u.inner.iter().filter_map(|e| e.kind.clone())).collect();
     all.sort();
     all.dedup();
-    assert_eq!(all, ["defthm", "defun", "defuns", "mutual-recursion", "verify-guards"],
+    assert_eq!(all, ["defthm", "defun", "defuns", "mutual-recursion", "thm", "verify-guards"],
                "the kinds these forms can produce");
+
+    // The nameless one. Every other event is keyed under something it wrote;
+    // a `thm` writes nothing, so its record has no name -- and it is kept
+    // anyway, because what it cost and the rules it used are worth showing.
+    let thm = o.admitted.iter().flat_map(|u| u.inner.iter())
+        .find(|e| e.kind.as_deref() == Some("thm"))
+        .expect("the thm event");
+    assert_eq!(thm.name, "", "a thm is recorded under no name");
+    assert!(thm.time.is_some(), "and still says what it cost: {thm:?}");
+    // ...and naming nothing, it is named among the form's names by nothing.
+    let names = o.admitted.iter().find(|u| u.inner.iter().any(|e| e.kind.as_deref() == Some("thm")))
+        .map(|u| u.display_names()).unwrap_or_default();
+    assert!(names.is_empty(), "a thm writes no name: {names:?}");
 }

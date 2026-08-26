@@ -391,7 +391,7 @@ const envelope = lift('esc', 'strip', 'causes', 'spans', 'hl', 'rat',
                       'fmtSecs', 'timeParts', 'proveSecs', 'fmtTime', 'guardNote',
                       'folds', 'foldScope', 'foldScopeIs', 'fold',
                       'factRow', 'nameFacts', 'introducedHtml', 'usedHtml',
-                      'withCode', 'memberHtml', 'eventHtml', 'docCard', 'docsHtml', 'productiveHtml', 'failureHtml', 'warningsHtml',
+                      'withCode', 'TITLE_NAMES', 'cliqueTitle', 'memberHtml', 'eventHtml', 'docCard', 'docsHtml', 'productiveHtml', 'failureHtml', 'warningsHtml',
                       'envelope');
 {
   const fn = {
@@ -980,6 +980,42 @@ const { linkRangeOnLine, hoverMarkdown, bookLabel } = require('./out/names.js');
   // it as though it were the event's.
   check(clique.split('acl2-count').length === 3,
     'the first member is a row, not the card and a row both');
+}
+
+// ---- an event with no name, and a clique with too many ----
+{
+  const one = (e) => envelope({ checkpoints: [], rules: [], inner: [e] }, 'p:');
+
+  // A `thm` proves a goal and introduces nothing, so ACL2 records it under no
+  // name. Its kind carries the line; an empty name chip would be the box that
+  // marks a name, drawn around nothing. What it cost and the rules it used
+  // are the whole of what it has to say, and they are worth saying.
+  const thm = one({ name: '', kind: 'thm', proverSteps: 40,
+                    rules: ['(:rewrite car-cons)'] });
+  check(/>thm</.test(thm), 'a nameless event still says what kind it is');
+  check(!/class="ename"/.test(thm), 'and draws no chip where the name would be');
+  check(/40 steps/.test(thm) && /car-cons/.test(thm), 'and says what it cost and used');
+
+  // Two of them in one form must not share a fold: keyed by name, they would
+  // both key on the empty string and open and close together.
+  const two = envelope({ checkpoints: [], rules: [], inner: [
+    { name: '', kind: 'thm', rules: [] }, { name: '', kind: 'thm', rules: [] },
+  ] }, 'p:');
+  const ids = [...two.matchAll(/data-fold="([^"]*)"/g)].map((m) => m[1]);
+  check(new Set(ids).size === ids.length, 'two nameless events get folds of their own');
+
+  // A clique's title is its members -- but a dozen long names is not a title.
+  // Capped, and the cap says how many it left out, because the rest are rows
+  // of this very card rather than something dropped.
+  const mem = (n) => ({ name: n, runes: [] });
+  const few = one({ name: 'a', kind: 'mutual-recursion', rules: [],
+                    members: ['a', 'b', 'c', 'd'].map(mem) });
+  check(/a, b, c, d/.test(few), 'a short clique lists every name');
+  const many = one({ name: 'a', kind: 'mutual-recursion', rules: [],
+                     members: ['a', 'b', 'c', 'd', 'e', 'f'].map(mem) });
+  check(/a, b, c/.test(many) && !/a, b, c, d/.test(many), 'a long one lists the first few');
+  check(/\+3 more/.test(many), 'and says how many it did not');
+  check(/>f</.test(many), 'the ones it did not name are still rows of the card');
 }
 
 // ---- an event that did not define the name shows none of its record ----

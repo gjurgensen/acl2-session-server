@@ -301,7 +301,16 @@ pub(super) fn parse_inner(sub: &crate::session::Submission) -> (Vec<InnerEvent>,
     // than three events, and a list of three that looks complete is worse than
     // a long one: the reporter found two of a clique's own functions in the
     // world and absent from this list, with nothing to say it was truncated.
-    let names = items(&pairs, "iname");
+    // Positional, `nil` kept as an empty name rather than dropped. Two
+    // reasons, and the second is a bug the first would have hidden. ACL2 keys
+    // `event-data-fal` by name and a `thm` has none -- `event-data-name`
+    // returns nil for it, deliberately, since a `thm` introduces nothing to
+    // name -- so dropping nils dropped every `thm` outright, along with what
+    // it cost and the rules it used. And the per-event fields below are
+    // *positional*: an entry dropped here shifted every field after it onto
+    // the wrong event.
+    let names: Vec<String> =
+        items_positional(&pairs, "iname").into_iter().map(Option::unwrap_or_default).collect();
     // Members of any recursion clique these events belong to, flat and
     // unordered. ACL2 records a `mutual-recursion` as *one* event, so the
     // other members are nowhere in `iname`; asking the world for

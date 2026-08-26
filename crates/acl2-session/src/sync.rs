@@ -285,6 +285,13 @@ impl EventData {
 /// no abort cause for it. These fill that in per inner event.
 #[derive(Debug, Clone)]
 pub struct InnerEvent {
+    /// The name ACL2 keyed this event under, or empty where it has none.
+    ///
+    /// A `thm` is the nameless case, and the only one: it proves a goal and
+    /// introduces nothing, so `event-data-name` returns nil for it. Empty
+    /// rather than absent because every other field here is positional
+    /// against it -- and because "this event has no name" is a thing to show,
+    /// not a reason to drop what it cost.
     pub name: String,
     /// Non-empty when this is the inner event that failed -- and only then.
     /// `revert`/`maybe-revert` are filtered out by [`failure_causes`] before
@@ -464,7 +471,11 @@ impl UnitReport {
         // they are names of this form too -- just ones the event data never
         // mentions.
         let mut recorded: Vec<&str> = Vec::new();
-        for name in self.inner.iter().rev().map(|e| &e.name).chain(self.clique.iter()) {
+        // A nameless event -- a `thm` -- writes nothing, so it names nothing.
+        for name in self.inner.iter().rev().map(|e| &e.name)
+            .filter(|n| !n.is_empty())
+            .chain(self.clique.iter())
+        {
             if !recorded.contains(&name.as_str()) {
                 recorded.push(name);
             }

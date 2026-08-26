@@ -521,6 +521,23 @@ function usedHtml(rules) {
     '</ul>';
 }
 
+/** How many of a clique's names fit on its title line before the count. */
+const TITLE_NAMES = 3;
+
+/**
+ * A clique event's title: its members, or enough of them.
+ *
+ * The whole list when it is short enough to read. Otherwise the first few and
+ * how many more there are -- the order is the source's, so the first few are
+ * the ones written first. Never a bare truncation: a reader who cannot tell a
+ * list ended early will take it for the whole clique.
+ */
+function cliqueTitle(names) {
+  if (names.length <= TITLE_NAMES + 1) { return names.map(esc).join(', '); }
+  const shown = names.slice(0, TITLE_NAMES).map(esc).join(', ');
+  return shown + '<span class="meta"> +' + (names.length - TITLE_NAMES) + ' more</span>';
+}
+
 /**
  * One function of a recursion clique, as a block inside its event's.
  *
@@ -574,7 +591,7 @@ function memberHtml(d, p) {
  * what its proof consumed to get admitted. A defun that writes four rules
  * and uses one is the case that makes it plain.
  */
-function eventHtml(e, p, openByDefault) {
+function eventHtml(e, p, openByDefault, at) {
   // What the name's own record says, where this event is the one that made
   // the record. \`verify-guards\` is not: it proves a guard obligation about a
   // function some earlier event defined, and the record it looks up under
@@ -589,6 +606,13 @@ function eventHtml(e, p, openByDefault) {
   // event's own name is not this card's to show.
   const d = (/^verify-guards\+?$/i.test(e.kind || '') || members.length)
     ? undefined : e.detail;
+  // A \`thm\` has no name -- it proves a goal and introduces nothing, so ACL2
+  // keys its record under none. Its kind carries the line on its own; an
+  // empty \`code\` would draw the chip that marks a name with no name in it.
+  // Its fold is keyed by where it sits, there being nothing else to key it
+  // by, which is why every *named* event still keys by its name.
+  const key = e.name || (e.kind || 'ev') + '@' + at;
+
   // A probed event has *something* -- kind, time, rules. Saying "no steps"
   // where the probe never reached is a claim we cannot make, so a blank cell
   // keeps meaning "not looked at".
@@ -618,7 +642,7 @@ function eventHtml(e, p, openByDefault) {
   // facts line above already says "N rules, M off", and each disabled rule
   // carries its badge once the fold is open. (No backticks: template literal.)
   if (runes.length) {
-    body += fold(p + 'ev:' + e.name + ':introduced', true,
+    body += fold(p + 'ev:' + key + ':introduced', true,
       '<span class="meta">introduced (' + runes.length + ')</span>',
       introducedHtml(d));
   }
@@ -626,9 +650,9 @@ function eventHtml(e, p, openByDefault) {
   // as a single event keyed under its first definition, so without this a
   // \`mutual-recursion\` read as though it had defined that one function and
   // written only its rules -- the others' rules appeared nowhere at all.
-  body += members.map((mem) => memberHtml(mem, p + 'ev:' + e.name + ':')).join('');
+  body += members.map((mem) => memberHtml(mem, p + 'ev:' + key + ':')).join('');
   if (used.length) {
-    body += fold(p + 'ev:' + e.name + ':used', false,
+    body += fold(p + 'ev:' + key + ':used', false,
       '<span class="meta">used (' + used.length + ')</span>',
       usedHtml(used));
   }
@@ -651,7 +675,7 @@ function eventHtml(e, p, openByDefault) {
     const head = '<span class="meta">documentation</span>' +
       (d.short ? '<div class="dsum">' + withCode(d.short, d.shortCode) + '</div>' : '');
     body = (d.long
-      ? fold(p + 'ev:' + e.name + ':documentation', false, head,
+      ? fold(p + 'ev:' + key + ':documentation', false, head,
              '<div class="dinside doclong">' + withCode(d.long, d.longCode) + '</div>',
              'docfold')
       // Nothing to open: a chevron onto nothing is worse than no chevron.
@@ -663,14 +687,17 @@ function eventHtml(e, p, openByDefault) {
   // macro-generated one there is nothing in the buffer to read it off.
   // A clique event is keyed under its first definition, but it admitted all
   // of them, and naming one of the several reads as though the form defined
-  // that one. Every member, so the collapsed card says what the form did --
-  // uncapped, because a clique of ten is ten functions and a list that
-  // stopped at three would look complete.
+  // that one. So the title is the members -- but a clique can be a dozen
+  // functions with long names, and a title that wraps to four lines is not a
+  // title. Capped, and the cap says what it left out: the rest are rows of
+  // this very card, a chevron away, so nothing is lost by not listing them
+  // here. That is what makes a cap honest where a silent truncation would
+  // not be.
   const title = members.length
-    ? members.map((mem) => esc(mem.name)).join(', ')
+    ? cliqueTitle(members.map((mem) => mem.name))
     : esc(e.name);
   const head = '<span class="ekind">' + esc(e.kind || '') + '</span>' +
-    '<code class="ename">' + title + '</code>' +
+    (title ? '<code class="ename">' + title + '</code>' : '') +
     (d && d.formals ? ' <code class="lisp">' + hl(d.formals) + '</code>' : '') +
     causes(e.abortCauses || '')
       .map((c) => ' <span class="failtag">' + esc(c) + '</span>').join('') +
@@ -679,7 +706,7 @@ function eventHtml(e, p, openByDefault) {
   // An event with nothing under it gets no fold: a chevron that opens onto
   // nothing is worse than no chevron.
   return body
-    ? fold(p + 'ev:' + e.name, openByDefault, head,
+    ? fold(p + 'ev:' + key, openByDefault, head,
            '<div class="einside">' + body + '</div>', 'event')
     : '<div class="event bare"><div class="esum">' + head + '</div></div>';
 }
@@ -783,7 +810,7 @@ function productiveHtml(m, p) {
   const limit = m.eventsOpenLimit != null ? m.eventsOpenLimit : 4;
   const openByDefault = inner.length <= limit;
   let h = head + '<h3>Events (' + total + ')</h3>';
-  h += inner.map((e) => eventHtml(e, p, openByDefault)).join('');
+  h += inner.map((e, i) => eventHtml(e, p, openByDefault, i)).join('');
   h += docsHtml(m, p);
   const detailed = inner.filter(
     (e) => e.kind || e.time || e.proverSteps != null || (e.rules || []).length || e.detail
@@ -884,7 +911,7 @@ function failureHtml(m, p, on, goals) {
   if (before.length) {
     h += fold(p + 'before', false,
       '<h3>Admitted before the failure (' + before.length + ')</h3>',
-      before.map((e) => eventHtml(e, p, false)).join(''));
+      before.map((e, i) => eventHtml(e, p, false, i)).join(''));
   }
   return h;
 }
