@@ -717,6 +717,21 @@ pub(super) fn inner_names(sub: &crate::session::Submission) -> Vec<String> {
 /// Must run *before* the `deflabel`: `get-event-data` describes the
 /// immediately preceding event, and planting a label first would make it
 /// describe the label.
+///
+/// Every `~*` argument is `true-list-fix`ed, for the reason
+/// [`inner_events_probe`] fixes the same four fields per event: this probe is
+/// spliced into the user's own submission, so anything that aborts it fails
+/// *their* form. `~*` on an improper list or an atom is not a soft error but
+/// a hard one -- "Illegal Fmt Syntax" from `fmt0`, measured, which under
+/// `:ld-error-action :return!` takes the `ld` down before the completion
+/// marker and reports an admitted form as Rejected.
+///
+/// ACL2's own writers make all four proper lists (`merge-sort-runes`,
+/// `make-rune-like-objs`, `pop-warning-frame`), so this defends against a
+/// future ACL2 rather than a present one -- which is precisely the assumption
+/// the xdoc guard below used to encode, and the reason it was wrong. Unlike
+/// `ld-history`, `last-event-data` is not untouchable: `CLEAR_STALE` writes
+/// it, so a book can too.
 pub(super) const EVENT_DATA_PROBE: &str = r#"(acl2::prog2$
   (acl2::cw "~%<<<PROBE-BEGIN evd>>>~%steps ~x0~%time ~x1~%"
     (acl2::get-event-data 'acl2::prover-steps-counted acl2::state)
@@ -724,19 +739,19 @@ pub(super) const EVENT_DATA_PROBE: &str = r#"(acl2::prog2$
   (acl2::prog2$
     (acl2::cw "~*0"
       (acl2::list "" "warning ~x*~%" "warning ~x*~%" "warning ~x*~%"
-        (acl2::get-event-data 'acl2::warnings acl2::state)))
+        (acl2::true-list-fix (acl2::get-event-data 'acl2::warnings acl2::state))))
   (acl2::prog2$
     (acl2::cw "~*0"
       (acl2::list "" "rule ~x*~%" "rule ~x*~%" "rule ~x*~%"
-        (acl2::get-event-data 'acl2::rules acl2::state)))
+        (acl2::true-list-fix (acl2::get-event-data 'acl2::rules acl2::state))))
     (acl2::prog2$
       (acl2::cw "~*0"
         (acl2::list "" "hint ~x*~%" "hint ~x*~%" "hint ~x*~%"
-          (acl2::get-event-data 'acl2::hint-events acl2::state)))
+          (acl2::true-list-fix (acl2::get-event-data 'acl2::hint-events acl2::state))))
       (acl2::prog2$
         (acl2::cw "~*0"
           (acl2::list "" "splitter ~x*~%" "splitter ~x*~%" "splitter ~x*~%"
-            (acl2::get-event-data 'acl2::splitter-rules acl2::state)))
+            (acl2::true-list-fix (acl2::get-event-data 'acl2::splitter-rules acl2::state))))
         (acl2::prog2$
           (acl2::cw "xdoc ~x0~%"
             (acl2::if (acl2::find-non-hidden-package-entry "XDOC"
