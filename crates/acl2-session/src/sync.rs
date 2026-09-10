@@ -239,6 +239,18 @@ pub struct EventData {
     /// both symbols are interned from strings at runtime behind a guard on
     /// `known-package-alist`. That is what lets this ride along on the probe
     /// every form already pays for, instead of needing one of its own.
+    ///
+    /// The guard is `find-non-hidden-package-entry`, not a plain `assoc`, and
+    /// the difference is a whole class of false failures. An `encapsulate`
+    /// whose second pass drops a `local` `include-book` that had introduced
+    /// XDOC does not forget the package: `encapsulate-fix-known-package-alist`
+    /// keeps the entry and marks it *hidden*. A plain `assoc` still finds it,
+    /// `intern$` does not accept it -- `pkg-imports` tests exactly the
+    /// non-hidden predicate used here -- and the guard violation failed the
+    /// unit the probe was spliced into. Measured: `(encapsulate () (local
+    /// (include-book "arithmetic/top" :dir :system)) (defthm ...))`, admitted
+    /// by ACL2 with a `Q.E.D.`, reported Rejected. Asking ACL2's own question
+    /// is what keeps the two from drifting apart again.
     pub xdoc_topics: Option<usize>,
     /// `(prove print proof-tree other)`, in seconds.
     pub time: Option<String>,

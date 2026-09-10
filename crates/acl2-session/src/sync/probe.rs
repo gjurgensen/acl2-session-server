@@ -739,7 +739,8 @@ pub(super) const EVENT_DATA_PROBE: &str = r#"(acl2::prog2$
             (acl2::get-event-data 'acl2::splitter-rules acl2::state)))
         (acl2::prog2$
           (acl2::cw "xdoc ~x0~%"
-            (acl2::if (acl2::assoc-equal "XDOC" (acl2::known-package-alist acl2::state))
+            (acl2::if (acl2::find-non-hidden-package-entry "XDOC"
+                        (acl2::known-package-alist acl2::state))
               (acl2::len
                 (acl2::cdr (acl2::assoc-eq (acl2::intern$ "DOC" "XDOC")
                   (acl2::table-alist (acl2::intern$ "XDOC" "XDOC") (acl2::w acl2::state)))))

@@ -3136,9 +3136,14 @@ fn a_slow_probe_is_discarded_rather_than_reported_as_an_eval() {
 /// The probe names no package. `xdoc::` in a world without XDOC is a **read**
 /// error that aborts from raw Lisp and takes the rest of the submission with
 /// it -- so the table's name and key are interned from strings at runtime,
-/// behind a guard on `known-package-alist`. That is what lets this ride along
-/// on the probe every form already pays for rather than needing one of its
-/// own, and it is why the first form here is in a bare world on purpose.
+/// behind a guard for a *non-hidden* entry in `known-package-alist`. That is
+/// what lets this ride along on the probe every form already pays for rather
+/// than needing one of its own, and it is why the first form here is in a
+/// bare world on purpose.
+///
+/// Non-hidden and not merely present, because a package can be both:
+/// `an_encapsulate_that_hides_a_package_is_still_admitted` is that case, and
+/// is where the guard is pinned.
 #[test]
 #[ignore = "needs ACL2"]
 fn documented_forms_are_told_apart_from_undocumented_ones() {
@@ -3188,6 +3193,56 @@ fn documented_forms_are_told_apart_from_undocumented_ones() {
     assert!(o.rolled_back > 0, "the last form went away");
     let after = b.sync(None, D).expect("settle");
     let _ = after;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An `encapsulate` whose `local` `include-book` introduced a package is
+/// admitted, not reported as a failure.
+///
+/// The pattern is ordinary -- pull a library in for the proof, export only
+/// the theorem -- and it certified fine while the session called it Rejected,
+/// under a log that ended on the form's own `Q.E.D.` summary.
+///
+/// The cause was the xdoc count riding along on the event-data probe. ACL2
+/// does not forget a package whose `defpkg` the encapsulate's second pass
+/// discarded: `encapsulate-fix-known-package-alist` keeps the entry and marks
+/// it *hidden*. A guard that asked `assoc` still found XDOC, `intern$`
+/// refused it -- `pkg-imports` tests the non-hidden predicate -- and the
+/// guard violation aborted the `ld` before its completion marker, which is
+/// the session's whole failure signal. So a probe took down the form it was
+/// measuring.
+///
+/// `xdoc/top` locally rather than a book that merely pulls it in
+/// transitively: the point is to name the package the probe interns.
+///
+/// The second form is the other half. The `known-package-alist` is world
+/// state, so a hidden entry outlives the form that hid it -- every later unit
+/// in the file failed the same way, which is why one bad `encapsulate` took
+/// the rest of the book with it.
+#[test]
+#[ignore = "needs ACL2"]
+fn an_encapsulate_that_hides_a_package_is_still_admitted() {
+    let acl2 = acl2_or_skip!();
+    let dir = scratch("hidden-pkg");
+    let book = dir.join("hidden.lisp");
+    write(&book, &[
+        "(in-package \"ACL2\")",
+        "(encapsulate ()\n  (local (include-book \"xdoc/top\" :dir :system))\n  \
+         (defthm hidden-pkg-thm (equal (append nil x) x)))",
+        "(defun after-the-encapsulate (x) x)",
+    ]);
+    let mut b = Book::open(&acl2, &book).expect("open");
+    let o = b.sync(None, D).expect("sync");
+
+    assert!(o.failed.is_none(), "ACL2 admitted it: {:?}", o.failed.map(|f| f.error_line));
+    assert_eq!(o.admitted.len(), 3, "all three forms");
+
+    // And the count still answers, with the honest number: the encapsulate
+    // discarded the xdoc table along with the book that brought it, so this
+    // world documents nothing.
+    let n: Vec<Option<usize>> = o.admitted.iter().map(|u| u.event_data.xdoc_topics).collect();
+    assert_eq!(n, vec![Some(0), Some(0), Some(0)], "zero, not silence: {n:?}");
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 

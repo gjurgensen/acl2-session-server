@@ -1323,7 +1323,7 @@ pub(crate) fn display_of(raw: &str) -> String {
     // anything, which is precisely the behaviour a finished capture gets. So
     // the live read now does exactly what the finished one does, and the only
     // thing left to handle is the prompt at the very end.
-    let mut out = strip_sentinels(raw).0;
+    let mut out = strip_capture(raw, false).0;
     let tail = out.rfind('\n').map_or(0, |i| i + 1);
     if is_prompt_fragment(&out[tail..]) {
         out.truncate(tail);
@@ -1358,6 +1358,17 @@ fn is_prompt_fragment(line: &str) -> bool {
 /// the prompt is never used to decide anything (P2); it is just noise at the
 /// front of otherwise clean output.
 fn strip_sentinels(s: &str) -> Stripped {
+    strip_capture(s, true)
+}
+
+/// The worker, told whether the capture is complete.
+///
+/// A finished capture is one whose submission has reported: consumption cut
+/// it at its DONE marker, so every probe that was going to print has printed.
+/// A live read is the same stream mid-write. The distinction decides exactly
+/// one thing -- what becomes of a block left open at the end -- and the two
+/// answers are opposites, so it cannot be papered over with a single rule.
+fn strip_capture(s: &str, finished: bool) -> Stripped {
     let mut data = Vec::new();
     let mut blocks: Vec<(String, String)> = Vec::new();
     let mut kept: Vec<&str> = Vec::new();
@@ -1425,6 +1436,22 @@ fn strip_sentinels(s: &str) -> Stripped {
             }
         }
         kept.push(l);
+    }
+    // A block left open at the end of a *finished* capture is a probe that
+    // died partway through, and what it collected is then not probe data at
+    // all but ACL2's own error text, printed where the rest of the block
+    // should have been. Swallowing it hid the one thing that explained the
+    // failure: a unit whose `ld` aborted inside a probe reported no error
+    // line and a log that ended, mid-success, on the form's own summary.
+    // Give those lines back to the display; no block is recorded, since a
+    // half-collected one has no parseable shape.
+    //
+    // Never on a live read, where the same open block means the opposite: the
+    // probes are printing right now and will close it in a moment. Flushing
+    // there would show a reader scaffolding that vanishes as they watch,
+    // which is the divergence `display_of` exists to prevent.
+    if finished && let Some((_, body)) = open.take() {
+        kept.extend(body);
     }
     // Strip leading newlines *first*: with them attached, the "is the prompt
     // on the first line?" test below counts an empty leading line and never
@@ -1533,22 +1560,28 @@ mod capture_tests {
         assert_eq!(blocks, vec![("a".to_string(), "body\nmore".to_string())]);
     }
 
-    /// The path the review called out, pinned rather than fixed.
+    /// A block that never closes is a probe that died, and what it printed
+    /// before dying is ACL2's, not ours.
     ///
-    /// A block that never closes swallows everything after its `BEGIN`: those
-    /// lines sit in the pending body and are dropped when the loop ends. That
-    /// is the right outcome and not an oversight -- the probes are emitted
-    /// *after* the user's form has printed, so what is swallowed is our
-    /// scaffolding, and showing half a probe block would be strictly worse
-    /// than showing none. Everything the form itself printed is above the
-    /// `BEGIN` and survives.
+    /// This used to swallow those lines, on the reasoning that a half-printed
+    /// probe block is scaffolding a reader is better off not seeing. That
+    /// holds for a form interrupted mid-probe, and it is exactly wrong for a
+    /// probe that *errored*: ACL2 prints the error where the rest of the
+    /// block should have been, so the one line explaining the failure was the
+    /// one line guaranteed to be dropped. Measured: a guard violation in the
+    /// event-data probe left a unit reporting no error and a log that ended,
+    /// mid-success, on the form's own `Q.E.D.` summary.
     ///
-    /// It reaches a reader through `display_of`, on a form interrupted or
-    /// timed out mid-probe.
+    /// So on a finished capture the lines come back to the display, and no
+    /// block is recorded -- half a block still has no parseable shape. The
+    /// live half keeps the old answer, for the old reason:
+    /// `a_live_read_mid_probe_shows_no_scaffolding` pins it.
     #[test]
-    fn an_unterminated_block_swallows_itself_and_nothing_above_it() {
-        let (text, _, blocks) = strip_sentinels("the form's output\n<<<PROBE-BEGIN evd>>>\ncut off here");
-        assert_eq!(text, "the form's output");
+    fn an_unterminated_block_gives_its_lines_back_to_the_display() {
+        let (text, _, blocks) = strip_sentinels(
+            "the form's output\n<<<PROBE-BEGIN evd>>>\nsteps nil\nACL2 Error [Evaluation]: ...",
+        );
+        assert_eq!(text, "the form's output\nsteps nil\nACL2 Error [Evaluation]: ...");
         assert!(blocks.is_empty(), "half a block is no block");
     }
 
