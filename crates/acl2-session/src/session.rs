@@ -154,6 +154,35 @@ struct Shared {
 const TAIL_WINDOW_LINES: usize = 4000;
 const TAIL_WINDOW_BYTES: usize = 512 * 1024;
 
+/// The completion sentinel for generation `genid`, and a form that prints it.
+///
+/// **The form must not contain the marker.** It is written down the pty, and
+/// a pty echoes its input unless told not to -- and "told not to" is one
+/// hangup away from being undone: when a session leader exits, the kernel
+/// hangs up its controlling terminal, and the pty driver carries
+/// `TTY_DRIVER_RESET_TERMIOS`, so the slave's termios go back to defaults with
+/// echo on. A wrapper script that dies on startup is that session leader.
+/// Whether a later write to the master is still echoed after the hangup turned
+/// out to differ by kernel: on 6.8 it is not; on the 6.17 that GitHub's runners
+/// carry it is -- and there, with the marker spelled out in the input, the
+/// handshake's own echo satisfied the handshake. `Book::open` then succeeded
+/// on an image that had already exited, which is precisely the false
+/// diagnosis the startup check exists to prevent. Measured on CI, and
+/// reproduced locally by leaving echo on.
+///
+/// So the marker is assembled by ACL2 rather than spelled by us: `~s0` splices
+/// `"DONE"` in at print time, and the bytes `<<<PROBE-DONE` reach the stream
+/// only once ACL2 has actually run the form. Echo, whatever its state, can then
+/// never forge completion -- which is what P2 says a sentinel is for. (`PROBE-OK`
+/// needs no such care: it goes into the temp file `ld` reads, and a file is not
+/// echoed.)
+fn done_sentinel(genid: u64) -> (String, String) {
+    let marker = format!("<<<PROBE-DONE {genid}>>>");
+    let print = format!("(acl2::cw \"~%<<<PROBE-~s0 {genid}>>>~%\" \"DONE\")");
+    debug_assert!(!print.contains(&marker));
+    (marker, print)
+}
+
 /// Why a wait ended.
 enum WaitEnd {
     /// The marker is in the stream; the payload is the absolute offset just
@@ -816,11 +845,8 @@ impl Session {
     fn handshake(&mut self, deadline: Duration) -> io::Result<bool> {
         self.generation += 1;
         let genid = self.generation;
-        let done = format!("<<<PROBE-DONE {genid}>>>");
-        let line = format!(
-            "(acl2::prog2$ (acl2::cw \"~%<<<PROBE-DONE {genid}>>>~%\") \
-             (acl2::value :invisible))\n"
-        );
+        let (done, print_done) = done_sentinel(genid);
+        let line = format!("(acl2::prog2$ {print_done} (acl2::value :invisible))\n");
         self.write_all(line.as_bytes())?;
         let from = self.control.consumed_offset();
         match self.control.wait_for_marker(done.as_bytes(), from, deadline) {
@@ -946,9 +972,9 @@ impl Session {
                (acl2::ld \"{}\" :ld-error-action :return! \
                           :ld-verbose acl2::nil :ld-prompt acl2::nil) \
                (acl2::declare (acl2::ignore acl2::erp acl2::val)) \
-               (acl2::prog2$ (acl2::cw \"~%<<<PROBE-DONE {genid}>>>~%\") \
-                             (acl2::value :invisible)))\n",
-            lisp_string(&path.display().to_string())
+               (acl2::prog2$ {print_done} (acl2::value :invisible)))\n",
+            lisp_string(&path.display().to_string()),
+            print_done = done_sentinel(genid).1,
         );
         self.control.begin();
         if let Err(e) = self.write_all(line.as_bytes()) {
@@ -984,8 +1010,8 @@ impl Session {
         // The completion sentinel is fully qualified, so it reads correctly
         // in whatever package the submitted form just switched to.
         let line = format!(
-            "{form}\n(acl2::prog2$ (acl2::cw \"~%<<<PROBE-DONE {genid}>>>~%\") \
-             (acl2::value :invisible))\n"
+            "{form}\n(acl2::prog2$ {print_done} (acl2::value :invisible))\n",
+            print_done = done_sentinel(genid).1,
         );
         self.control.begin();
         if let Err(e) = self.write_all(line.as_bytes()) {
@@ -1013,7 +1039,7 @@ impl Session {
         let Some(InFlight { generation: genid, started, raw }) = self.inflight else {
             return Err(io::Error::other("nothing in flight"));
         };
-        let done = format!("<<<PROBE-DONE {genid}>>>");
+        let done = done_sentinel(genid).0;
         let from = self.control.consumed_offset();
         let end = match self.control.wait_for_marker(done.as_bytes(), from, deadline) {
             WaitEnd::Found(end) => end,
@@ -1664,6 +1690,29 @@ mod capture_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The sentinel must never be spelled out in what we write, or an echo of
+    /// our own input satisfies the wait. The bytes it protects against are
+    /// exactly the marker, so this is the property stated directly, over the
+    /// whole generation range the counter can reach in practice.
+    #[test]
+    fn the_written_form_never_contains_the_marker_it_prints() {
+        for genid in [0u64, 1, 7, 42, 999, 123_456_789] {
+            let (marker, print) = done_sentinel(genid);
+            assert_eq!(marker, format!("<<<PROBE-DONE {genid}>>>"));
+            assert!(
+                !print.contains(&marker),
+                "gen {genid}: the form {print:?} spells out its own marker {marker:?}, \
+                 so a pty echo would forge completion"
+            );
+            // And not merely split by the generation: the tag itself is what
+            // `find_bytes` anchors on, and it must be absent too.
+            assert!(!print.contains("<<<PROBE-DONE"), "{print}");
+            // What ACL2 prints, once it has run the form, is the marker.
+            assert!(print.contains("~s0") && print.contains("\"DONE\""), "{print}");
+        }
+    }
+
 
     /// Whether a pid is still signalable. Reaped children are not, so this
     /// distinguishes "killed and waited for" from "still resident".
