@@ -5,7 +5,7 @@
 # tests that drive the built servers over stdio -- need a real saved_acl2
 # image and stay local:
 #
-#   ACL2=/path/to/saved_acl2 cargo test -- --ignored --test-threads=1
+#   ACL2=/path/to/saved_acl2 cargo test -- --include-ignored
 #
 # (Two more, in `corpus.rs`, want `ACL2_BOOKS` rather than an image.)
 #
@@ -56,7 +56,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          # 22, not 20: `.npmrc` sets `engine-strict`, and `@vscode/vsce`'s tree
+          # wants 22 (an `@azure/*` package on its publishing path). npm then
+          # refuses to install on anything older -- by design, see INSTALL.md
+          # -- so CI has to clear the same bar a developer does.
+          node-version: '22'
           cache: npm
           cache-dependency-path: editors/vscode/package-lock.json
       - name: Install exactly what the lockfile says
