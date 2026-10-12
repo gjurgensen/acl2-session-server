@@ -35,12 +35,11 @@ const require = createRequire(import.meta.url);
 const { reindent, reindentRange, topLevelStarts, insideOpaque, plannedIndent, enclosingStart } =
   require('./out/indent.js');
 
-// `ACL2_BOOKS`, the same spelling `source-grammar.mjs` reads, then a
-// placeholder as the last resort. Without the env var a fresh clone
-// degraded silently to the unit cases with no hint that a corpus was even
-// wanted, and the score this harness exists to produce simply did not appear.
-const BOOKS = process.env.ACL2_BOOKS ?? '/path/to/acl2/books';
-const DEFAULT = [join(BOOKS, 'kestrel/c/syntax'), join(BOOKS, 'kestrel/fty')];
+// `ACL2_BOOKS`, the same spelling `source-grammar.mjs` reads. Without it there
+// is no corpus, and the run says so rather than quietly scoring the unit cases
+// alone -- the number this harness exists to produce would simply not appear.
+const BOOKS = process.env.ACL2_BOOKS;
+const DEFAULT = BOOKS ? [join(BOOKS, 'kestrel/c/syntax'), join(BOOKS, 'kestrel/fty')] : [];
 
 function lispFiles(p) {
   const s = statSync(p, { throwIfNoEntry: false });
@@ -425,7 +424,7 @@ two")
 
 const targets = (process.argv.slice(2).length ? process.argv.slice(2) : DEFAULT).flatMap(lispFiles);
 if (!targets.length) {
-  console.log(`\nno corpus at ${BOOKS} -- unit cases only (pass a path or set ACL2_BOOKS)`);
+  console.log(`\nno corpus${BOOKS ? ` at ${BOOKS}` : ''} -- unit cases only (pass a path or set ACL2_BOOKS)`);
   process.exit(unitBad ? 1 : 0);
 }
 
@@ -524,7 +523,7 @@ for (const path of targets) {
 perFile.sort((p, q) => p[0] - q[0]);
 console.log('\nworst files:');
 for (const [rate, n, ms, path] of perFile.slice(0, 10)) {
-  console.log(`  ${(rate * 100).toFixed(1)}%  ${String(n).padStart(6)} lines  ${String(ms).padStart(5)}ms  ${path.replace(BOOKS + '/', '')}`);
+  console.log(`  ${(rate * 100).toFixed(1)}%  ${String(n).padStart(6)} lines  ${String(ms).padStart(5)}ms  ${BOOKS ? path.replace(BOOKS + '/', '') : path}`);
 }
 
 const top = [...disagreements].sort((p, q) => q[1] - p[1]).slice(0, 15);

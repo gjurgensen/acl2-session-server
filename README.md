@@ -3,6 +3,10 @@
 A file-anchored, structured interface to a live ACL2 session — for agents (over
 MCP) and for people (in VSCode).
 
+**Status:** early. Everything is at version 0.0.1, and both front-ends' wire
+formats may still change. It runs on Linux and macOS; Windows is not
+supported, since a session drives ACL2 through a pseudo-terminal.
+
 ## Overview
 
 `acl2-session` is a library for maintaining ACL2 sessions synced against
@@ -74,3 +78,9 @@ cargo build
 ```
 
 That syncs a book and prints the structured report for each top-level form.
+
+## License
+
+BSD 3-Clause; see [LICENSE](LICENSE). Copyright Kestrel Institute.
+
+Author: Grant Jurgensen (grant@kestrel.edu)

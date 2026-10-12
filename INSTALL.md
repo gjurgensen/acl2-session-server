@@ -12,6 +12,9 @@ neither, and is the shortest way to see whether this works on your machine.
 
 ## Prerequisites
 
+**Linux or macOS.** Windows is not supported: a session drives ACL2 through a
+pseudo-terminal.
+
 **An ACL2 image** — a `saved_acl2` from a built checkout, **version 8.7 or
 later**. This is a hard floor rather than a recommendation: the library reads
 system internals, and the rule scrape needs a function 8.7 introduced. On an
